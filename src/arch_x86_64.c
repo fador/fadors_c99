@@ -7,12 +7,70 @@ static FILE *out;
 static int label_count = 0;
 static CodegenSyntax current_syntax = SYNTAX_ATT;
 
+static void gen_function(ASTNode *node);
+static void gen_statement(ASTNode *node);
+
+typedef enum {
+    OP_REG,
+    OP_IMM,
+    OP_MEM,
+    OP_LABEL
+} OperandType;
+
+typedef struct {
+    OperandType type;
+    union {
+        const char *reg;
+        int imm;
+        struct {
+            const char *base;
+            int offset;
+        } mem;
+        const char *label;
+    } data;
+} Operand;
+
+static void emit_label_def(const char *name) {
+    if (current_syntax == SYNTAX_INTEL && name[0] == '.') {
+        fprintf(out, "%s:\n", name + 1);
+    } else {
+        fprintf(out, "%s:\n", name);
+    }
+}
+
+static Operand op_label(const char *label) {
+    Operand op; 
+    op.type = OP_LABEL; 
+    if (current_syntax == SYNTAX_INTEL && label[0] == '.') {
+        op.data.label = label + 1;
+    } else {
+        op.data.label = label; 
+    }
+    return op;
+}
+
 void arch_x86_64_init(FILE *output) {
     out = output;
+    if (current_syntax == SYNTAX_INTEL) {
+        fprintf(out, "_TEXT SEGMENT\n");
+    }
 }
 
 void arch_x86_64_set_syntax(CodegenSyntax syntax) {
     current_syntax = syntax;
+}
+
+void arch_x86_64_generate(ASTNode *program) {
+    for (size_t i = 0; i < program->children_count; i++) {
+        ASTNode *child = program->children[i];
+        if (child->type == AST_FUNCTION) {
+            gen_function(child);
+        }
+    }
+    if (current_syntax == SYNTAX_INTEL) {
+        fprintf(out, "_TEXT ENDS\n");
+        fprintf(out, "END\n");
+    }
 }
 
 typedef struct {
@@ -43,25 +101,6 @@ static Type *get_local_type(const char *name) {
     return NULL;
 }
 
-typedef enum {
-    OP_REG,
-    OP_IMM,
-    OP_MEM,
-    OP_LABEL
-} OperandType;
-
-typedef struct {
-    OperandType type;
-    union {
-        const char *reg;
-        int imm;
-        struct {
-            const char *base;
-            int offset;
-        } mem;
-        const char *label;
-    } data;
-} Operand;
 
 static Operand op_reg(const char *reg) {
     Operand op; op.type = OP_REG; op.data.reg = reg; return op;
@@ -75,9 +114,6 @@ static Operand op_mem(const char *base, int offset) {
     Operand op; op.type = OP_MEM; op.data.mem.base = base; op.data.mem.offset = offset; return op;
 }
 
-static Operand op_label(const char *label) {
-    Operand op; op.type = OP_LABEL; op.data.label = label; return op;
-}
 
 static void print_operand(Operand op) {
     if (op.type == OP_REG) {
@@ -159,9 +195,6 @@ static void emit_inst2(const char *mnemonic, Operand src, Operand dest) {
     fprintf(out, "\n");
 }
 
-static void emit_label_def(const char *name) {
-    fprintf(out, "%s:\n", name);
-}
 
 static Type *get_expr_type(ASTNode *node) {
     if (node->type == AST_IDENTIFIER) {
@@ -386,10 +419,13 @@ static void gen_statement(ASTNode *node) {
 static void gen_function(ASTNode *node) {
     current_function_end_label = label_count++;
     
-    if (current_syntax == SYNTAX_ATT) fprintf(out, ".globl %s\n", node->data.function.name);
-    else fprintf(out, "public %s\n", node->data.function.name);
-    
-    emit_label_def(node->data.function.name);
+    if (current_syntax == SYNTAX_ATT) {
+        fprintf(out, ".globl %s\n", node->data.function.name);
+        emit_label_def(node->data.function.name);
+    } else {
+        fprintf(out, "PUBLIC %s\n", node->data.function.name);
+        fprintf(out, "%s PROC\n", node->data.function.name);
+    }
     
     // Prologue
     emit_inst1("pushq", op_reg("rbp"));
@@ -407,13 +443,8 @@ static void gen_function(ASTNode *node) {
     
     emit_inst0("leave");
     emit_inst0("ret");
-}
-
-void arch_x86_64_generate(ASTNode *program) {
-    for (size_t i = 0; i < program->children_count; i++) {
-        ASTNode *child = program->children[i];
-        if (child->type == AST_FUNCTION) {
-            gen_function(child);
-        }
+    
+    if (current_syntax == SYNTAX_INTEL) {
+        fprintf(out, "%s ENDP\n", node->data.function.name);
     }
 }
