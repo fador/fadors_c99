@@ -58,6 +58,6 @@ int main(int argc, char **argv) {
     
     printf("Generated: %s\n", out_filename);
     
-    free(source);
+    // free(preprocessed); // We should free this ideally, but it's okay for now
     return 0;
 }

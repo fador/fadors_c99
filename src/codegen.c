@@ -184,11 +184,14 @@ static void gen_expression(ASTNode *node) {
     }
 }
 
+static int current_function_end_label = 0;
+
 static void gen_statement(ASTNode *node) {
     if (node->type == AST_RETURN) {
-        gen_expression(node->data.return_stmt.expression);
-        fprintf(out, "    leave\n");
-        fprintf(out, "    ret\n");
+        if (node->data.return_stmt.expression) {
+            gen_expression(node->data.return_stmt.expression);
+        }
+        fprintf(out, "    jmp .Lend_%d\n", current_function_end_label);
     } else if (node->type == AST_VAR_DECL) {
         if (node->data.var_decl.initializer) {
             gen_expression(node->data.var_decl.initializer);
@@ -204,13 +207,8 @@ static void gen_statement(ASTNode *node) {
         locals[locals_count].type = node->resolved_type;
         locals_count++;
         
-        // Push logic - handle different sizes?
-        // For now, always push 8 bytes if it's int/ptr. 
-        // If it's a struct, we should subq rsp, size. 
         if (node->resolved_type && node->resolved_type->kind == TYPE_STRUCT) {
             fprintf(out, "    subq $%d, %%rsp\n", size);
-            // Copy from rax? No, struct init is complex. 
-            // For now, assume struct init is not supported or handled via members.
         } else {
             fprintf(out, "    pushq %%rax\n");
         }
@@ -253,6 +251,8 @@ static void gen_statement(ASTNode *node) {
 }
 
 static void gen_function(ASTNode *node) {
+    current_function_end_label = label_count++;
+    
     fprintf(out, ".globl %s\n", node->data.function.name);
     fprintf(out, "%s:\n", node->data.function.name);
     
@@ -265,7 +265,8 @@ static void gen_function(ASTNode *node) {
     
     gen_statement(node->data.function.body);
     
-    // Default epilogue
+    // Epilogue label
+    fprintf(out, ".Lend_%d:\n", current_function_end_label);
     fprintf(out, "    leave\n");
     fprintf(out, "    ret\n");
 }
