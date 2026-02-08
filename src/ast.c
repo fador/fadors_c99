@@ -31,6 +31,13 @@ void ast_print(ASTNode *node, int indent) {
         case AST_BLOCK: printf("Block\n"); break;
         case AST_RETURN: printf("Return\n"); break;
         case AST_INTEGER: printf("Integer: %d\n", node->data.integer.value); break;
+        case AST_IDENTIFIER: printf("Identifier: %s\n", node->data.identifier.name); break;
+        case AST_BINARY_EXPR: printf("BinaryExpr (op: %d)\n", node->data.binary_expr.op); break;
+        case AST_VAR_DECL: printf("VarDecl: %s\n", node->data.var_decl.name); break;
+        case AST_ASSIGN: printf("Assign: %s\n", node->data.assign.name); break;
+        case AST_IF: printf("If\n"); break;
+        case AST_WHILE: printf("While\n"); break;
+        case AST_CALL: printf("Call: %s\n", node->data.call.name); break;
         case AST_UNKNOWN: printf("Unknown\n"); break;
     }
     

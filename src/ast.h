@@ -2,6 +2,7 @@
 #define AST_H
 
 #include <stddef.h>
+#include "lexer.h"
 
 typedef enum {
     AST_PROGRAM,
@@ -9,6 +10,13 @@ typedef enum {
     AST_BLOCK,
     AST_RETURN,
     AST_INTEGER,
+    AST_IDENTIFIER,
+    AST_BINARY_EXPR,
+    AST_VAR_DECL,
+    AST_ASSIGN,
+    AST_IF,
+    AST_WHILE,
+    AST_CALL,
     AST_UNKNOWN
 } ASTNodeType;
 
@@ -27,11 +35,40 @@ typedef struct ASTNode {
             int value;
         } integer;
         struct {
+            char *name;
+        } identifier;
+        struct {
             struct ASTNode *body;
         } program;
         struct {
             struct ASTNode *expression;
         } return_stmt;
+        struct {
+            TokenType op;
+            struct ASTNode *left;
+            struct ASTNode *right;
+        } binary_expr;
+        struct {
+            char *name;
+            struct ASTNode *initializer;
+        } var_decl;
+        struct {
+            char *name;
+            struct ASTNode *value;
+        } assign;
+        struct {
+            struct ASTNode *condition;
+            struct ASTNode *then_branch;
+            struct ASTNode *else_branch;
+        } if_stmt;
+        struct {
+            struct ASTNode *condition;
+            struct ASTNode *body;
+        } while_stmt;
+        struct {
+            char *name;
+            // args will be in children
+        } call;
     } data;
 } ASTNode;
 
