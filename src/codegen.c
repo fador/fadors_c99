@@ -9,6 +9,7 @@ static int label_count = 0;
 typedef struct {
     char *name;
     int offset;
+    Type *type;
 } LocalVar;
 
 static LocalVar locals[100];
@@ -24,11 +25,73 @@ static int get_local_offset(const char *name) {
     return 0;
 }
 
+static Type *get_local_type(const char *name) {
+    for (int i = 0; i < locals_count; i++) {
+        if (strcmp(locals[i].name, name) == 0) {
+            return locals[i].type;
+        }
+    }
+    return NULL;
+}
+
 void codegen_init(FILE *output) {
     out = output;
 }
 
+static Type *get_expr_type(ASTNode *node) {
+    if (node->type == AST_IDENTIFIER) {
+        return get_local_type(node->data.identifier.name);
+    } else if (node->type == AST_DEREF) {
+        Type *t = get_expr_type(node->data.unary.expression);
+        return t ? t->data.ptr_to : NULL;
+    } else if (node->type == AST_ADDR_OF) {
+        Type *t = get_expr_type(node->data.unary.expression);
+        return type_ptr(t);
+    } else if (node->type == AST_MEMBER_ACCESS) {
+        Type *st = get_expr_type(node->data.member_access.struct_expr);
+        if (node->data.member_access.is_arrow && st && st->kind == TYPE_PTR) {
+            st = st->data.ptr_to;
+        }
+        if (st && st->kind == TYPE_STRUCT) {
+            for (int i = 0; i < st->data.struct_data.members_count; i++) {
+                if (strcmp(st->data.struct_data.members[i].name, node->data.member_access.member_name) == 0) {
+                    return st->data.struct_data.members[i].type;
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
 static void gen_expression(ASTNode *node);
+
+static void gen_addr(ASTNode *node) {
+    if (node->type == AST_IDENTIFIER) {
+        int offset = get_local_offset(node->data.identifier.name);
+        if (offset != 0) {
+            fprintf(out, "    leaq %d(%%rbp), %%rax\n", offset);
+        }
+    } else if (node->type == AST_DEREF) {
+        gen_expression(node->data.unary.expression);
+    } else if (node->type == AST_MEMBER_ACCESS) {
+        Type *st = get_expr_type(node->data.member_access.struct_expr);
+        if (node->data.member_access.is_arrow) {
+            gen_expression(node->data.member_access.struct_expr);
+            st = st->data.ptr_to;
+        } else {
+            gen_addr(node->data.member_access.struct_expr);
+        }
+        
+        if (st && st->kind == TYPE_STRUCT) {
+            for (int i = 0; i < st->data.struct_data.members_count; i++) {
+                if (strcmp(st->data.struct_data.members[i].name, node->data.member_access.member_name) == 0) {
+                    fprintf(out, "    addq $%d, %%rax\n", st->data.struct_data.members[i].offset);
+                    break;
+                }
+            }
+        }
+    }
+}
 
 static void gen_binary_expr(ASTNode *node) {
     gen_expression(node->data.binary_expr.right);
@@ -90,10 +153,26 @@ static void gen_expression(ASTNode *node) {
         gen_binary_expr(node);
     } else if (node->type == AST_ASSIGN) {
         gen_expression(node->data.assign.value);
-        int offset = get_local_offset(node->data.assign.name);
-        if (offset != 0) {
-            fprintf(out, "    movq %%rax, %d(%%rbp)\n", offset);
+        if (node->data.assign.left->type == AST_IDENTIFIER) {
+            int offset = get_local_offset(node->data.assign.left->data.identifier.name);
+            if (offset != 0) {
+                fprintf(out, "    movq %%rax, %d(%%rbp)\n", offset);
+            }
+        } else {
+            fprintf(out, "    pushq %%rax\n");
+            gen_addr(node->data.assign.left);
+            fprintf(out, "    popq %%rcx\n");
+            fprintf(out, "    movq %%rcx, (%%rax)\n");
+            fprintf(out, "    movq %%rcx, %%rax\n");
         }
+    } else if (node->type == AST_DEREF) {
+        gen_expression(node->data.unary.expression);
+        fprintf(out, "    movq (%%rax), %%rax\n");
+    } else if (node->type == AST_ADDR_OF) {
+        gen_addr(node->data.unary.expression);
+    } else if (node->type == AST_MEMBER_ACCESS) {
+        gen_addr(node);
+        fprintf(out, "    movq (%%rax), %%rax\n");
     } else if (node->type == AST_CALL) {
         const char *arg_regs[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
         for (size_t i = 0; i < node->children_count && i < 6; i++) {
@@ -116,11 +195,25 @@ static void gen_statement(ASTNode *node) {
         } else {
             fprintf(out, "    movq $0, %%rax\n");
         }
-        stack_offset -= 8;
+        
+        int size = node->resolved_type ? node->resolved_type->size : 8;
+        stack_offset -= size;
+        
         locals[locals_count].name = node->data.var_decl.name;
         locals[locals_count].offset = stack_offset;
+        locals[locals_count].type = node->resolved_type;
         locals_count++;
-        fprintf(out, "    pushq %%rax\n");
+        
+        // Push logic - handle different sizes?
+        // For now, always push 8 bytes if it's int/ptr. 
+        // If it's a struct, we should subq rsp, size. 
+        if (node->resolved_type && node->resolved_type->kind == TYPE_STRUCT) {
+            fprintf(out, "    subq $%d, %%rsp\n", size);
+            // Copy from rax? No, struct init is complex. 
+            // For now, assume struct init is not supported or handled via members.
+        } else {
+            fprintf(out, "    pushq %%rax\n");
+        }
     } else if (node->type == AST_IF) {
         int label_else = label_count++;
         int label_end = label_count++;

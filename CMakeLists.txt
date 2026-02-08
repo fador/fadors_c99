@@ -19,6 +19,8 @@ set(SOURCES
     src/parser.c
     src/ast.c
     src/codegen.c
+    src/preprocessor.c
+    src/types.c
 )
 
 add_executable(c99connector ${SOURCES})

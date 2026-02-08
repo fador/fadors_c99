@@ -54,6 +54,7 @@ static TokenType identifier_type(const char *start, size_t length) {
     if (check_keyword(start, length, "for", TOKEN_KEYWORD_FOR) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_FOR;
     if (check_keyword(start, length, "void", TOKEN_KEYWORD_VOID) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_VOID;
     if (check_keyword(start, length, "char", TOKEN_KEYWORD_CHAR) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_CHAR;
+    if (check_keyword(start, length, "struct", TOKEN_KEYWORD_STRUCT) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_STRUCT;
     return TOKEN_IDENTIFIER;
 }
 
@@ -108,10 +109,19 @@ Token lexer_next_token(Lexer *lexer) {
         case '}': token.type = TOKEN_RBRACE; break;
         case ';': token.type = TOKEN_SEMICOLON; break;
         case ',': token.type = TOKEN_COMMA; break;
+        case '.': token.type = TOKEN_DOT; break;
         case '+': token.type = TOKEN_PLUS; break;
-        case '-': token.type = TOKEN_MINUS; break;
+        case '-':
+            if (match(lexer, '>')) {
+                token.type = TOKEN_ARROW;
+                token.length = 2;
+            } else {
+                token.type = TOKEN_MINUS;
+            }
+            break;
         case '*': token.type = TOKEN_STAR; break;
         case '/': token.type = TOKEN_SLASH; break;
+        case '&': token.type = TOKEN_AMPERSAND; break;
         case '=':
             if (match(lexer, '=')) {
                 token.type = TOKEN_EQUAL_EQUAL;

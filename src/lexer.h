@@ -15,16 +15,20 @@ typedef enum {
     TOKEN_KEYWORD_FOR,
     TOKEN_KEYWORD_VOID,
     TOKEN_KEYWORD_CHAR,
+    TOKEN_KEYWORD_STRUCT,
     TOKEN_LPAREN,       // (
     TOKEN_RPAREN,       // )
     TOKEN_LBRACE,       // {
     TOKEN_RBRACE,       // }
     TOKEN_SEMICOLON,    // ;
     TOKEN_COMMA,        // ,
+    TOKEN_DOT,          // .
+    TOKEN_ARROW,        // ->
     TOKEN_PLUS,         // +
     TOKEN_MINUS,        // -
     TOKEN_STAR,         // *
     TOKEN_SLASH,        // /
+    TOKEN_AMPERSAND,    // &
     TOKEN_EQUAL,        // =
     TOKEN_EQUAL_EQUAL,  // ==
     TOKEN_BANG_EQUAL,   // !=

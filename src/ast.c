@@ -8,6 +8,7 @@ ASTNode *ast_create_node(ASTNodeType type) {
         node->type = type;
         node->children = NULL;
         node->children_count = 0;
+        node->resolved_type = NULL;
     }
     return node;
 }
@@ -34,11 +35,24 @@ void ast_print(ASTNode *node, int indent) {
         case AST_IDENTIFIER: printf("Identifier: %s\n", node->data.identifier.name); break;
         case AST_BINARY_EXPR: printf("BinaryExpr (op: %d)\n", node->data.binary_expr.op); break;
         case AST_VAR_DECL: printf("VarDecl: %s\n", node->data.var_decl.name); break;
-        case AST_ASSIGN: printf("Assign: %s\n", node->data.assign.name); break;
+        case AST_ASSIGN: printf("Assign\n"); break;
         case AST_IF: printf("If\n"); break;
         case AST_WHILE: printf("While\n"); break;
         case AST_CALL: printf("Call: %s\n", node->data.call.name); break;
+        case AST_STRUCT_DEF: printf("StructDef: %s\n", node->data.struct_def.name); break;
+        case AST_MEMBER_ACCESS: printf("MemberAccess: %s%s\n", node->data.member_access.is_arrow ? "->" : ".", node->data.member_access.member_name); break;
+        case AST_DEREF: printf("Deref\n"); break;
+        case AST_ADDR_OF: printf("AddrOf\n"); break;
         case AST_UNKNOWN: printf("Unknown\n"); break;
+    }
+    
+    if (node->type == AST_DEREF || node->type == AST_ADDR_OF) {
+        ast_print(node->data.unary.expression, indent + 1);
+    }
+    
+    if (node->type == AST_ASSIGN) {
+        ast_print(node->data.assign.left, indent + 1);
+        ast_print(node->data.assign.value, indent + 1);
     }
     
     for (size_t i = 0; i < node->children_count; i++) {

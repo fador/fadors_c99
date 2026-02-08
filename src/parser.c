@@ -24,6 +24,32 @@ static void parser_expect(Parser *parser, TokenType type) {
 
 static ASTNode *parse_expression(Parser *parser);
 
+static Type *parse_type(Parser *parser) {
+    Type *type = NULL;
+    if (parser->current_token.type == TOKEN_KEYWORD_INT) {
+        type = type_int();
+        parser_advance(parser);
+    } else if (parser->current_token.type == TOKEN_KEYWORD_STRUCT) {
+        parser_advance(parser);
+        if (parser->current_token.type == TOKEN_IDENTIFIER) {
+            char buffer[256];
+            size_t len = parser->current_token.length < 255 ? parser->current_token.length : 255;
+            strncpy(buffer, parser->current_token.start, len);
+            buffer[len] = '\0';
+            type = type_struct(buffer);
+            parser_advance(parser);
+        }
+    }
+    
+    if (!type) return NULL;
+    
+    while (parser->current_token.type == TOKEN_STAR) {
+        type = type_ptr(type);
+        parser_advance(parser);
+    }
+    return type;
+}
+
 static ASTNode *parse_primary(Parser *parser) {
     if (parser->current_token.type == TOKEN_NUMBER) {
         ASTNode *node = ast_create_node(AST_INTEGER);
@@ -68,8 +94,61 @@ static ASTNode *parse_primary(Parser *parser) {
     exit(1);
 }
 
+static ASTNode *parse_postfix(Parser *parser) {
+    ASTNode *node = parse_primary(parser);
+    while (parser->current_token.type == TOKEN_DOT || parser->current_token.type == TOKEN_ARROW) {
+        int is_arrow = (parser->current_token.type == TOKEN_ARROW);
+        parser_advance(parser);
+        if (parser->current_token.type == TOKEN_IDENTIFIER) {
+            char *member_name = malloc(parser->current_token.length + 1);
+            strncpy(member_name, parser->current_token.start, parser->current_token.length);
+            member_name[parser->current_token.length] = '\0';
+            parser_advance(parser);
+            
+            ASTNode *access = ast_create_node(AST_MEMBER_ACCESS);
+            access->data.member_access.struct_expr = node;
+            access->data.member_access.member_name = member_name;
+            access->data.member_access.is_arrow = is_arrow;
+            
+            // Resolve type
+            Type *struct_type = node->resolved_type;
+            if (is_arrow && struct_type && struct_type->kind == TYPE_PTR) {
+                struct_type = struct_type->data.ptr_to;
+            }
+            if (struct_type && struct_type->kind == TYPE_STRUCT) {
+                for (int i = 0; i < struct_type->data.struct_data.members_count; i++) {
+                    if (strcmp(struct_type->data.struct_data.members[i].name, member_name) == 0) {
+                        access->resolved_type = struct_type->data.struct_data.members[i].type;
+                        break;
+                    }
+                }
+            }
+            node = access;
+        } else {
+            printf("Syntax Error: Expected member name after %s at line %d\n", is_arrow ? "->" : ".", parser->current_token.line);
+            exit(1);
+        }
+    }
+    return node;
+}
+
+static ASTNode *parse_unary(Parser *parser) {
+    if (parser->current_token.type == TOKEN_STAR) {
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_DEREF);
+        node->data.unary.expression = parse_unary(parser);
+        return node;
+    } else if (parser->current_token.type == TOKEN_AMPERSAND) {
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_ADDR_OF);
+        node->data.unary.expression = parse_unary(parser);
+        return node;
+    }
+    return parse_postfix(parser);
+}
+
 static ASTNode *parse_multiplicative(Parser *parser) {
-    ASTNode *left = parse_primary(parser);
+    ASTNode *left = parse_unary(parser);
     while (parser->current_token.type == TOKEN_STAR || parser->current_token.type == TOKEN_SLASH) {
         TokenType op = parser->current_token.type;
         parser_advance(parser);
@@ -127,24 +206,15 @@ static ASTNode *parse_equality(Parser *parser) {
 }
 
 static ASTNode *parse_expression(Parser *parser) {
-    // Basic assignment: identifier = expression
-    if (parser->current_token.type == TOKEN_IDENTIFIER) {
-        Token next = lexer_peek_token(parser->lexer);
-        if (next.type == TOKEN_EQUAL) {
-            char *name = malloc(parser->current_token.length + 1);
-            strncpy(name, parser->current_token.start, parser->current_token.length);
-            name[parser->current_token.length] = '\0';
-            
-            parser_advance(parser); // consume identifier
-            parser_advance(parser); // consume '='
-            
-            ASTNode *node = ast_create_node(AST_ASSIGN);
-            node->data.assign.name = name;
-            node->data.assign.value = parse_expression(parser);
-            return node;
-        }
+    ASTNode *left = parse_equality(parser);
+    if (parser->current_token.type == TOKEN_EQUAL) {
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_ASSIGN);
+        node->data.assign.left = left;
+        node->data.assign.value = parse_expression(parser);
+        return node;
     }
-    return parse_equality(parser);
+    return left;
 }
 
 static ASTNode *parse_statement(Parser *parser) {
@@ -154,10 +224,23 @@ static ASTNode *parse_statement(Parser *parser) {
         node->data.return_stmt.expression = parse_expression(parser);
         parser_expect(parser, TOKEN_SEMICOLON);
         return node;
-    } else if (parser->current_token.type == TOKEN_KEYWORD_INT) {
-        // Variable declaration
-        parser_advance(parser);
+    } else if (parser->current_token.type == TOKEN_KEYWORD_INT || parser->current_token.type == TOKEN_KEYWORD_STRUCT) {
+        // Variable or struct declaration
+        if (parser->current_token.type == TOKEN_KEYWORD_STRUCT) {
+            Token next = lexer_peek_token(parser->lexer);
+            if (next.type == TOKEN_IDENTIFIER) {
+                Token next_next = lexer_peek_token(parser->lexer); // Wait, I don't have peek_peek
+                // If I advanced, I can't easily peek further.
+            }
+        }
+
+        Type *type = parse_type(parser);
+        if (!type) {
+            // Error handling...
+        }
+        
         ASTNode *node = ast_create_node(AST_VAR_DECL);
+        node->resolved_type = type;
         if (parser->current_token.type == TOKEN_IDENTIFIER) {
             node->data.var_decl.name = malloc(parser->current_token.length + 1);
             strncpy(node->data.var_decl.name, parser->current_token.start, parser->current_token.length);
@@ -241,10 +324,64 @@ static ASTNode *parse_function(Parser *parser) {
     return node;
 }
 
+static ASTNode *parse_struct_def(Parser *parser) {
+    parser_expect(parser, TOKEN_KEYWORD_STRUCT);
+    char *name = NULL;
+    if (parser->current_token.type == TOKEN_IDENTIFIER) {
+        name = malloc(parser->current_token.length + 1);
+        strncpy(name, parser->current_token.start, parser->current_token.length);
+        name[parser->current_token.length] = '\0';
+        parser_advance(parser);
+    }
+    
+    Type *struct_type = name ? type_struct(name) : NULL;
+    
+    if (parser->current_token.type == TOKEN_LBRACE) {
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_STRUCT_DEF);
+        node->data.struct_def.name = name;
+        int current_offset = 0;
+        while (parser->current_token.type != TOKEN_RBRACE && parser->current_token.type != TOKEN_EOF) {
+            Type *member_type = parse_type(parser);
+            if (parser->current_token.type == TOKEN_IDENTIFIER) {
+                ASTNode *member = ast_create_node(AST_VAR_DECL);
+                member->data.var_decl.name = malloc(parser->current_token.length + 1);
+                strncpy(member->data.var_decl.name, parser->current_token.start, parser->current_token.length);
+                member->data.var_decl.name[parser->current_token.length] = '\0';
+                parser_advance(parser);
+                ast_add_child(node, member);
+                
+                if (struct_type) {
+                    Member *m = &struct_type->data.struct_data.members[struct_type->data.struct_data.members_count++];
+                    m->name = strdup(member->data.var_decl.name);
+                    m->type = member_type;
+                    m->offset = current_offset;
+                    current_offset += member_type->size;
+                    struct_type->size = current_offset;
+                }
+                
+                parser_expect(parser, TOKEN_SEMICOLON);
+            }
+        }
+        parser_expect(parser, TOKEN_RBRACE);
+        parser_expect(parser, TOKEN_SEMICOLON);
+        return node;
+    }
+    return NULL;
+}
+
 ASTNode *parser_parse(Parser *parser) {
     ASTNode *program = ast_create_node(AST_PROGRAM);
     while (parser->current_token.type != TOKEN_EOF) {
-        ast_add_child(program, parse_function(parser));
+        if (parser->current_token.type == TOKEN_KEYWORD_STRUCT) {
+            Token next = lexer_peek_token(parser->lexer);
+            // If it's 'struct name {' or 'struct {' it's a definition
+            // Actually, just try to parse struct def if we see struct
+            ASTNode *def = parse_struct_def(parser);
+            if (def) ast_add_child(program, def);
+        } else {
+            ast_add_child(program, parse_function(parser));
+        }
     }
     return program;
 }

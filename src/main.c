@@ -3,6 +3,7 @@
 #include "parser.h"
 #include "ast.h"
 #include "codegen.h"
+#include "preprocessor.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -28,8 +29,11 @@ int main(int argc, char **argv) {
     source[size] = '\0';
     fclose(f);
     
+    char *preprocessed = preprocess(source, argv[1]);
+    free(source);
+    
     Lexer lexer;
-    lexer_init(&lexer, source);
+    lexer_init(&lexer, preprocessed);
     
     Parser parser;
     parser_init(&parser, &lexer);

@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include "lexer.h"
+#include "types.h"
 
 typedef enum {
     AST_PROGRAM,
@@ -17,6 +18,10 @@ typedef enum {
     AST_IF,
     AST_WHILE,
     AST_CALL,
+    AST_STRUCT_DEF,
+    AST_MEMBER_ACCESS,
+    AST_DEREF,
+    AST_ADDR_OF,
     AST_UNKNOWN
 } ASTNodeType;
 
@@ -24,6 +29,7 @@ typedef struct ASTNode {
     ASTNodeType type;
     struct ASTNode **children;
     size_t children_count;
+    Type *resolved_type;
     
     // For specific nodes
     union {
@@ -53,7 +59,7 @@ typedef struct ASTNode {
             struct ASTNode *initializer;
         } var_decl;
         struct {
-            char *name;
+            struct ASTNode *left;
             struct ASTNode *value;
         } assign;
         struct {
@@ -69,6 +75,18 @@ typedef struct ASTNode {
             char *name;
             // args will be in children
         } call;
+        struct {
+            char *name;
+            // members will be in children
+        } struct_def;
+        struct {
+            struct ASTNode *struct_expr;
+            char *member_name;
+            int is_arrow;
+        } member_access;
+        struct {
+            struct ASTNode *expression;
+        } unary;
     } data;
 } ASTNode;
 
