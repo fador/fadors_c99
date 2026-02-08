@@ -19,6 +19,7 @@ set(SOURCES
     src/parser.c
     src/ast.c
     src/codegen.c
+    src/arch_x86_64.c
     src/preprocessor.c
     src/types.c
 )
