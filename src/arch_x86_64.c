@@ -40,7 +40,10 @@ static void emit_label_def(const char *name) {
         int16_t section_num = (current_section == SECTION_TEXT) ? 1 : 2;
         uint32_t offset = (current_section == SECTION_TEXT) ? (uint32_t)obj_writer->text_section.size : (uint32_t)obj_writer->data_section.size;
         
-        coff_writer_add_symbol(obj_writer, name, offset, section_num, storage_class);
+        uint16_t type = 0;
+        if (current_section == SECTION_TEXT && storage_class == IMAGE_SYM_CLASS_EXTERNAL) type = 0x20;
+        
+        coff_writer_add_symbol(obj_writer, name, offset, section_num, type, storage_class);
         return;
     }
     if (current_syntax == SYNTAX_INTEL && name[0] == '.') {
@@ -182,12 +185,14 @@ static void emit_inst0(const char *mnemonic) {
 static void emit_inst1(const char *mnemonic, Operand op1) {
     if (obj_writer) {
         if (op1.type == OP_LABEL) {
-            // Relocation for JMP/JE/etc starts AFTER the opcode
-            uint32_t offset = 1;
-            if (strcmp(mnemonic, "je") == 0 || strcmp(mnemonic, "jne") == 0) offset = 2; // 0F 84 / 0F 85
-            else if (strcmp(mnemonic, "call") == 0) offset = 1; // E8
+            uint8_t storage_class = (op1.data.label[0] == '.') ? IMAGE_SYM_CLASS_STATIC : IMAGE_SYM_CLASS_EXTERNAL;
+            uint16_t type = (strcmp(mnemonic, "call") == 0) ? 0x20 : 0;
+            uint32_t sym_idx = coff_writer_add_symbol(obj_writer, op1.data.label, 0, 0, type, storage_class);
             
-            uint32_t sym_idx = coff_writer_add_symbol(obj_writer, op1.data.label, 0, 0, IMAGE_SYM_CLASS_STATIC);
+            uint32_t offset = 1;
+            if (strcmp(mnemonic, "je") == 0 || strcmp(mnemonic, "jne") == 0) offset = 2;
+            else if (strcmp(mnemonic, "call") == 0) offset = 1;
+            
             coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + offset, sym_idx, IMAGE_REL_AMD64_REL32);
         }
         encode_inst1(&obj_writer->text_section, mnemonic, op1);
@@ -208,6 +213,7 @@ static void emit_inst1(const char *mnemonic, Operand op1) {
         else if (strcmp(mnemonic, "setle") == 0) m = "setle";
         else if (strcmp(mnemonic, "setge") == 0) m = "setge";
         else if (strcmp(mnemonic, "neg") == 0) m = "neg";
+        else if (strcmp(mnemonic, "not") == 0) m = "not";
     }
 
     fprintf(out, "    %s ", m);
@@ -220,7 +226,8 @@ static void emit_inst2(const char *mnemonic, Operand src, Operand dest) {
         if (src.type == OP_LABEL) {
             // LEA label, reg -> LEA label(%RIP), reg
             // Relocation starts at offset 3 (REX + 8D + ModRM)
-            uint32_t sym_idx = coff_writer_add_symbol(obj_writer, src.data.label, 0, 0, IMAGE_SYM_CLASS_STATIC);
+            uint8_t storage_class = (src.data.label[0] == '.') ? IMAGE_SYM_CLASS_STATIC : IMAGE_SYM_CLASS_EXTERNAL;
+            uint32_t sym_idx = coff_writer_add_symbol(obj_writer, src.data.label, 0, 0, 0, storage_class);
             coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + 3, sym_idx, IMAGE_REL_AMD64_REL32);
         }
         encode_inst2(&obj_writer->text_section, mnemonic, src, dest);
@@ -732,7 +739,7 @@ static void gen_statement(ASTNode *node) {
 static void gen_function(ASTNode *node) {
     if (node->data.function.body == NULL) {
         if (obj_writer) {
-            coff_writer_add_symbol(obj_writer, node->data.function.name, 0, 0, IMAGE_SYM_CLASS_EXTERNAL);
+            coff_writer_add_symbol(obj_writer, node->data.function.name, 0, 0, 0x20, IMAGE_SYM_CLASS_EXTERNAL);
         } else if (current_syntax == SYNTAX_INTEL) {
             fprintf(out, "EXTERN %s:PROC\n", node->data.function.name);
         } else {

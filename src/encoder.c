@@ -106,6 +106,20 @@ void encode_inst1(Buffer *buf, const char *mnemonic, Operand op1) {
             else if (strcmp(mnemonic, "setge") == 0) buffer_write_byte(buf, 0x9D);
             emit_modrm(buf, 3, 0, reg);
         }
+    } else if (strcmp(mnemonic, "neg") == 0) {
+        if (op1.type == OP_REG) {
+            int reg = get_reg_id(op1.data.reg);
+            emit_rex(buf, 1, 0, 0, reg >= 8);
+            buffer_write_byte(buf, 0xF7);
+            emit_modrm(buf, 3, 3, reg); // Mod=3, Opcode extension=3 for NEG
+        }
+    } else if (strcmp(mnemonic, "not") == 0) {
+        if (op1.type == OP_REG) {
+            int reg = get_reg_id(op1.data.reg);
+            emit_rex(buf, 1, 0, 0, reg >= 8);
+            buffer_write_byte(buf, 0xF7);
+            emit_modrm(buf, 3, 2, reg); // Mod=3, Opcode extension=2 for NOT
+        }
     }
 }
 
@@ -152,6 +166,18 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand src, Operand dest) 
             emit_rex(buf, 1, s >= 8, 0, d >= 8);
             buffer_write_byte(buf, 0x01);
             emit_modrm(buf, 3, s, d);
+        } else if (src.type == OP_IMM && dest.type == OP_REG) {
+             int d = get_reg_id(dest.data.reg);
+             emit_rex(buf, 1, 0, 0, d >= 8);
+             if (src.data.imm >= -128 && src.data.imm <= 127) {
+                 buffer_write_byte(buf, 0x83);
+                 emit_modrm(buf, 3, 0, d); // add r/m, imm8 (opcode extension 0)
+                 buffer_write_byte(buf, (uint8_t)src.data.imm);
+             } else {
+                 buffer_write_byte(buf, 0x81);
+                 emit_modrm(buf, 3, 0, d); // add r/m, imm32
+                 buffer_write_dword(buf, src.data.imm);
+             }
         }
     } else if (strcmp(mnemonic, "sub") == 0 || strcmp(mnemonic, "subq") == 0) {
         if (src.type == OP_REG && dest.type == OP_REG) {
@@ -163,9 +189,15 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand src, Operand dest) 
         } else if (src.type == OP_IMM && dest.type == OP_REG) {
              int d = get_reg_id(dest.data.reg);
              emit_rex(buf, 1, 0, 0, d >= 8);
-             buffer_write_byte(buf, 0x81);
-             emit_modrm(buf, 3, 5, d); // sub r/m, imm32 (opcode extension 5)
-             buffer_write_dword(buf, src.data.imm);
+             if (src.data.imm >= -128 && src.data.imm <= 127) {
+                 buffer_write_byte(buf, 0x83);
+                 emit_modrm(buf, 3, 5, d); // sub r/m, imm8 (opcode extension 5)
+                 buffer_write_byte(buf, (uint8_t)src.data.imm);
+             } else {
+                 buffer_write_byte(buf, 0x81);
+                 emit_modrm(buf, 3, 5, d); // sub r/m, imm32
+                 buffer_write_dword(buf, src.data.imm);
+             }
         }
     } else if (strcmp(mnemonic, "imul") == 0 || strcmp(mnemonic, "imulq") == 0) {
         if (src.type == OP_REG && dest.type == OP_REG) {
@@ -175,6 +207,18 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand src, Operand dest) 
             buffer_write_byte(buf, 0x0F);
             buffer_write_byte(buf, 0xAF);
             emit_modrm(buf, 3, d, s);
+        } else if (src.type == OP_IMM && dest.type == OP_REG) {
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 1, d >= 8, 0, d >= 8);
+            if (src.data.imm >= -128 && src.data.imm <= 127) {
+                buffer_write_byte(buf, 0x6B);
+                emit_modrm(buf, 3, d, d);
+                buffer_write_byte(buf, (uint8_t)src.data.imm);
+            } else {
+                buffer_write_byte(buf, 0x69);
+                emit_modrm(buf, 3, d, d);
+                buffer_write_dword(buf, src.data.imm);
+            }
         }
     } else if (strcmp(mnemonic, "cmp") == 0 || strcmp(mnemonic, "cmpq") == 0) {
         if (src.type == OP_REG && dest.type == OP_REG) {
@@ -186,9 +230,15 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand src, Operand dest) 
         } else if (src.type == OP_IMM && dest.type == OP_REG) {
             int d = get_reg_id(dest.data.reg);
             emit_rex(buf, 1, 0, 0, d >= 8);
-            buffer_write_byte(buf, 0x81);
-            emit_modrm(buf, 3, 7, d); // cmp r/m, imm32 (opcode extension 7)
-            buffer_write_dword(buf, src.data.imm);
+            if (src.data.imm >= -128 && src.data.imm <= 127) {
+                buffer_write_byte(buf, 0x83);
+                emit_modrm(buf, 3, 7, d); // cmp r/m, imm8 (opcode extension 7)
+                buffer_write_byte(buf, (uint8_t)src.data.imm);
+            } else {
+                buffer_write_byte(buf, 0x81);
+                emit_modrm(buf, 3, 7, d); // cmp r/m, imm32
+                buffer_write_dword(buf, src.data.imm);
+            }
         }
     } else if (strcmp(mnemonic, "lea") == 0 || strcmp(mnemonic, "leaq") == 0) {
         if (src.type == OP_MEM && dest.type == OP_REG) {
@@ -222,6 +272,21 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand src, Operand dest) 
                 emit_modrm(buf, 2, d, s);
                 buffer_write_dword(buf, src.data.mem.offset);
             }
+        } else if (src.type == OP_REG && dest.type == OP_REG) {
+            int s = get_reg_id(src.data.reg);
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 1, d >= 8, 0, s >= 8); // dest is r64, src is r8
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0xB6);
+            emit_modrm(buf, 3, d, s);
+        }
+    } else if (strcmp(mnemonic, "xor") == 0) {
+        if (src.type == OP_REG && dest.type == OP_REG) {
+            int s = get_reg_id(src.data.reg);
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 1, s >= 8, 0, d >= 8);
+            buffer_write_byte(buf, 0x31);
+            emit_modrm(buf, 3, s, d);
         }
     }
 }

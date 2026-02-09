@@ -56,11 +56,41 @@ Use `-S` to stop after assembly generation.
 # Output: main.asm
 ```
 
-## Project Structure
-
 - `src/`: Compiler core (Lexer, Parser, AST, CodeGen, Preprocessor, Types).
-- `tests/`: Comprehensive automated test suite (`test_asm_execution.py` runs compiled binaries).
+- `tests/`: Comprehensive automated test suite.
 - `CMakeLists.txt`: Build configuration.
+
+## Testing Procedure
+
+### Automated Test Suite
+The main test suite is a Python script that compiles, assembles, links, and executes all tests in the `tests/` directory, verifying their return codes.
+
+```bash
+# General assembly-based verification
+python tests/test_asm_execution.py
+```
+
+### Direct COFF Generation Testing
+When working on the direct COFF backend (bypassing external assemblers), use the following specialized scripts:
+
+#### Full COFF Suite
+Runs all tests using only the internal COFF generator and the system linker.
+```bash
+# Windows
+./run_coff_tests.bat
+```
+
+#### Single Test Verification
+Compiles a single file with `--obj`, links it, and runs it to capture the return code.
+```bash
+./run_single_test.bat tests/01_return.c
+```
+
+#### Object File Inspection
+Assembles a file with `fadors99`, links it manually, and executes it. Useful for standard MASM verification.
+```bash
+./verify_obj.bat tests/01_return.c
+```
 
 ## Development Roadmap
 

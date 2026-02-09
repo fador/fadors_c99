@@ -46,13 +46,14 @@ int32_t coff_writer_find_symbol(COFFWriter *w, const char *name) {
     return -1;
 }
 
-uint32_t coff_writer_add_symbol(COFFWriter *w, const char *name, uint32_t value, int16_t section, uint8_t storage_class) {
+uint32_t coff_writer_add_symbol(COFFWriter *w, const char *name, uint32_t value, int16_t section, uint16_t type, uint8_t storage_class) {
     int32_t existing = coff_writer_find_symbol(w, name);
     if (existing >= 0) {
         // Update existing symbol if it was undefined or we are providing a definition
         if (w->symbols[existing].section == 0 && section != 0) {
             w->symbols[existing].value = value;
             w->symbols[existing].section = section;
+            w->symbols[existing].type = type;
         }
         return (uint32_t)existing;
     }
@@ -66,6 +67,7 @@ uint32_t coff_writer_add_symbol(COFFWriter *w, const char *name, uint32_t value,
     w->symbols[index].name = _strdup(name);
     w->symbols[index].value = value;
     w->symbols[index].section = section;
+    w->symbols[index].type = type;
     w->symbols[index].storage_class = storage_class;
     
     return index;
@@ -174,7 +176,7 @@ void coff_writer_write(COFFWriter *w, const char *filename) {
         }
         sym.Value = w->symbols[i].value;
         sym.SectionNumber = w->symbols[i].section;
-        sym.Type = 0;
+        sym.Type = w->symbols[i].type;
         sym.StorageClass = w->symbols[i].storage_class;
         sym.NumberOfAuxSymbols = 0;
         fwrite(&sym, sizeof(sym), 1, f);

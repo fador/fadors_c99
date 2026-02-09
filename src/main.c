@@ -26,6 +26,9 @@ static void compile_and_link(const char *asm_file, const char *exe_file, int use
     if (dot) *dot = '\0';
     strcat(obj_file, ".obj");
 
+    const char *linker = getenv("FADORS_LINKER");
+    if (!linker) linker = "link";
+
     if (use_masm) {
         // Assemble: ml64 /c /nologo /Fo<obj> <asm>
         sprintf(cmd, "ml64 /c /nologo /Fo\"%s\" \"%s\"", obj_file, asm_file);
@@ -34,8 +37,12 @@ static void compile_and_link(const char *asm_file, const char *exe_file, int use
             exit(1);
         }
 
-        // Link: link /nologo /entry:main /subsystem:console /out:<exe> <obj>
-        sprintf(cmd, "link /nologo /entry:main /subsystem:console /out:\"%s\" \"%s\" kernel32.lib", exe_file, obj_file);
+        // Link: <linker> /nologo /entry:main /subsystem:console /out:<exe> <obj>
+        const char *linker_fmt = (strchr(linker, ' ')) ? "\"%s\"" : "%s";
+        char linker_cmd[1024];
+        sprintf(linker_cmd, linker_fmt, linker);
+
+        sprintf(cmd, "%s /nologo /entry:main /subsystem:console /out:\"%s\" \"%s\" kernel32.lib", linker_cmd, exe_file, obj_file);
         if (run_command(cmd) != 0) {
             printf("Error: Linking failed.\n");
             exit(1);
@@ -117,29 +124,42 @@ int main(int argc, char **argv) {
     if (dot) *dot = '\0';
     
     if (use_obj) {
+        char obj_filename[260];
+        sprintf(obj_filename, "%s.obj", out_base);
+        // Normalize paths for Windows
+        for (char *p = obj_filename; *p; p++) if (*p == '/') *p = '\\';
+
         COFFWriter writer;
         coff_writer_init(&writer);
         codegen_set_writer(&writer);
         codegen_init(NULL);
         codegen_generate(program);
-        
-        char obj_filename[260];
-        sprintf(obj_filename, "%s.obj", out_base);
         coff_writer_write(&writer, obj_filename);
+        coff_writer_free(&writer);
         printf("Generated Object: %s\n", obj_filename);
-        
+
         if (!stop_at_asm) {
             char exe_filename[260];
             sprintf(exe_filename, "%s.exe", out_base);
+            for (char *p = exe_filename; *p; p++) if (*p == '/') *p = '\\';
+            
             char cmd[1024];
-            sprintf(cmd, "link /nologo /entry:main /subsystem:console /out:\"%s\" \"%s\" kernel32.lib", exe_filename, obj_filename);
+            const char *linker = getenv("FADORS_LINKER");
+            if (!linker) linker = "link";
+            
+            // Quote the linker if it contains spaces
+            const char *linker_fmt = (strchr(linker, ' ')) ? "\"%s\"" : "%s";
+            char linker_cmd[1024];
+            sprintf(linker_cmd, linker_fmt, linker);
+
+            sprintf(cmd, "%s /nologo /entry:main /subsystem:console /out:\"%s\" \"%s\" kernel32.lib", linker_cmd, exe_filename, obj_filename);
+            
             if (run_command(cmd) != 0) {
                 printf("Error: Linking failed.\n");
                 return 1;
             }
             printf("Linked to: %s\n", exe_filename);
         }
-        coff_writer_free(&writer);
     } else {
         char asm_filename[260];
         strcpy(asm_filename, out_base);
@@ -150,6 +170,9 @@ int main(int argc, char **argv) {
         } else {
             strcat(asm_filename, ".s");
         }
+        
+        // Normalize paths for Windows
+        for (char *p = asm_filename; *p; p++) if (*p == '/') *p = '\\';
         
         FILE *asm_out = fopen(asm_filename, "w");
         if (!asm_out) {
