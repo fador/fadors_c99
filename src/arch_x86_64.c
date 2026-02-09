@@ -285,7 +285,7 @@ static void gen_addr(ASTNode *node) {
     if (node->type == AST_IDENTIFIER) {
         int offset = get_local_offset(node->data.identifier.name);
         if (offset != 0) {
-            emit_inst2("leaq", op_mem("rbp", offset), op_reg("rax"));
+            emit_inst2("lea", op_mem("rbp", offset), op_reg("rax"));
             node->resolved_type = type_ptr(get_local_type(node->data.identifier.name));
         }
     } else if (node->type == AST_DEREF) {
@@ -302,7 +302,7 @@ static void gen_addr(ASTNode *node) {
         if (st && (st->kind == TYPE_STRUCT || st->kind == TYPE_UNION)) {
             for (int i = 0; i < st->data.struct_data.members_count; i++) {
                 if (strcmp(st->data.struct_data.members[i].name, node->data.member_access.member_name) == 0) {
-                    emit_inst2("addq", op_imm(st->data.struct_data.members[i].offset), op_reg("rax"));
+                    emit_inst2("add", op_imm(st->data.struct_data.members[i].offset), op_reg("rax"));
                     break;
                 }
             }
@@ -319,9 +319,9 @@ static void gen_addr(ASTNode *node) {
             element_size = array_type->data.ptr_to->size;
         }
         
-        emit_inst2("imulq", op_imm(element_size), op_reg("rax"));
+        emit_inst2("imul", op_imm(element_size), op_reg("rax"));
         emit_inst1("popq", op_reg("rcx"));
-        emit_inst2("addq", op_reg("rcx"), op_reg("rax"));
+        emit_inst2("add", op_reg("rcx"), op_reg("rax"));
     }
 }
 
@@ -331,41 +331,102 @@ static void gen_binary_expr(ASTNode *node) {
     gen_expression(node->data.binary_expr.left);
     emit_inst1("popq", op_reg("rcx"));
     
+    // Pointer arithmetic
+    Type *left_type = node->data.binary_expr.left->resolved_type;
+    Type *right_type = node->data.binary_expr.right->resolved_type;
+
+    /* Debugging */
+    /*
+    printf("Binary Op: %d\n", node->data.binary_expr.op);
+    if (left_type) printf("Left Kind: %d\n", left_type->kind); else printf("Left Type NULL\n");
+    if (right_type) printf("Right Kind: %d\n", right_type->kind); else printf("Right Type NULL\n");
+    */
+    
+    // Helper to get element size
+    int size = 1;
+    if (left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY) && left_type->data.ptr_to) {
+        size = left_type->data.ptr_to->size;
+    } else if (right_type && (right_type->kind == TYPE_PTR || right_type->kind == TYPE_ARRAY) && right_type->data.ptr_to) {
+        size = right_type->data.ptr_to->size;
+    }
+    // printf("Element Size: %d\n", size);
+    
     switch (node->data.binary_expr.op) {
-        case TOKEN_PLUS:  emit_inst2("addq", op_reg("rcx"), op_reg("rax")); break;
-        case TOKEN_MINUS: emit_inst2("subq", op_reg("rcx"), op_reg("rax")); break;
-        case TOKEN_STAR:  emit_inst2("imulq", op_reg("rcx"), op_reg("rax")); break;
+        case TOKEN_PLUS:
+            if ((left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY)) && 
+                (right_type && (right_type->kind == TYPE_INT || right_type->kind == TYPE_CHAR))) {
+                // PTR + INT -> scale INT (rcx)
+                if (size > 1) emit_inst2("imul", op_imm(size), op_reg("rcx"));
+                node->resolved_type = left_type;
+            } else if ((left_type && (left_type->kind == TYPE_INT || left_type->kind == TYPE_CHAR)) && 
+                       (right_type && (right_type->kind == TYPE_PTR || right_type->kind == TYPE_ARRAY))) {
+                // INT + PTR -> scale INT (rax)
+                if (size > 1) emit_inst2("imul", op_imm(size), op_reg("rax"));
+                node->resolved_type = right_type;
+            } else {
+                // INT + INT
+                node->resolved_type = left_type ? left_type : right_type;
+            }
+            emit_inst2("add", op_reg("rcx"), op_reg("rax")); 
+            break;
+        case TOKEN_MINUS: 
+            if ((left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY)) && 
+                (right_type && (right_type->kind == TYPE_INT || right_type->kind == TYPE_CHAR))) {
+                // PTR - INT -> scale INT (rcx)
+                if (size > 1) emit_inst2("imul", op_imm(size), op_reg("rcx"));
+                emit_inst2("sub", op_reg("rcx"), op_reg("rax"));
+                node->resolved_type = left_type;
+            } else if ((left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY)) && 
+                       (right_type && (right_type->kind == TYPE_PTR || right_type->kind == TYPE_ARRAY))) {
+                // PTR - PTR -> diff / size
+                emit_inst2("sub", op_reg("rcx"), op_reg("rax"));
+                if (size > 1) {
+                    emit_inst0("cqto");
+                    emit_inst2("mov", op_imm(size), op_reg("rcx"));
+                    emit_inst1("idiv", op_reg("rcx"));
+                }
+                node->resolved_type = type_int(); // Result is int (ptrdiff_t)
+            } else {
+                emit_inst2("sub", op_reg("rcx"), op_reg("rax"));
+                node->resolved_type = left_type;
+            }
+            break;
+        case TOKEN_STAR:  
+            emit_inst2("imul", op_reg("rcx"), op_reg("rax")); 
+            node->resolved_type = left_type;
+            break;
         case TOKEN_SLASH:
             emit_inst0("cqto");
-            emit_inst1("idivq", op_reg("rcx"));
+            emit_inst1("idiv", op_reg("rcx"));
+            node->resolved_type = left_type;
             break;
         case TOKEN_EQUAL_EQUAL:
-            emit_inst2("cmpq", op_reg("rcx"), op_reg("rax"));
+            emit_inst2("cmp", op_reg("rcx"), op_reg("rax"));
             emit_inst1("sete", op_reg("al"));
             emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
             break;
         case TOKEN_BANG_EQUAL:
-            emit_inst2("cmpq", op_reg("rcx"), op_reg("rax"));
+            emit_inst2("cmp", op_reg("rcx"), op_reg("rax"));
             emit_inst1("setne", op_reg("al"));
             emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
             break;
         case TOKEN_LESS:
-            emit_inst2("cmpq", op_reg("rcx"), op_reg("rax"));
+            emit_inst2("cmp", op_reg("rcx"), op_reg("rax"));
             emit_inst1("setl", op_reg("al"));
             emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
             break;
         case TOKEN_GREATER:
-            emit_inst2("cmpq", op_reg("rcx"), op_reg("rax"));
+            emit_inst2("cmp", op_reg("rcx"), op_reg("rax"));
             emit_inst1("setg", op_reg("al"));
             emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
             break;
         case TOKEN_LESS_EQUAL:
-            emit_inst2("cmpq", op_reg("rcx"), op_reg("rax"));
+            emit_inst2("cmp", op_reg("rcx"), op_reg("rax"));
             emit_inst1("setle", op_reg("al"));
             emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
             break;
         case TOKEN_GREATER_EQUAL:
-            emit_inst2("cmpq", op_reg("rcx"), op_reg("rax"));
+            emit_inst2("cmp", op_reg("rcx"), op_reg("rax"));
             emit_inst1("setge", op_reg("al"));
             emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
             break;
@@ -375,16 +436,16 @@ static void gen_binary_expr(ASTNode *node) {
 
 static void gen_expression(ASTNode *node) {
     if (node->type == AST_INTEGER) {
-        emit_inst2("movq", op_imm(node->data.integer.value), op_reg("rax"));
+        emit_inst2("mov", op_imm(node->data.integer.value), op_reg("rax"));
     } else if (node->type == AST_IDENTIFIER) {
         int offset = get_local_offset(node->data.identifier.name);
         if (offset != 0) {
             Type *t = get_local_type(node->data.identifier.name);
             if (t && t->kind == TYPE_ARRAY) {
                 // Array decays to pointer
-                emit_inst2("leaq", op_mem("rbp", offset), op_reg("rax"));
+                emit_inst2("lea", op_mem("rbp", offset), op_reg("rax"));
             } else {
-                emit_inst2("movq", op_mem("rbp", offset), op_reg("rax"));
+                emit_inst2("mov", op_mem("rbp", offset), op_reg("rax"));
             }
             node->resolved_type = t;
         }
@@ -394,7 +455,7 @@ static void gen_expression(ASTNode *node) {
         if (t && t->size == 1) {
             emit_inst2("movzbq", op_mem("rax", 0), op_reg("rax"));
         } else {
-            emit_inst2("movq", op_mem("rax", 0), op_reg("rax"));
+            emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
         }
     } else if (node->type == AST_BINARY_EXPR) {
         gen_binary_expr(node);
@@ -403,14 +464,14 @@ static void gen_expression(ASTNode *node) {
         if (node->data.assign.left->type == AST_IDENTIFIER) {
             int offset = get_local_offset(node->data.assign.left->data.identifier.name);
             if (offset != 0) {
-                emit_inst2("movq", op_reg("rax"), op_mem("rbp", offset));
+                emit_inst2("mov", op_reg("rax"), op_mem("rbp", offset));
             }
         } else {
             emit_inst1("pushq", op_reg("rax"));
             gen_addr(node->data.assign.left);
             emit_inst1("popq", op_reg("rcx"));
-            emit_inst2("movq", op_reg("rcx"), op_mem("rax", 0));
-            emit_inst2("movq", op_reg("rcx"), op_reg("rax")); // Result is the value
+            emit_inst2("mov", op_reg("rcx"), op_mem("rax", 0));
+            emit_inst2("mov", op_reg("rcx"), op_reg("rax")); // Result is the value
         }
     } else if (node->type == AST_DEREF) {
         gen_expression(node->data.unary.expression);
@@ -419,14 +480,14 @@ static void gen_expression(ASTNode *node) {
             emit_inst2("movzbq", op_mem("rax", 0), op_reg("rax"));
             node->resolved_type = t->data.ptr_to;
         } else {
-            emit_inst2("movq", op_mem("rax", 0), op_reg("rax"));
+            emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
             if (t && t->kind == TYPE_PTR) node->resolved_type = t->data.ptr_to;
         }
     } else if (node->type == AST_ADDR_OF) {
         gen_addr(node->data.unary.expression);
     } else if (node->type == AST_MEMBER_ACCESS) {
         gen_addr(node);
-        emit_inst2("movq", op_mem("rax", 0), op_reg("rax"));
+        emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
     } else if (node->type == AST_CALL) {
         const char *arg_regs[] = {"rcx", "rdx", "r8", "r9"};
         for (size_t i = 0; i < node->children_count; i++) {
@@ -445,9 +506,9 @@ static void gen_expression(ASTNode *node) {
         }
         
         // Win64 requires 32 bytes of shadow space
-        emit_inst2("subq", op_imm(32), op_reg("rsp"));
+        emit_inst2("sub", op_imm(32), op_reg("rsp"));
         emit_inst1("call", op_label(node->data.call.name));
-        emit_inst2("addq", op_imm(32), op_reg("rsp"));
+        emit_inst2("add", op_imm(32), op_reg("rsp"));
     } else if (node->type == AST_STRING) {
         char label[32];
         sprintf(label, ".LC%d", label_count++);
@@ -465,7 +526,7 @@ static void gen_expression(ASTNode *node) {
         }
         
         // Load address of the string
-        emit_inst2("leaq", op_label(label), op_reg("rax"));
+        emit_inst2("lea", op_label(label), op_reg("rax"));
     }
 }
 
@@ -511,7 +572,7 @@ static void gen_statement(ASTNode *node) {
         if (node->data.var_decl.initializer) {
             gen_expression(node->data.var_decl.initializer);
         } else {
-            emit_inst2("movq", op_imm(0), op_reg("rax"));
+            emit_inst2("mov", op_imm(0), op_reg("rax"));
         }
         
         int size = node->resolved_type ? node->resolved_type->size : 8;
@@ -523,7 +584,7 @@ static void gen_statement(ASTNode *node) {
         locals_count++;
         
         if (node->resolved_type && (node->resolved_type->kind == TYPE_STRUCT || node->resolved_type->kind == TYPE_ARRAY)) {
-            emit_inst2("subq", op_imm(size), op_reg("rsp"));
+            emit_inst2("sub", op_imm(size), op_reg("rsp"));
         } else {
             emit_inst1("pushq", op_reg("rax"));
         }
@@ -535,7 +596,7 @@ static void gen_statement(ASTNode *node) {
         sprintf(l_end, ".L%d", label_end);
         
         gen_expression(node->data.if_stmt.condition);
-        emit_inst2("cmpq", op_imm(0), op_reg("rax"));
+        emit_inst2("cmp", op_imm(0), op_reg("rax"));
         emit_inst1("je", op_label(l_else));
         
         gen_statement(node->data.if_stmt.then_branch);
@@ -555,7 +616,7 @@ static void gen_statement(ASTNode *node) {
         
         emit_label_def(l_start);
         gen_expression(node->data.while_stmt.condition);
-        emit_inst2("cmpq", op_imm(0), op_reg("rax"));
+        emit_inst2("cmp", op_imm(0), op_reg("rax"));
         emit_inst1("je", op_label(l_end));
         
         break_label_stack[break_label_ptr++] = label_end;
@@ -579,7 +640,7 @@ static void gen_statement(ASTNode *node) {
         emit_label_def(l_start);
         if (node->data.for_stmt.condition) {
             gen_expression(node->data.for_stmt.condition);
-            emit_inst2("cmpq", op_imm(0), op_reg("rax"));
+            emit_inst2("cmp", op_imm(0), op_reg("rax"));
             emit_inst1("je", op_label(l_end));
         }
         
@@ -625,7 +686,7 @@ static void gen_statement(ASTNode *node) {
         for (int i = 0; i < case_count; i++) {
             sprintf(case_labels[i], ".L%d", label_count++);
             // Emit comparison
-            emit_inst2("cmpq", op_imm(cases[i]->data.case_stmt.value), op_reg("rax"));
+            emit_inst2("cmp", op_imm(cases[i]->data.case_stmt.value), op_reg("rax"));
             emit_inst1("je", op_label(case_labels[i]));
             // Hack to pass label to gen_statement:
             cases[i]->resolved_type = (Type *)strdup(case_labels[i]); // WARNING: memory leak, but it works
@@ -693,7 +754,7 @@ static void gen_function(ASTNode *node) {
     
     // Prologue
     emit_inst1("pushq", op_reg("rbp"));
-    emit_inst2("movq", op_reg("rsp"), op_reg("rbp"));
+    emit_inst2("mov", op_reg("rsp"), op_reg("rbp"));
     
     locals_count = 0;
     stack_offset = 0;

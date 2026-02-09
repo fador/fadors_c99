@@ -74,8 +74,8 @@ Use `-S` to stop after assembly generation.
 - [x] **Arrays**: Parser support for `T name[size]` and `expr[index]`. <!-- id: 25 -->
 - [x] **Control Flow**: Implement `for` loops and `switch` statements.
 - [x] **Abstractions**: Implement `typedef` to simplify complex declarations.
-- [ ] **Data Types**: Add `enum` and `union` support.
-- [ ] **Pointer Arithmetic**: Scaling based on type size.
+- [x] **Data Types**: Add `enum` and `union` support.
+- [x] **Pointer Arithmetic**: Scaling based on type size.
 
 ### Self-Hosting Path
 - [ ] Environment Macros: Emit platform macros (e.g., `_WIN32`, `_LINUX_`) for build environment detection.

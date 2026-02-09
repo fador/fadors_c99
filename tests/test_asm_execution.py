@@ -103,6 +103,10 @@ def run_test(c_file):
              print(f"FAILED: Expected exit code 42, got {ret_code}")
              return False
 
+        if "23_pointer_math" in c_file and ret_code != 0:
+             print(f"FAILED: Expected exit code 0, got {ret_code}")
+             return False
+
     except OSError as e:
         print(f"FAILED: Execution of {exe_file}: {e}")
         return False
@@ -130,7 +134,7 @@ def main():
     
     # Filter for known working tests for binary execution (simple returns)
     # 01_return.c, 07_function.c, 11_nested_struct.c (if it compiles to valid asm)
-    test_whitelist = ["01_return.c", "07_function.c", "11_nested_struct.c", "17_for.c", "18_typedef.c", "19_array.c", "20_switch.c", "21_enum.c", "22_union.c"]
+    test_whitelist = ["01_return.c", "07_function.c", "11_nested_struct.c", "17_for.c", "18_typedef.c", "19_array.c", "20_switch.c", "21_enum.c", "22_union.c", "23_pointer_math.c"]
     for c_file in c_files:
         if os.path.basename(c_file) in test_whitelist:
             total += 1
