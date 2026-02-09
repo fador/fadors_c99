@@ -71,9 +71,9 @@ Use `-S` to stop after assembly generation.
 - [ ] Relocation handling for external symbols.
 
 ### Language Features
-- [ ] **Arrays**: Parser support for `T name[size]` and `expr[index]`.
-- [x] **Control Flow**: Implement `for` loops.
-- [ ] **Abstractions**: Implement `typedef` to simplify complex declarations.
+- [x] **Arrays**: Parser support for `T name[size]` and `expr[index]`. <!-- id: 25 -->
+- [x] **Control Flow**: Implement `for` loops and `switch` statements.
+- [x] **Abstractions**: Implement `typedef` to simplify complex declarations.
 - [ ] **Data Types**: Add `enum` and `union` support.
 - [ ] **Pointer Arithmetic**: Scaling based on type size.
 

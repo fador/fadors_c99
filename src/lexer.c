@@ -55,7 +55,14 @@ static TokenType identifier_type(const char *start, size_t length) {
     if (check_keyword(start, length, "void", TOKEN_KEYWORD_VOID) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_VOID;
     if (check_keyword(start, length, "char", TOKEN_KEYWORD_CHAR) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_CHAR;
     if (check_keyword(start, length, "struct", TOKEN_KEYWORD_STRUCT) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_STRUCT;
+    if (check_keyword(start, length, "typedef", TOKEN_KEYWORD_TYPEDEF) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_TYPEDEF;
     if (check_keyword(start, length, "extern", TOKEN_KEYWORD_EXTERN) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_EXTERN;
+    if (check_keyword(start, length, "switch", TOKEN_KEYWORD_SWITCH) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_SWITCH;
+    if (check_keyword(start, length, "case", TOKEN_KEYWORD_CASE) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_CASE;
+    if (check_keyword(start, length, "default", TOKEN_KEYWORD_DEFAULT) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_DEFAULT;
+    if (check_keyword(start, length, "break", TOKEN_KEYWORD_BREAK) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_BREAK;
+    if (check_keyword(start, length, "enum", TOKEN_KEYWORD_ENUM) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_ENUM;
+    if (check_keyword(start, length, "union", TOKEN_KEYWORD_UNION) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_UNION;
     return TOKEN_IDENTIFIER;
 }
 
@@ -123,7 +130,10 @@ Token lexer_next_token(Lexer *lexer) {
         case ')': token.type = TOKEN_RPAREN; break;
         case '{': token.type = TOKEN_LBRACE; break;
         case '}': token.type = TOKEN_RBRACE; break;
+        case '[': token.type = TOKEN_LBRACKET; break;
+        case ']': token.type = TOKEN_RBRACKET; break;
         case ';': token.type = TOKEN_SEMICOLON; break;
+        case ':': token.type = TOKEN_COLON; break;
         case ',': token.type = TOKEN_COMMA; break;
         case '.': token.type = TOKEN_DOT; break;
         case '+': token.type = TOKEN_PLUS; break;

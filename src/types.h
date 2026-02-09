@@ -8,6 +8,9 @@ typedef enum {
     TYPE_CHAR,
     TYPE_PTR,
     TYPE_STRUCT,
+    TYPE_UNION,
+    TYPE_ENUM,
+    TYPE_ARRAY,
     TYPE_VOID
 } TypeKind;
 
@@ -22,8 +25,9 @@ typedef struct Member {
 typedef struct Type {
     TypeKind kind;
     int size;
+    int array_len;
     union {
-        struct Type *ptr_to;
+        struct Type *ptr_to; // base type for pointers and arrays
         struct {
             char *name;
             Member *members;
@@ -35,7 +39,10 @@ typedef struct Type {
 Type *type_int();
 Type *type_char();
 Type *type_ptr(Type *to);
+Type *type_array(Type *base, int len);
 Type *type_struct(const char *name);
+Type *type_union(const char *name);
+Type *type_enum(const char *name);
 Type *type_void();
 
 #endif // TYPES_H

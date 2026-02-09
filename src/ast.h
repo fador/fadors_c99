@@ -19,11 +19,17 @@ typedef enum {
     AST_WHILE,
     AST_CALL,
     AST_STRUCT_DEF,
+    AST_UNION_DEF,
     AST_MEMBER_ACCESS,
     AST_DEREF,
     AST_ADDR_OF,
     AST_STRING,
     AST_FOR,
+    AST_ARRAY_ACCESS,
+    AST_SWITCH,
+    AST_CASE,
+    AST_DEFAULT,
+    AST_BREAK,
     AST_UNKNOWN
 } ASTNodeType;
 
@@ -95,6 +101,17 @@ typedef struct ASTNode {
             struct ASTNode *increment;
             struct ASTNode *body;
         } for_stmt;
+        struct {
+            struct ASTNode *condition;
+            struct ASTNode *body;
+        } switch_stmt;
+        struct {
+            int value;
+        } case_stmt;
+        struct {
+            struct ASTNode *array;
+            struct ASTNode *index;
+        } array_access;
         struct {
             char *value;
         } string;

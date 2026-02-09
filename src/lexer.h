@@ -16,12 +16,22 @@ typedef enum {
     TOKEN_KEYWORD_VOID,
     TOKEN_KEYWORD_CHAR,
     TOKEN_KEYWORD_STRUCT,
+    TOKEN_KEYWORD_TYPEDEF,
     TOKEN_KEYWORD_EXTERN,
+    TOKEN_KEYWORD_SWITCH,
+    TOKEN_KEYWORD_CASE,
+    TOKEN_KEYWORD_DEFAULT,
+    TOKEN_KEYWORD_BREAK,
+    TOKEN_KEYWORD_ENUM,
+    TOKEN_KEYWORD_UNION,
     TOKEN_LPAREN,       // (
     TOKEN_RPAREN,       // )
     TOKEN_LBRACE,       // {
     TOKEN_RBRACE,       // }
+    TOKEN_LBRACKET,     // [
+    TOKEN_RBRACKET,     // ]
     TOKEN_SEMICOLON,    // ;
+    TOKEN_COLON,        // :
     TOKEN_COMMA,        // ,
     TOKEN_DOT,          // .
     TOKEN_ARROW,        // ->
