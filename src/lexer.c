@@ -55,6 +55,7 @@ static TokenType identifier_type(const char *start, size_t length) {
     if (check_keyword(start, length, "void", TOKEN_KEYWORD_VOID) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_VOID;
     if (check_keyword(start, length, "char", TOKEN_KEYWORD_CHAR) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_CHAR;
     if (check_keyword(start, length, "struct", TOKEN_KEYWORD_STRUCT) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_STRUCT;
+    if (check_keyword(start, length, "extern", TOKEN_KEYWORD_EXTERN) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_EXTERN;
     return TOKEN_IDENTIFIER;
 }
 
@@ -90,13 +91,28 @@ Token lexer_next_token(Lexer *lexer) {
         return token;
     }
 
-    if (isdigit(c)) {
+    if (isdigit(c) != 0) {
         while (isdigit(peek(lexer))) {
             advance(lexer);
         }
         token.type = TOKEN_NUMBER;
         token.length = &lexer->source[lexer->position] - token.start;
         return token;
+    }
+    if (c == '"') {
+        advance(lexer); // Consume opening quote
+        while (peek(lexer) != '"' && peek(lexer) != '\0') {
+            if (peek(lexer) == '\n') lexer->line++;
+            advance(lexer);
+        }
+        if (peek(lexer) == '"') {
+            advance(lexer); // Consume closing quote
+            token.type = TOKEN_STRING;
+            // token.start points to opening quote, position is after closing quote
+            token.length = &lexer->source[lexer->position] - token.start - 2;
+            token.start++; // skip opening quote
+            return token;
+        }
     }
 
     advance(lexer);

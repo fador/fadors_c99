@@ -16,6 +16,7 @@ typedef enum {
     TOKEN_KEYWORD_VOID,
     TOKEN_KEYWORD_CHAR,
     TOKEN_KEYWORD_STRUCT,
+    TOKEN_KEYWORD_EXTERN,
     TOKEN_LPAREN,       // (
     TOKEN_RPAREN,       // )
     TOKEN_LBRACE,       // {
@@ -36,6 +37,7 @@ typedef enum {
     TOKEN_GREATER,      // >
     TOKEN_LESS_EQUAL,   // <=
     TOKEN_GREATER_EQUAL, // >=
+    TOKEN_STRING,       // "string"
     TOKEN_UNKNOWN
 } TokenType;
 

@@ -43,6 +43,7 @@ void ast_print(ASTNode *node, int indent) {
         case AST_MEMBER_ACCESS: printf("MemberAccess: %s%s\n", node->data.member_access.is_arrow ? "->" : ".", node->data.member_access.member_name); break;
         case AST_DEREF: printf("Deref\n"); break;
         case AST_ADDR_OF: printf("AddrOf\n"); break;
+        case AST_STRING: printf("String: \"%s\"\n", node->data.string.value); break;
         case AST_UNKNOWN: printf("Unknown\n"); break;
     }
     

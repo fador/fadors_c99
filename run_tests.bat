@@ -40,4 +40,49 @@ if %errorlevel% neq 0 (
 .\tests\07_function.exe
 echo 07_function result: %errorlevel%
 
+echo [TEST 12_string]
+.\build\Debug\fadors99.exe tests\12_string.c --obj
+if %errorlevel% neq 0 (
+    echo [ERROR] 12_string.c compilation failed.
+    exit /b %errorlevel%
+)
+.\tests\12_string.exe
+echo 12_string result: %errorlevel%
+
+echo [TEST 13_extern]
+.\build\Debug\fadors99.exe tests\13_extern.c --obj
+if %errorlevel% neq 0 (
+    echo [ERROR] 13_extern.c compilation failed.
+    exit /b %errorlevel%
+)
+.\tests\13_extern.exe
+echo 13_extern result: %errorlevel%
+
+echo [TEST 14_params]
+.\build\Debug\fadors99.exe tests\14_params.c --obj
+if %errorlevel% neq 0 (
+    echo [ERROR] 14_params.c compilation failed.
+    exit /b %errorlevel%
+)
+.\tests\14_params.exe
+echo 14_params result: %errorlevel%
+
+echo [TEST 15_nested_calls]
+.\build\Debug\fadors99.exe tests\15_nested_calls.c --obj
+if %errorlevel% neq 0 (
+    echo [ERROR] 15_nested_calls.c compilation failed.
+    exit /b %errorlevel%
+)
+.\tests\15_nested_calls.exe
+echo 15_nested_calls result: %errorlevel%
+
+echo [TEST 16_void_func]
+.\build\Debug\fadors99.exe tests\16_void_func.c --obj
+if %errorlevel% neq 0 (
+    echo [ERROR] 16_void_func.c compilation failed.
+    exit /b %errorlevel%
+)
+.\tests\16_void_func.exe
+echo 16_void_func result: %errorlevel%
+
 ENDLOCAL

@@ -110,6 +110,7 @@ int main(int argc, char **argv) {
     
     ASTNode *program = parser_parse(&parser);
     
+    
     char out_base[256];
     strncpy(out_base, source_filename, 250);
     char *dot = strrchr(out_base, '.');

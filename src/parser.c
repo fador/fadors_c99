@@ -31,6 +31,12 @@ static Type *parse_type(Parser *parser) {
     if (parser->current_token.type == TOKEN_KEYWORD_INT) {
         type = type_int();
         parser_advance(parser);
+    } else if (parser->current_token.type == TOKEN_KEYWORD_CHAR) {
+        type = type_char();
+        parser_advance(parser);
+    } else if (parser->current_token.type == TOKEN_KEYWORD_VOID) {
+        type = type_void();
+        parser_advance(parser);
     } else if (parser->current_token.type == TOKEN_KEYWORD_STRUCT) {
         parser_advance(parser);
         if (parser->current_token.type == TOKEN_IDENTIFIER) {
@@ -85,6 +91,16 @@ static ASTNode *parse_primary(Parser *parser) {
             node->data.identifier.name = name;
             return node;
         }
+    } else if (parser->current_token.type == TOKEN_STRING) {
+        ASTNode *node = ast_create_node(AST_STRING);
+        char *val = malloc(parser->current_token.length + 1);
+        if (parser->current_token.start != NULL) {
+            strncpy(val, parser->current_token.start, parser->current_token.length);
+        }
+        val[parser->current_token.length] = '\0';
+        node->data.string.value = val;
+        parser_advance(parser);
+        return node;
     } else if (parser->current_token.type == TOKEN_LPAREN) {
         parser_advance(parser);
         ASTNode *node = parse_expression(parser);
@@ -223,10 +239,18 @@ static ASTNode *parse_statement(Parser *parser) {
     if (parser->current_token.type == TOKEN_KEYWORD_RETURN) {
         parser_advance(parser);
         ASTNode *node = ast_create_node(AST_RETURN);
-        node->data.return_stmt.expression = parse_expression(parser);
+        if (parser->current_token.type == TOKEN_SEMICOLON) {
+            node->data.return_stmt.expression = NULL;
+        } else {
+            node->data.return_stmt.expression = parse_expression(parser);
+        }
         parser_expect(parser, TOKEN_SEMICOLON);
         return node;
-    } else if (parser->current_token.type == TOKEN_KEYWORD_INT || parser->current_token.type == TOKEN_KEYWORD_STRUCT) {
+    } else if (parser->current_token.type == TOKEN_KEYWORD_INT || 
+               parser->current_token.type == TOKEN_KEYWORD_CHAR ||
+               parser->current_token.type == TOKEN_KEYWORD_VOID ||
+               parser->current_token.type == TOKEN_KEYWORD_EXTERN ||
+               parser->current_token.type == TOKEN_KEYWORD_STRUCT) {
         // Variable or struct declaration/definition
         if (parser->current_token.type == TOKEN_KEYWORD_STRUCT) {
             Token next = lexer_peek_token(parser->lexer);
@@ -367,9 +391,19 @@ ASTNode *parse_block(Parser *parser) {
 }
 
 static ASTNode *parse_function(Parser *parser) {
-    parser_expect(parser, TOKEN_KEYWORD_INT);
+    if (parser->current_token.type == TOKEN_KEYWORD_EXTERN) {
+        parser_advance(parser);
+    }
+    
+    Type *ret_type = parse_type(parser);
+    if (!ret_type) {
+        printf("Syntax Error: Expected return type at line %d\n", parser->current_token.line);
+        exit(1);
+    }
     
     ASTNode *node = ast_create_node(AST_FUNCTION);
+    node->resolved_type = ret_type;
+    
     if (parser->current_token.type == TOKEN_IDENTIFIER) {
         node->data.function.name = malloc(parser->current_token.length + 1);
         strncpy(node->data.function.name, parser->current_token.start, parser->current_token.length);
@@ -381,9 +415,42 @@ static ASTNode *parse_function(Parser *parser) {
     }
     
     parser_expect(parser, TOKEN_LPAREN);
+    while (parser->current_token.type != TOKEN_RPAREN && parser->current_token.type != TOKEN_EOF) {
+        Type *param_type = parse_type(parser);
+        if (!param_type) {
+            printf("Syntax Error: Expected parameter type at line %d\n", parser->current_token.line);
+            exit(1);
+        }
+        
+        ASTNode *param = ast_create_node(AST_VAR_DECL);
+        param->resolved_type = param_type;
+        
+        if (parser->current_token.type == TOKEN_IDENTIFIER) {
+            param->data.var_decl.name = malloc(parser->current_token.length + 1);
+            strncpy(param->data.var_decl.name, parser->current_token.start, parser->current_token.length);
+            param->data.var_decl.name[parser->current_token.length] = '\0';
+            parser_advance(parser);
+        } else {
+            param->data.var_decl.name = NULL;
+        }
+        
+        ast_add_child(node, param);
+        
+        if (parser->current_token.type == TOKEN_COMMA) {
+            parser_advance(parser);
+        } else if (parser->current_token.type != TOKEN_RPAREN) {
+            printf("Syntax Error: Expected ',' or ')' in parameter list at line %d\n", parser->current_token.line);
+            exit(1);
+        }
+    }
     parser_expect(parser, TOKEN_RPAREN);
     
-    node->data.function.body = parse_block(parser);
+    if (parser->current_token.type == TOKEN_SEMICOLON) {
+        parser_advance(parser);
+        node->data.function.body = NULL;
+    } else {
+        node->data.function.body = parse_block(parser);
+    }
     
     return node;
 }

@@ -1,2 +1,5 @@
 /build
 *.s
+*.obj
+*.asm
+*.exe

@@ -9,6 +9,13 @@ Type *type_int() {
     return t;
 }
 
+Type *type_char() {
+    Type *t = malloc(sizeof(Type));
+    t->kind = TYPE_CHAR;
+    t->size = 1;
+    return t;
+}
+
 Type *type_ptr(Type *to) {
     Type *t = malloc(sizeof(Type));
     t->kind = TYPE_PTR;
@@ -33,5 +40,12 @@ Type *type_struct(const char *name) {
     t->data.struct_data.members = malloc(sizeof(Member) * 10);
     t->data.struct_data.members_count = 0;
     structs[structs_count++] = t;
+    return t;
+}
+
+Type *type_void() {
+    Type *t = malloc(sizeof(Type));
+    t->kind = TYPE_VOID;
+    t->size = 0;
     return t;
 }

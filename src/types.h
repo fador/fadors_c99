@@ -5,6 +5,7 @@
 
 typedef enum {
     TYPE_INT,
+    TYPE_CHAR,
     TYPE_PTR,
     TYPE_STRUCT,
     TYPE_VOID
@@ -32,7 +33,9 @@ typedef struct Type {
 } Type;
 
 Type *type_int();
+Type *type_char();
 Type *type_ptr(Type *to);
 Type *type_struct(const char *name);
+Type *type_void();
 
 #endif // TYPES_H

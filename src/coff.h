@@ -37,6 +37,7 @@ typedef struct {
 #define IMAGE_SCN_MEM_EXECUTE            0x20000000
 #define IMAGE_SCN_MEM_READ               0x40000000
 #define IMAGE_SCN_MEM_WRITE              0x80000000
+#define IMAGE_SCN_ALIGN_4BYTES           0x00300000
 #define IMAGE_SCN_ALIGN_16BYTES          0x00500000
 
 // IMAGE_SYMBOL

@@ -75,13 +75,13 @@ void encode_inst1(Buffer *buf, const char *mnemonic, Operand op1) {
             buffer_write_byte(buf, 0xE9);
             buffer_write_dword(buf, 0); // Placeholder
         }
-    } else if (strcmp(mnemonic, "je") == 0) {
+    } else if (strcmp(mnemonic, "je") == 0 || strcmp(mnemonic, "jz") == 0) {
         if (op1.type == OP_LABEL) {
             buffer_write_byte(buf, 0x0F);
             buffer_write_byte(buf, 0x84);
             buffer_write_dword(buf, 0); // Placeholder
         }
-    } else if (strcmp(mnemonic, "jne") == 0) {
+    } else if (strcmp(mnemonic, "jne") == 0 || strcmp(mnemonic, "jnz") == 0) {
         if (op1.type == OP_LABEL) {
             buffer_write_byte(buf, 0x0F);
             buffer_write_byte(buf, 0x85);
@@ -91,6 +91,20 @@ void encode_inst1(Buffer *buf, const char *mnemonic, Operand op1) {
         if (op1.type == OP_LABEL) {
             buffer_write_byte(buf, 0xE8);
             buffer_write_dword(buf, 0); // Placeholder
+        }
+    } else if (strncmp(mnemonic, "set", 3) == 0) {
+        // sete, setne, setl, setle, setg, setge
+        if (op1.type == OP_REG) {
+            int reg = get_reg_id(op1.data.reg);
+            // setcc only works on 1-byte registers (AL, CL, DL, BL, etc.)
+            buffer_write_byte(buf, 0x0F);
+            if (strcmp(mnemonic, "sete") == 0 || strcmp(mnemonic, "setz") == 0) buffer_write_byte(buf, 0x94);
+            else if (strcmp(mnemonic, "setne") == 0 || strcmp(mnemonic, "setnz") == 0) buffer_write_byte(buf, 0x95);
+            else if (strcmp(mnemonic, "setl") == 0) buffer_write_byte(buf, 0x9C);
+            else if (strcmp(mnemonic, "setle") == 0) buffer_write_byte(buf, 0x9E);
+            else if (strcmp(mnemonic, "setg") == 0) buffer_write_byte(buf, 0x9F);
+            else if (strcmp(mnemonic, "setge") == 0) buffer_write_byte(buf, 0x9D);
+            emit_modrm(buf, 3, 0, reg);
         }
     }
 }
@@ -153,6 +167,15 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand src, Operand dest) 
              emit_modrm(buf, 3, 5, d); // sub r/m, imm32 (opcode extension 5)
              buffer_write_dword(buf, src.data.imm);
         }
+    } else if (strcmp(mnemonic, "imul") == 0 || strcmp(mnemonic, "imulq") == 0) {
+        if (src.type == OP_REG && dest.type == OP_REG) {
+            int s = get_reg_id(src.data.reg);
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 1, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0xAF);
+            emit_modrm(buf, 3, d, s);
+        }
     } else if (strcmp(mnemonic, "cmp") == 0 || strcmp(mnemonic, "cmpq") == 0) {
         if (src.type == OP_REG && dest.type == OP_REG) {
             int s = get_reg_id(src.data.reg);
@@ -173,6 +196,26 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand src, Operand dest) 
             int d = get_reg_id(dest.data.reg);
             emit_rex(buf, 1, d >= 8, 0, s >= 8);
             buffer_write_byte(buf, 0x8D);
+            if (src.data.mem.offset == 0) {
+                emit_modrm(buf, 0, d, s);
+            } else {
+                emit_modrm(buf, 2, d, s);
+                buffer_write_dword(buf, src.data.mem.offset);
+            }
+        } else if (src.type == OP_LABEL && dest.type == OP_REG) {
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 1, d >= 8, 0, 0);
+            buffer_write_byte(buf, 0x8D);
+            emit_modrm(buf, 0, d, 5); // RIP-relative
+            buffer_write_dword(buf, 0); // Placeholder
+        }
+    } else if (strcmp(mnemonic, "movzbq") == 0) {
+        if (src.type == OP_MEM && dest.type == OP_REG) {
+            int s = get_reg_id(src.data.mem.base);
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 1, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0xB6);
             if (src.data.mem.offset == 0) {
                 emit_modrm(buf, 0, d, s);
             } else {
