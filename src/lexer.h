@@ -26,6 +26,7 @@ typedef enum {
     TOKEN_KEYWORD_UNION,
     TOKEN_KEYWORD_FLOAT,
     TOKEN_KEYWORD_DOUBLE,
+    TOKEN_KEYWORD_SIZEOF,
     TOKEN_LPAREN,       // (
     TOKEN_RPAREN,       // )
     TOKEN_BANG,         // !

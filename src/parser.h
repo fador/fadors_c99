@@ -23,6 +23,18 @@ typedef struct {
     int enum_constants_count;
     Type *structs[100];
     int structs_count;
+    
+    struct {
+        char *name;
+        struct Type *type;
+    } locals[100];
+    int locals_count;
+
+    struct {
+        char *name;
+        struct Type *type;
+    } globals[100];
+    int globals_count;
 } Parser;
 
 void parser_init(Parser *parser, Lexer *lexer);

@@ -65,6 +65,7 @@ static TokenType identifier_type(const char *start, size_t length) {
     if (check_keyword(start, length, "union", TOKEN_KEYWORD_UNION) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_UNION;
     if (check_keyword(start, length, "float", TOKEN_KEYWORD_FLOAT) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_FLOAT;
     if (check_keyword(start, length, "double", TOKEN_KEYWORD_DOUBLE) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_DOUBLE;
+    if (check_keyword(start, length, "sizeof", TOKEN_KEYWORD_SIZEOF) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_SIZEOF;
     return TOKEN_IDENTIFIER;
 }
 
