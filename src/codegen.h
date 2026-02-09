@@ -4,6 +4,8 @@
 #include "ast.h"
 #include <stdio.h>
 
+#include "coff_writer.h"
+
 typedef enum {
     SYNTAX_ATT,
     SYNTAX_INTEL
@@ -11,6 +13,7 @@ typedef enum {
 
 void codegen_init(FILE *output);
 void codegen_set_syntax(CodegenSyntax syntax);
+void codegen_set_writer(COFFWriter *writer);
 void codegen_generate(ASTNode *program);
 
 #endif // CODEGEN_H

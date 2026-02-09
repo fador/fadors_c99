@@ -22,6 +22,9 @@ set(SOURCES
     src/arch_x86_64.c
     src/preprocessor.c
     src/types.c
+    src/buffer.c
+    src/encoder.c
+    src/coff_writer.c
 )
 
 add_executable(fadors99 ${SOURCES})

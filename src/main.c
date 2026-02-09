@@ -1,9 +1,11 @@
+#define _CRT_SECURE_NO_WARNINGS
 #include <stdio.h>
 #include "lexer.h"
 #include "parser.h"
 #include "ast.h"
 #include "codegen.h"
 #include "preprocessor.h"
+#include "coff_writer.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -25,7 +27,7 @@ static void compile_and_link(const char *asm_file, const char *exe_file, int use
     strcat(obj_file, ".obj");
 
     if (use_masm) {
-        // Assemble: ml /c /nologo /Fo<obj> <asm>
+        // Assemble: ml64 /c /nologo /Fo<obj> <asm>
         sprintf(cmd, "ml64 /c /nologo /Fo\"%s\" \"%s\"", obj_file, asm_file);
         if (run_command(cmd) != 0) {
             printf("Error: Assembly failed.\n");
@@ -33,7 +35,6 @@ static void compile_and_link(const char *asm_file, const char *exe_file, int use
         }
 
         // Link: link /nologo /entry:main /subsystem:console /out:<exe> <obj>
-        // Note: basic linking, might need libs later.
         sprintf(cmd, "link /nologo /entry:main /subsystem:console /out:\"%s\" \"%s\" kernel32.lib", exe_file, obj_file);
         if (run_command(cmd) != 0) {
             printf("Error: Linking failed.\n");
@@ -41,14 +42,12 @@ static void compile_and_link(const char *asm_file, const char *exe_file, int use
         }
     } else {
         // GAS/GCC path
-        // Assemble: as -o <obj> <asm>
         sprintf(cmd, "as -o \"%s\" \"%s\"", obj_file, asm_file);
         if (run_command(cmd) != 0) {
              printf("Error: Assembly failed (as).\n");
              exit(1);
         }
         
-        // Link: gcc -o <exe> <obj>
         sprintf(cmd, "gcc -o \"%s\" \"%s\"", exe_file, obj_file);
         if (run_command(cmd) != 0) {
             printf("Error: Linking failed (gcc).\n");
@@ -59,19 +58,22 @@ static void compile_and_link(const char *asm_file, const char *exe_file, int use
 
 int main(int argc, char **argv) {
     if (argc < 2) {
-        printf("Usage: %s <source.c> [--masm] [-S]\n", argv[0]);
+        printf("Usage: %s <source.c> [--masm] [--obj] [-S]\n", argv[0]);
         return 1;
     }
     
     const char *source_filename = NULL;
     int use_masm = 0;
     int stop_at_asm = 0;
+    int use_obj = 0;
     
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--masm") == 0) {
             use_masm = 1;
         } else if (strcmp(argv[i], "-S") == 0) {
             stop_at_asm = 1;
+        } else if (strcmp(argv[i], "--obj") == 0) {
+            use_obj = 1;
         } else {
             source_filename = argv[i];
         }
@@ -93,7 +95,7 @@ int main(int argc, char **argv) {
     fseek(f, 0, SEEK_SET);
     
     char *source = malloc(size + 1);
-     fread(source, 1, size, f);
+    fread(source, 1, size, f);
     source[size] = '\0';
     fclose(f);
     
@@ -113,38 +115,61 @@ int main(int argc, char **argv) {
     char *dot = strrchr(out_base, '.');
     if (dot) *dot = '\0';
     
-    char asm_filename[260];
-    strcpy(asm_filename, out_base);
-    
-    if (use_masm) {
-        strcat(asm_filename, ".asm");
+    if (use_obj) {
+        COFFWriter writer;
+        coff_writer_init(&writer);
+        codegen_set_writer(&writer);
+        codegen_init(NULL);
+        codegen_generate(program);
+        
+        char obj_filename[260];
+        sprintf(obj_filename, "%s.obj", out_base);
+        coff_writer_write(&writer, obj_filename);
+        printf("Generated Object: %s\n", obj_filename);
+        
+        if (!stop_at_asm) {
+            char exe_filename[260];
+            sprintf(exe_filename, "%s.exe", out_base);
+            char cmd[1024];
+            sprintf(cmd, "link /nologo /entry:main /subsystem:console /out:\"%s\" \"%s\" kernel32.lib", exe_filename, obj_filename);
+            if (run_command(cmd) != 0) {
+                printf("Error: Linking failed.\n");
+                return 1;
+            }
+            printf("Linked to: %s\n", exe_filename);
+        }
+        coff_writer_free(&writer);
     } else {
-        strcat(asm_filename, ".s");
+        char asm_filename[260];
+        strcpy(asm_filename, out_base);
+        
+        if (use_masm) {
+            strcat(asm_filename, ".asm");
+            codegen_set_syntax(SYNTAX_INTEL);
+        } else {
+            strcat(asm_filename, ".s");
+        }
+        
+        FILE *asm_out = fopen(asm_filename, "w");
+        if (!asm_out) {
+            printf("Could not create output file %s\n", asm_filename);
+            return 1;
+        }
+        
+        codegen_init(asm_out);
+        codegen_generate(program);
+        fclose(asm_out);
+        
+        printf("Generated: %s\n", asm_filename);
+        
+        if (!stop_at_asm) {
+            char exe_filename[260];
+            strcpy(exe_filename, out_base);
+            strcat(exe_filename, ".exe");
+            compile_and_link(asm_filename, exe_filename, use_masm);
+            printf("Compiled to: %s\n", exe_filename);
+        }
     }
     
-    FILE *out = fopen(asm_filename, "w");
-    if (!out) {
-        printf("Could not create output file %s\n", asm_filename);
-        return 1;
-    }
-    
-    if (use_masm) {
-        codegen_set_syntax(SYNTAX_INTEL);
-    }
-    codegen_init(out);
-    codegen_generate(program);
-    fclose(out);
-    
-    printf("Generated: %s\n", asm_filename);
-    
-    if (!stop_at_asm) {
-        char exe_filename[260];
-        strcpy(exe_filename, out_base);
-        strcat(exe_filename, ".exe"); // Assuming Windows for now, or detect OS
-        compile_and_link(asm_filename, exe_filename, use_masm);
-        printf("Compiled to: %s\n", exe_filename);
-    }
-    
-    // free(preprocessed);
     return 0;
 }

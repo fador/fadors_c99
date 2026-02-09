@@ -1,36 +1,30 @@
+#define _CRT_SECURE_NO_WARNINGS
 #include "arch_x86_64.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "encoder.h"
+
 static FILE *out;
+static COFFWriter *obj_writer = NULL;
 static int label_count = 0;
 static CodegenSyntax current_syntax = SYNTAX_ATT;
 
 static void gen_function(ASTNode *node);
 static void gen_statement(ASTNode *node);
 
-typedef enum {
-    OP_REG,
-    OP_IMM,
-    OP_MEM,
-    OP_LABEL
-} OperandType;
-
-typedef struct {
-    OperandType type;
-    union {
-        const char *reg;
-        int imm;
-        struct {
-            const char *base;
-            int offset;
-        } mem;
-        const char *label;
-    } data;
-} Operand;
+void arch_x86_64_set_writer(COFFWriter *writer) {
+    obj_writer = writer;
+}
 
 static void emit_label_def(const char *name) {
+    if (obj_writer) {
+        uint8_t storage_class = IMAGE_SYM_CLASS_EXTERNAL;
+        if (name[0] == '.') storage_class = IMAGE_SYM_CLASS_STATIC;
+        coff_writer_add_symbol(obj_writer, name, (uint32_t)obj_writer->text_section.size, 1, storage_class);
+        return;
+    }
     if (current_syntax == SYNTAX_INTEL && name[0] == '.') {
         fprintf(out, "%s:\n", name + 1);
     } else {
@@ -51,7 +45,7 @@ static Operand op_label(const char *label) {
 
 void arch_x86_64_init(FILE *output) {
     out = output;
-    if (current_syntax == SYNTAX_INTEL) {
+    if (out && !obj_writer && current_syntax == SYNTAX_INTEL) {
         fprintf(out, "_TEXT SEGMENT\n");
     }
 }
@@ -67,7 +61,7 @@ void arch_x86_64_generate(ASTNode *program) {
             gen_function(child);
         }
     }
-    if (current_syntax == SYNTAX_INTEL) {
+    if (!obj_writer && current_syntax == SYNTAX_INTEL) {
         fprintf(out, "_TEXT ENDS\n");
         fprintf(out, "END\n");
     }
@@ -116,6 +110,7 @@ static Operand op_mem(const char *base, int offset) {
 
 
 static void print_operand(Operand op) {
+    if (!out) return;
     if (op.type == OP_REG) {
         if (current_syntax == SYNTAX_ATT) fprintf(out, "%%%s", op.data.reg);
         else fprintf(out, "%s", op.data.reg);
@@ -138,6 +133,10 @@ static void print_operand(Operand op) {
 }
 
 static void emit_inst0(const char *mnemonic) {
+    if (obj_writer) {
+        encode_inst0(&obj_writer->text_section, mnemonic);
+        return;
+    }
     const char *m = mnemonic;
     if (current_syntax == SYNTAX_INTEL) {
         if (strcmp(mnemonic, "cqto") == 0) m = "cqo";
@@ -148,6 +147,19 @@ static void emit_inst0(const char *mnemonic) {
 }
 
 static void emit_inst1(const char *mnemonic, Operand op1) {
+    if (obj_writer) {
+        if (op1.type == OP_LABEL) {
+            // Relocation for JMP/JE/etc starts AFTER the opcode
+            uint32_t offset = 1;
+            if (strcmp(mnemonic, "je") == 0 || strcmp(mnemonic, "jne") == 0) offset = 2; // 0F 84 / 0F 85
+            else if (strcmp(mnemonic, "call") == 0) offset = 1; // E8
+            
+            uint32_t sym_idx = coff_writer_add_symbol(obj_writer, op1.data.label, 0, 0, IMAGE_SYM_CLASS_STATIC);
+            coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + offset, sym_idx, IMAGE_REL_AMD64_REL32);
+        }
+        encode_inst1(&obj_writer->text_section, mnemonic, op1);
+        return;
+    }
     const char *m = mnemonic;
     if (current_syntax == SYNTAX_INTEL) {
         if (strcmp(mnemonic, "idivq") == 0) m = "idiv";
@@ -171,6 +183,10 @@ static void emit_inst1(const char *mnemonic, Operand op1) {
 }
 
 static void emit_inst2(const char *mnemonic, Operand src, Operand dest) {
+    if (obj_writer) {
+        encode_inst2(&obj_writer->text_section, mnemonic, src, dest);
+        return;
+    }
     const char *m = mnemonic;
     if (current_syntax == SYNTAX_INTEL) {
         if (strcmp(mnemonic, "movq") == 0) m = "mov";
@@ -420,11 +436,13 @@ static void gen_function(ASTNode *node) {
     current_function_end_label = label_count++;
     
     if (current_syntax == SYNTAX_ATT) {
-        fprintf(out, ".globl %s\n", node->data.function.name);
+        if (out) fprintf(out, ".globl %s\n", node->data.function.name);
         emit_label_def(node->data.function.name);
     } else {
-        fprintf(out, "PUBLIC %s\n", node->data.function.name);
-        fprintf(out, "%s PROC\n", node->data.function.name);
+        if (out) {
+            fprintf(out, "PUBLIC %s\n", node->data.function.name);
+            fprintf(out, "%s PROC\n", node->data.function.name);
+        }
     }
     
     // Prologue
@@ -444,7 +462,7 @@ static void gen_function(ASTNode *node) {
     emit_inst0("leave");
     emit_inst0("ret");
     
-    if (current_syntax == SYNTAX_INTEL) {
+    if (out && current_syntax == SYNTAX_INTEL) {
         fprintf(out, "%s ENDP\n", node->data.function.name);
     }
 }
