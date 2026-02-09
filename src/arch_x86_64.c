@@ -505,6 +505,32 @@ static void gen_statement(ASTNode *node) {
         emit_inst1("jmp", op_label(l_start));
         
         emit_label_def(l_end);
+    } else if (node->type == AST_FOR) {
+        if (node->data.for_stmt.init) {
+            gen_statement(node->data.for_stmt.init);
+        }
+        
+        int label_start = label_count++;
+        int label_end = label_count++;
+        char l_start[32], l_end[32];
+        sprintf(l_start, ".L%d", label_start);
+        sprintf(l_end, ".L%d", label_end);
+        
+        emit_label_def(l_start);
+        if (node->data.for_stmt.condition) {
+            gen_expression(node->data.for_stmt.condition);
+            emit_inst2("cmpq", op_imm(0), op_reg("rax"));
+            emit_inst1("je", op_label(l_end));
+        }
+        
+        gen_statement(node->data.for_stmt.body);
+        
+        if (node->data.for_stmt.increment) {
+            gen_expression(node->data.for_stmt.increment);
+        }
+        emit_inst1("jmp", op_label(l_start));
+        
+        emit_label_def(l_end);
     } else if (node->type == AST_BLOCK) {
         for (size_t i = 0; i < node->children_count; i++) {
             gen_statement(node->children[i]);

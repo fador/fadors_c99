@@ -23,6 +23,7 @@ typedef enum {
     AST_DEREF,
     AST_ADDR_OF,
     AST_STRING,
+    AST_FOR,
     AST_UNKNOWN
 } ASTNodeType;
 
@@ -88,6 +89,12 @@ typedef struct ASTNode {
         struct {
             struct ASTNode *expression;
         } unary;
+        struct {
+            struct ASTNode *init;
+            struct ASTNode *condition;
+            struct ASTNode *increment;
+            struct ASTNode *body;
+        } for_stmt;
         struct {
             char *value;
         } string;

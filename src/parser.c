@@ -351,6 +351,46 @@ static ASTNode *parse_statement(Parser *parser) {
         parser_expect(parser, TOKEN_RPAREN);
         node->data.while_stmt.body = parse_statement(parser);
         return node;
+    } else if (parser->current_token.type == TOKEN_KEYWORD_FOR) {
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_FOR);
+        parser_expect(parser, TOKEN_LPAREN);
+
+        // Init
+        if (parser->current_token.type == TOKEN_SEMICOLON) {
+            node->data.for_stmt.init = NULL;
+            parser_advance(parser);
+        } else {
+            if (parser->current_token.type == TOKEN_KEYWORD_INT || 
+                parser->current_token.type == TOKEN_KEYWORD_CHAR ||
+                parser->current_token.type == TOKEN_KEYWORD_VOID ||
+                parser->current_token.type == TOKEN_KEYWORD_STRUCT) {
+                node->data.for_stmt.init = parse_statement(parser);
+            } else {
+                node->data.for_stmt.init = parse_expression(parser);
+                parser_expect(parser, TOKEN_SEMICOLON);
+            }
+        }
+
+        // Condition
+        if (parser->current_token.type == TOKEN_SEMICOLON) {
+            node->data.for_stmt.condition = NULL;
+            parser_advance(parser);
+        } else {
+            node->data.for_stmt.condition = parse_expression(parser);
+            parser_expect(parser, TOKEN_SEMICOLON);
+        }
+
+        // Increment
+        if (parser->current_token.type == TOKEN_RPAREN) {
+            node->data.for_stmt.increment = NULL;
+        } else {
+            node->data.for_stmt.increment = parse_expression(parser);
+        }
+        parser_expect(parser, TOKEN_RPAREN);
+
+        node->data.for_stmt.body = parse_statement(parser);
+        return node;
     } else if (parser->current_token.type == TOKEN_KEYWORD_IF) {
         parser_advance(parser);
         ASTNode *node = ast_create_node(AST_IF);

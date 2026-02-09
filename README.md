@@ -14,14 +14,13 @@ A lightweight C99-standard compliant compiler written in C99, targeting x86_64 W
 - **Data Structures**: Struct definition and member access (`.`, `->`).
 - **Control Flow**: `if`/`else`, `while`, function calls.
 - **Expressions**: Full operator precedence, assignments, and logic.
+- **Pointers**: Full support for pointer depth, address-of (`&`), and dereference (`*`) operators.
 
-### Backends
+### Backends / Assembly Generation
+- **Integrated Pipeline**: Automatically invokes system assemblers (`as`, `ml/ml64`) and linkers (`gcc`, `link.exe`) to produce executables.
 - **x86_64 AT&T**: Default for Linux/Unix (generates `.s`).
 - **x86_64 Intel/MASM**: Supported via `--masm` flag (generates `.asm` for Windows).
-
-### Compilation Driver
-- **Integrated Pipeline**: Automatically invokes system assemblers (`as`, `ml/ml64`) and linkers (`gcc`, `link.exe`) to produce executables.
-- **Customizable**: Flags to stop at assembly (`-S`) or define output filenames (`-o`).
+- **Stack Management**: Automatic local variable allocation and ABI-compliant register-based argument passing.
 
 ## Building
 
@@ -57,80 +56,28 @@ Use `-S` to stop after assembly generation.
 # Output: main.asm
 ```
 
-## Code Structure
-
-- `src/`: Compiler core (Lexer, Parser, Codegen, Driver).
-- `tests/`: Automated test suite (`test_asm_execution.py` runs compiled binaries).
-
-## Development Roadmap
-- [x] Preprocessor & Macros
-- [x] Structs & Memory Operations
-- [x] Multi-Syntax Support (AT&T / MASM)
-- [x] Compiler Driver (Invoke `ml`/`link` automatically)
-- [ ] **Custom Assembler**: Generate machine code (COFF/ELF) directly to verify self-hosting without external tools.
-- [ ] Standard Library: minimal `libc` implementation.
-- [ ] Self-Hosting: Compile the compiler using itself.
-
-## Features
-
-### Preprocessor
-- **Includes**: Recursive `#include "file.h"` support.
-- **Macros**: Constant substitution via `#define NAME VALUE`.
-- **Conditional Compilation**: Basic header guard support with `#ifndef`.
-
-### Language Support
-- **Types**: `int`, `void`, and basic `char` support.
-- **Pointers**: Full support for pointer depth, address-of (`&`), and dereference (`*`) operators.
-- **Structs**: Definition and member access using both `.` and `->` operators.
-- **Control Flow**: 
-  - `if` / `else` statements.
-  - `while` loops.
-  - Function definitions and calls (up to 6 arguments via registers).
-- **Expressions**: 
-  - Full operator precedence (Arithmetic, Relational, Equality).
-  - Parentheses for grouping.
-  - L-value assignments (e.g., `*ptr = 10;`, `var.member = 5;`).
-
-### Assembly Generation
-- **Target**: x86_64 (AT&T syntax).
-- **Stack Management**: Automatic local variable allocation and offset tracking.
-- **ABI Compliance**: Simple function prologue/epilogue and register-based argument passing.
-
-## Building
-
-Requires CMake and a C99-compliant compiler (GCC, Clang, or MSVC).
-
-```bash
-mkdir build
-cd build
-cmake ..
-cmake --build .
-```
-
-## Usage
-
-Generate assembly from a C source file:
-
-```bash
-./fadors99 example.c
-```
-
-This will produce `example.s`, which can be assembled and linked using `gcc`:
-
-```bash
-gcc example.s -o example
-./example
-```
-
 ## Project Structure
 
-- `src/`: Compiler source code (Lexer, Parser, AST, CodeGen, Preprocessor, Types).
-- `tests/`: Comprehensive test suite for language features.
+- `src/`: Compiler core (Lexer, Parser, AST, CodeGen, Preprocessor, Types).
+- `tests/`: Comprehensive automated test suite (`test_asm_execution.py` runs compiled binaries).
 - `CMakeLists.txt`: Build configuration.
 
-## Development Goals
-- [x] Preprocessor
-- [x] Structs and Pointers
-- [ ] Arrays and pointer arithmetic
-- [ ] Standard Library headers
-- [ ] Self-hosting (Compiling its own source)
+## Development Roadmap
+
+### Current Focus: Direct Code Generation
+- [x] Custom Assembler (COFF/ELF writer foundation)
+- [ ] Direct machine code generation (COFF) completion for verification without external tools.
+- [ ] Global variable initialization support.
+- [ ] Relocation handling for external symbols.
+
+### Language Features
+- [ ] **Arrays**: Parser support for `T name[size]` and `expr[index]`.
+- [x] **Control Flow**: Implement `for` loops.
+- [ ] **Abstractions**: Implement `typedef` to simplify complex declarations.
+- [ ] **Data Types**: Add `enum` and `union` support.
+- [ ] **Pointer Arithmetic**: Scaling based on type size.
+
+### Self-Hosting Path
+- [ ] Environment Macros: Emit platform macros (e.g., `_WIN32`, `_LINUX_`) for build environment detection.
+- [ ] Standard Library: Minimal `libc` implementation.
+- [ ] Self-Hosting: Compile the compiler using itself.

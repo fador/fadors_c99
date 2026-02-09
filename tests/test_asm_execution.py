@@ -72,6 +72,11 @@ def run_test(c_file):
         if "07_function" in c_file and ret_code != 123:
              print(f"FAILED: Expected exit code 123, got {ret_code}")
              return False
+        
+        # 17_for.c returns 45
+        if "17_for" in c_file and ret_code != 45:
+             print(f"FAILED: Expected exit code 45, got {ret_code}")
+             return False
 
     except OSError as e:
         print(f"FAILED: Execution of {exe_file}: {e}")
@@ -81,6 +86,15 @@ def run_test(c_file):
     return True
 
 def main():
+
+    vcvars_path = r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+    if os.path.exists(vcvars_path):
+        output = subprocess.check_output(f'"{vcvars_path}" && set', shell=True, text=True)
+        for line in output.splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                os.environ[key] = value
+
     if not os.path.exists(COMPILER):
         print(f"Compiler not found at {COMPILER}")
         sys.exit(1)
@@ -91,7 +105,7 @@ def main():
     
     # Filter for known working tests for binary execution (simple returns)
     # 01_return.c, 07_function.c, 11_nested_struct.c (if it compiles to valid asm)
-    test_whitelist = ["01_return.c", "07_function.c", "11_nested_struct.c"]
+    test_whitelist = ["01_return.c", "07_function.c", "11_nested_struct.c", "17_for.c"]
     
     for c_file in c_files:
         if os.path.basename(c_file) in test_whitelist:
