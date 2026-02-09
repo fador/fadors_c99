@@ -95,17 +95,38 @@ char *preprocess(const char *source, const char *filename) {
                 p += 7;
                 while (isspace(*p)) p++;
                 if (*p == '"' || *p == '<') {
-                    char quote = *p;
+                    char open = *p;
+                    char close = (open == '<') ? '>' : '"';
+                    int is_system = (open == '<');
                     p++;
                     const char *start = p;
-                    while (*p != quote && *p != '\n' && *p != '\0') p++;
+                    while (*p != close && *p != '\n' && *p != '\0') p++;
                     size_t len = p - start;
                     char *inc_filename = malloc(len + 1);
                     strncpy(inc_filename, start, len);
                     inc_filename[len] = '\0';
-                    if (*p == quote) p++;
+                    if (*p == close) p++;
                     
-                    char *inc_source = read_file(inc_filename);
+                    char *inc_source = NULL;
+                    
+                    if (is_system) {
+                        // Search relative to compiler executable's include/ directory
+                        // Try known include paths
+                        char path_buf[512];
+                        
+                        // Try relative to source file directory
+                        sprintf(path_buf, "include/%s", inc_filename);
+                        inc_source = read_file(path_buf);
+                        
+                        if (!inc_source) {
+                            // Try relative to compiler binary (typical install layout)
+                            sprintf(path_buf, "../include/%s", inc_filename);
+                            inc_source = read_file(path_buf);
+                        }
+                    } else {
+                        inc_source = read_file(inc_filename);
+                    }
+                    
                     if (inc_source) {
                         int prev_top = top_level;
                         top_level = 0;

@@ -113,20 +113,20 @@ Assembles a file with `fadors99`, links it manually, and executes it. Useful for
 
 The goal is to compile the compiler using itself. Based on an audit of `src/`, these are the remaining blockers, ordered by priority:
 
-#### Phase 1: Type System Foundation (Next Step)
-These features are required by **every** source file in the compiler:
-- [ ] `const` qualifier: Ignore in codegen, but parse and track. Used in every function signature.
-- [ ] `size_t` / `uint8_t` / `uint16_t` / `uint32_t` / `uint64_t` / `int16_t` / `int32_t`: Requires `typedef` aliases from `<stdint.h>` and `<stddef.h>`.
-- [ ] `static` functions: Internal linkage (used in 9/11 `.c` files).
+#### Phase 1: Type System Foundation ✅
+- [x] `const` qualifier: Parse and ignore. Used in every function signature.
+- [x] `size_t` / `uint8_t` / `uint16_t` / `uint32_t` / `uint64_t` / `int16_t` / `int32_t`: Typedef aliases via `<stdint.h>` and `<stddef.h>`.
+- [x] `static` functions: Internal linkage (used in 9/11 `.c` files).
+- [x] `unsigned` type modifier.
 
-#### Phase 2: Minimal Standard Library Headers
-Create a `include/` directory with compiler-specific headers that map to platform types:
-- [ ] `<stddef.h>`: `size_t`, `NULL`, `ptrdiff_t`.
-- [ ] `<stdint.h>`: Fixed-width integer typedefs.
-- [ ] `<stdlib.h>`: Declare `malloc`, `free`, `realloc`, `atoi`, `atof`, `exit`.
-- [ ] `<string.h>`: Declare `memcpy`, `memset`, `strlen`, `strcmp`, `strncmp`, `strdup`, `strncpy`.
-- [ ] `<stdio.h>`: Declare `printf`, `sprintf`, `fopen`, `fclose`, `fread`, `fwrite`, `FILE`, `fflush`, `stdout`.
-- [ ] `<ctype.h>`: Declare `isalpha`, `isdigit`, `isalnum`.
+#### Phase 2: Minimal Standard Library Headers ✅
+- [x] `<stddef.h>`: `size_t`, `NULL`, `ptrdiff_t`.
+- [x] `<stdint.h>`: Fixed-width integer typedefs.
+- [x] `<stdlib.h>`: `malloc`, `free`, `realloc`, `atoi`, `exit`.
+- [x] `<string.h>`: `memcpy`, `memset`, `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strchr`, `strcat`.
+- [x] `<stdio.h>`: `FILE`, `printf`, `sprintf`, `fopen`, `fclose`, `fread`, `fwrite`, `fseek`, `ftell`.
+- [x] `<ctype.h>`: `isalpha`, `isdigit`, `isalnum`, `isspace`.
+- [x] `#include <...>` angle-bracket support with `include/` search path.
 
 #### Phase 3: Language Feature Completion
 - [ ] Initializer lists: `{1, 2, 3}` for arrays and structs (used in lookup tables).
