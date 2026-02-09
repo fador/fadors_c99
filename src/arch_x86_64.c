@@ -1133,35 +1133,107 @@ static void gen_statement(ASTNode *node) {
         sprintf(dest_label, ".Lend_%d", current_function_end_label);
         emit_inst1("jmp", op_label(dest_label));
     } else if (node->type == AST_VAR_DECL) {
-        if (node->data.var_decl.initializer) {
-            gen_expression(node->data.var_decl.initializer);
-        } else {
-            if (is_float_type(node->resolved_type)) {
-                emit_inst2("xor", op_reg("rax"), op_reg("rax"));
-                if (node->resolved_type->kind == TYPE_FLOAT) emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm0"));
-                else emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm0"));
-            } else {
-                emit_inst2("mov", op_imm(0), op_reg("rax"));
-            }
-        }
-        
         int size = node->resolved_type ? node->resolved_type->size : 8;
-        if (size < 8 && node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
-            size = 8;
-        }
-        stack_offset -= size;
         
-        locals[locals_count].name = node->data.var_decl.name;
-        locals[locals_count].offset = stack_offset;
-        locals[locals_count].type = node->resolved_type;
-        locals_count++;
-        
-        if (is_float_type(node->resolved_type)) {
-            emit_push_xmm("xmm0");
-        } else if (node->resolved_type && (node->resolved_type->kind == TYPE_STRUCT || node->resolved_type->kind == TYPE_ARRAY)) {
+        if (node->data.var_decl.initializer && node->data.var_decl.initializer->type == AST_INIT_LIST) {
+            // Initializer list: {expr, expr, ...}
+            ASTNode *init_list = node->data.var_decl.initializer;
+            
+            if (size < 8 && node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
+                size = 8;
+            }
+            stack_offset -= size;
+            
+            locals[locals_count].name = node->data.var_decl.name;
+            locals[locals_count].offset = stack_offset;
+            locals[locals_count].type = node->resolved_type;
+            locals_count++;
+            
+            // Allocate space on stack
             emit_inst2("sub", op_imm(size), op_reg("rsp"));
+            
+            // Zero-initialize with qword stores
+            {
+                int off;
+                for (off = 0; off + 8 <= size; off += 8) {
+                    emit_inst2("movq", op_imm(0), op_mem("rbp", stack_offset + off));
+                }
+                if (off + 4 <= size) {
+                    emit_inst2("movl", op_imm(0), op_mem("rbp", stack_offset + off));
+                }
+            }
+            
+            // Determine element size for arrays
+            int elem_size = 8;
+            if (node->resolved_type && node->resolved_type->kind == TYPE_ARRAY && node->resolved_type->data.ptr_to) {
+                elem_size = node->resolved_type->data.ptr_to->size;
+                if (elem_size < 4) elem_size = 1;
+                else if (elem_size < 8) elem_size = 4;
+            }
+            
+            if (node->resolved_type && node->resolved_type->kind == TYPE_STRUCT) {
+                // Struct init: store to each member offset
+                size_t i;
+                for (i = 0; i < init_list->children_count; i++) {
+                    gen_expression(init_list->children[i]);
+                    if (node->resolved_type->data.struct_data.members && (int)i < node->resolved_type->data.struct_data.members_count) {
+                        int mem_offset = node->resolved_type->data.struct_data.members[i].offset;
+                        int mem_size = node->resolved_type->data.struct_data.members[i].type ? node->resolved_type->data.struct_data.members[i].type->size : 8;
+                        if (mem_size == 1) {
+                            emit_inst2("movb", op_reg("al"), op_mem("rbp", stack_offset + mem_offset));
+                        } else if (mem_size == 4) {
+                            emit_inst2("movl", op_reg("eax"), op_mem("rbp", stack_offset + mem_offset));
+                        } else {
+                            emit_inst2("mov", op_reg("rax"), op_mem("rbp", stack_offset + mem_offset));
+                        }
+                    }
+                }
+            } else {
+                // Array init: store to each element index
+                size_t i;
+                for (i = 0; i < init_list->children_count; i++) {
+                    gen_expression(init_list->children[i]);
+                    int el_offset = stack_offset + (int)(i * elem_size);
+                    if (elem_size == 1) {
+                        emit_inst2("movb", op_reg("al"), op_mem("rbp", el_offset));
+                    } else if (elem_size == 4) {
+                        emit_inst2("movl", op_reg("eax"), op_mem("rbp", el_offset));
+                    } else {
+                        emit_inst2("mov", op_reg("rax"), op_mem("rbp", el_offset));
+                    }
+                }
+            }
         } else {
-            emit_inst1("pushq", op_reg("rax"));
+            // Scalar initializer (original path)
+            if (node->data.var_decl.initializer) {
+                gen_expression(node->data.var_decl.initializer);
+            } else {
+                if (is_float_type(node->resolved_type)) {
+                    emit_inst2("xor", op_reg("rax"), op_reg("rax"));
+                    if (node->resolved_type->kind == TYPE_FLOAT) emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm0"));
+                    else emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm0"));
+                } else {
+                    emit_inst2("mov", op_imm(0), op_reg("rax"));
+                }
+            }
+            
+            if (size < 8 && node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
+                size = 8;
+            }
+            stack_offset -= size;
+            
+            locals[locals_count].name = node->data.var_decl.name;
+            locals[locals_count].offset = stack_offset;
+            locals[locals_count].type = node->resolved_type;
+            locals_count++;
+            
+            if (is_float_type(node->resolved_type)) {
+                emit_push_xmm("xmm0");
+            } else if (node->resolved_type && (node->resolved_type->kind == TYPE_STRUCT || node->resolved_type->kind == TYPE_ARRAY)) {
+                emit_inst2("sub", op_imm(size), op_reg("rsp"));
+            } else {
+                emit_inst1("pushq", op_reg("rax"));
+            }
         }
     } else if (node->type == AST_IF) {
         int label_else = label_count++;

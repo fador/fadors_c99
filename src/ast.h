@@ -37,6 +37,7 @@ typedef enum {
     AST_POST_INC,
     AST_POST_DEC,
     AST_CAST,
+    AST_INIT_LIST,
     AST_UNKNOWN,
     AST_FLOAT
 } ASTNodeType;

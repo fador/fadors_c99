@@ -129,13 +129,24 @@ The goal is to compile the compiler using itself. Based on an audit of `src/`, t
 - [x] `#include <...>` angle-bracket support with `include/` search path.
 
 #### Phase 3: Language Feature Completion ✅
-- [x] Initializer lists: `{1, 2, 3}` for arrays and structs (used in lookup tables).
-- [x] `#pragma pack(push/pop)`: Required by `coff.h` for struct packing.
-- [x] Variable declarations in `for` init: `for (int i = 0; ...)`.
-- [x] Compound assignment operators: `+=`, `-=`, `*=`, `/=`, `%=`, `|=`, `&=`, `<<=`, `>>=`.
+- [x] Compound assignment operators: `+=`, `-=`, `*=`, `/=`, `%=`, `|=`, `&=`, `^=`, `<<=`, `>>=`.
 - [x] Ternary operator: `a ? b : c`.
+- [x] Variable declarations in `for` init: `for (int i = 0; ...)`.
+- [x] Initializer lists: `{1, 2, 3}` for arrays and structs.
 
-#### Phase 4: Self-Hosting Verification
+#### Phase 4: Critical Self-Hosting Blockers
+Discovered by attempting to compile `types.c`, `buffer.c`, `lexer.c` with the compiler itself:
+- [ ] **`#include "file.h"` relative path resolution**: Currently resolves relative to CWD, not to the source file's directory. Blocks all compilation.
+- [ ] **Forward struct declarations**: `struct Type;` (used in `types.h`).
+- [ ] **Named unions in structs**: `union { ... } data;` (used in `types.h`, `ast.h`).
+- [ ] **`static` local variables**: `static int x = 1;` (used in `preprocessor.c`).
+- [ ] **`long` type**: `long size = ftell(f);` (used in `preprocessor.c`, `coff_writer.c`).
+- [ ] **Hex integer literals**: `0x8664`, `0x00000020` (used in `coff.h`, `coff_writer.c`).
+- [ ] **Character escape sequences in code**: `'\n'`, `'\0'`, `'\\'` (used in `lexer.c`, `preprocessor.c`).
+- [ ] **`#pragma pack(push/pop)`**: Required by `coff.h` for struct packing.
+- [ ] **Multi-line `#define` with `\` continuation**: Used in several headers.
+
+#### Phase 5: Self-Hosting Verification
 - [ ] Module-by-module: Compile `buffer.c` → `types.c` → `lexer.c` → etc.
 - [ ] Full self-compilation: Compile entire compiler with itself.
 - [ ] Triple test: Self-compiled compiler compiles itself, output matches.

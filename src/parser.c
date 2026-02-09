@@ -731,6 +731,25 @@ static ASTNode *parse_expression(Parser *parser) {
     return left;
 }
 
+static ASTNode *parse_initializer(Parser *parser) {
+    if (parser->current_token.type == TOKEN_LBRACE) {
+        parser_advance(parser); // consume '{'
+        ASTNode *list = ast_create_node(AST_INIT_LIST);
+        while (parser->current_token.type != TOKEN_RBRACE && parser->current_token.type != TOKEN_EOF) {
+            ASTNode *elem = parse_initializer(parser); // recursive for nested {}'s
+            ast_add_child(list, elem);
+            if (parser->current_token.type == TOKEN_COMMA) {
+                parser_advance(parser);
+            } else {
+                break;
+            }
+        }
+        parser_expect(parser, TOKEN_RBRACE);
+        return list;
+    }
+    return parse_expression(parser);
+}
+
 static ASTNode *parse_statement(Parser *parser) {
     if (parser->current_token.type == TOKEN_KEYWORD_RETURN) {
         parser_advance(parser);
@@ -844,7 +863,7 @@ static ASTNode *parse_statement(Parser *parser) {
                     
                     if (parser->current_token.type == TOKEN_EQUAL) {
                         parser_advance(parser);
-                        node->data.var_decl.initializer = parse_expression(parser);
+                        node->data.var_decl.initializer = parse_initializer(parser);
                     } else {
                         node->data.var_decl.initializer = NULL;
                     }
@@ -883,7 +902,7 @@ static ASTNode *parse_statement(Parser *parser) {
 
             if (parser->current_token.type == TOKEN_EQUAL) {
                 parser_advance(parser);
-                node->data.var_decl.initializer = parse_expression(parser);
+                node->data.var_decl.initializer = parse_initializer(parser);
             } else {
                 node->data.var_decl.initializer = NULL;
             }
@@ -1128,7 +1147,7 @@ static ASTNode *parse_external_declaration(Parser *parser) {
 
             if (parser->current_token.type == TOKEN_EQUAL) {
                 parser_advance(parser);
-                node->data.var_decl.initializer = parse_expression(parser);
+                node->data.var_decl.initializer = parse_initializer(parser);
             } else {
                 node->data.var_decl.initializer = NULL;
             }
