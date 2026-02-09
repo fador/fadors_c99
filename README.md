@@ -110,6 +110,32 @@ Assembles a file with `fadors99`, links it manually, and executes it. Useful for
 - [x] **Pointer Arithmetic**: Scaling based on type size.
 
 ### Self-Hosting Path
-- [ ] Environment Macros: Emit platform macros (e.g., `_WIN32`, `_LINUX_`) for build environment detection.
-- [ ] Standard Library: Minimal `libc` implementation.
-- [ ] Self-Hosting: Compile the compiler using itself.
+
+The goal is to compile the compiler using itself. Based on an audit of `src/`, these are the remaining blockers, ordered by priority:
+
+#### Phase 1: Type System Foundation (Next Step)
+These features are required by **every** source file in the compiler:
+- [ ] `const` qualifier: Ignore in codegen, but parse and track. Used in every function signature.
+- [ ] `size_t` / `uint8_t` / `uint16_t` / `uint32_t` / `uint64_t` / `int16_t` / `int32_t`: Requires `typedef` aliases from `<stdint.h>` and `<stddef.h>`.
+- [ ] `static` functions: Internal linkage (used in 9/11 `.c` files).
+
+#### Phase 2: Minimal Standard Library Headers
+Create a `include/` directory with compiler-specific headers that map to platform types:
+- [ ] `<stddef.h>`: `size_t`, `NULL`, `ptrdiff_t`.
+- [ ] `<stdint.h>`: Fixed-width integer typedefs.
+- [ ] `<stdlib.h>`: Declare `malloc`, `free`, `realloc`, `atoi`, `atof`, `exit`.
+- [ ] `<string.h>`: Declare `memcpy`, `memset`, `strlen`, `strcmp`, `strncmp`, `strdup`, `strncpy`.
+- [ ] `<stdio.h>`: Declare `printf`, `sprintf`, `fopen`, `fclose`, `fread`, `fwrite`, `FILE`, `fflush`, `stdout`.
+- [ ] `<ctype.h>`: Declare `isalpha`, `isdigit`, `isalnum`.
+
+#### Phase 3: Language Feature Completion
+- [ ] Initializer lists: `{1, 2, 3}` for arrays and structs (used in lookup tables).
+- [ ] `#pragma pack(push/pop)`: Required by `coff.h` for struct packing.
+- [ ] Variable declarations in `for` init: `for (int i = 0; ...)`.
+- [ ] Compound assignment operators: `+=`, `-=`, `*=`, `/=`, `%=`, `|=`, `&=`, `<<=`, `>>=`.
+- [ ] Ternary operator: `a ? b : c`.
+
+#### Phase 4: Self-Hosting Verification
+- [ ] Module-by-module: Compile `buffer.c` → `types.c` → `lexer.c` → etc.
+- [ ] Full self-compilation: Compile entire compiler with itself.
+- [ ] Triple test: Self-compiled compiler compiles itself, output matches.

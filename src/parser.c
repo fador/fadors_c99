@@ -193,7 +193,26 @@ static Type *find_struct(Parser *parser, const char *name) {
 
 static Type *parse_type(Parser *parser) {
     Type *type = NULL;
-    if (parser->current_token.type == TOKEN_KEYWORD_INT) {
+    
+    // Skip const qualifier (before type)
+    while (parser->current_token.type == TOKEN_KEYWORD_CONST || 
+           parser->current_token.type == TOKEN_KEYWORD_STATIC) {
+        parser_advance(parser);
+    }
+    
+    if (parser->current_token.type == TOKEN_KEYWORD_UNSIGNED) {
+        parser_advance(parser);
+        // unsigned int, unsigned char, or just unsigned (= unsigned int)
+        if (parser->current_token.type == TOKEN_KEYWORD_INT) {
+            parser_advance(parser);
+        } else if (parser->current_token.type == TOKEN_KEYWORD_CHAR) {
+            type = type_char();
+            parser_advance(parser);
+            goto done_base;
+        }
+        type = type_int(); // unsigned int -> int for now
+        goto done_base;
+    } else if (parser->current_token.type == TOKEN_KEYWORD_INT) {
         type = type_int();
         parser_advance(parser);
     } else if (parser->current_token.type == TOKEN_KEYWORD_CHAR) {
@@ -245,11 +264,21 @@ static Type *parse_type(Parser *parser) {
         }
     }
     
+    done_base:
     if (!type) return NULL;
+    
+    // Skip const qualifier (after type, e.g. "int const")
+    while (parser->current_token.type == TOKEN_KEYWORD_CONST) {
+        parser_advance(parser);
+    }
     
     while (parser->current_token.type == TOKEN_STAR) {
         type = type_ptr(type);
         parser_advance(parser);
+        // Skip const after pointer (e.g., "const char *const")
+        while (parser->current_token.type == TOKEN_KEYWORD_CONST) {
+            parser_advance(parser);
+        }
     }
     return type;
 }
@@ -477,6 +506,9 @@ static int is_token_type_start(Parser *parser, Token t) {
             type == TOKEN_KEYWORD_STRUCT || 
             type == TOKEN_KEYWORD_UNION || 
             type == TOKEN_KEYWORD_ENUM || 
+            type == TOKEN_KEYWORD_CONST ||
+            type == TOKEN_KEYWORD_STATIC ||
+            type == TOKEN_KEYWORD_UNSIGNED ||
             is_typedef_name(parser, t));
 }
 
@@ -691,6 +723,9 @@ static ASTNode *parse_statement(Parser *parser) {
                parser->current_token.type == TOKEN_KEYWORD_STRUCT ||
                parser->current_token.type == TOKEN_KEYWORD_UNION ||
                parser->current_token.type == TOKEN_KEYWORD_ENUM ||
+               parser->current_token.type == TOKEN_KEYWORD_CONST ||
+               parser->current_token.type == TOKEN_KEYWORD_STATIC ||
+               parser->current_token.type == TOKEN_KEYWORD_UNSIGNED ||
                is_typedef_name(parser, parser->current_token)) {
         // Variable or struct/union/enum declaration/definition
         if (parser->current_token.type == TOKEN_KEYWORD_STRUCT || parser->current_token.type == TOKEN_KEYWORD_UNION || parser->current_token.type == TOKEN_KEYWORD_ENUM) {
@@ -833,7 +868,10 @@ static ASTNode *parse_statement(Parser *parser) {
                 parser->current_token.type == TOKEN_KEYWORD_FLOAT ||
                 parser->current_token.type == TOKEN_KEYWORD_DOUBLE ||
                 parser->current_token.type == TOKEN_KEYWORD_VOID ||
-                parser->current_token.type == TOKEN_KEYWORD_STRUCT) {
+                parser->current_token.type == TOKEN_KEYWORD_STRUCT ||
+                parser->current_token.type == TOKEN_KEYWORD_CONST ||
+                parser->current_token.type == TOKEN_KEYWORD_STATIC ||
+                parser->current_token.type == TOKEN_KEYWORD_UNSIGNED) {
                 node->data.for_stmt.init = parse_statement(parser);
             } else {
                 node->data.for_stmt.init = parse_expression(parser);
