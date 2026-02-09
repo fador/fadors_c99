@@ -198,6 +198,9 @@ Token lexer_next_token(Lexer *lexer) {
             if (match(lexer, '+')) {
                 token.type = TOKEN_PLUS_PLUS;
                 token.length = 2;
+            } else if (match(lexer, '=')) {
+                token.type = TOKEN_PLUS_EQUAL;
+                token.length = 2;
             } else {
                 token.type = TOKEN_PLUS;
             }
@@ -209,16 +212,43 @@ Token lexer_next_token(Lexer *lexer) {
             } else if (match(lexer, '-')) {
                 token.type = TOKEN_MINUS_MINUS;
                 token.length = 2;
+            } else if (match(lexer, '=')) {
+                token.type = TOKEN_MINUS_EQUAL;
+                token.length = 2;
             } else {
                 token.type = TOKEN_MINUS;
             }
             break;
-        case '%': token.type = TOKEN_PERCENT; break;
-        case '*': token.type = TOKEN_STAR; break;
-        case '/': token.type = TOKEN_SLASH; break;
+        case '%':
+            if (match(lexer, '=')) {
+                token.type = TOKEN_PERCENT_EQUAL;
+                token.length = 2;
+            } else {
+                token.type = TOKEN_PERCENT;
+            }
+            break;
+        case '*':
+            if (match(lexer, '=')) {
+                token.type = TOKEN_STAR_EQUAL;
+                token.length = 2;
+            } else {
+                token.type = TOKEN_STAR;
+            }
+            break;
+        case '/':
+            if (match(lexer, '=')) {
+                token.type = TOKEN_SLASH_EQUAL;
+                token.length = 2;
+            } else {
+                token.type = TOKEN_SLASH;
+            }
+            break;
         case '&':
             if (match(lexer, '&')) {
                 token.type = TOKEN_AMPERSAND_AMPERSAND;
+                token.length = 2;
+            } else if (match(lexer, '=')) {
+                token.type = TOKEN_AMPERSAND_EQUAL;
                 token.length = 2;
             } else {
                 token.type = TOKEN_AMPERSAND;
@@ -228,11 +258,22 @@ Token lexer_next_token(Lexer *lexer) {
             if (match(lexer, '|')) {
                 token.type = TOKEN_PIPE_PIPE;
                 token.length = 2;
+            } else if (match(lexer, '=')) {
+                token.type = TOKEN_PIPE_EQUAL;
+                token.length = 2;
             } else {
                 token.type = TOKEN_PIPE;
             }
             break;
-        case '^': token.type = TOKEN_CARET; break;
+        case '^':
+            if (match(lexer, '=')) {
+                token.type = TOKEN_CARET_EQUAL;
+                token.length = 2;
+            } else {
+                token.type = TOKEN_CARET;
+            }
+            break;
+        case '?': token.type = TOKEN_QUESTION; break;
         case '=':
             if (match(lexer, '=')) {
                 token.type = TOKEN_EQUAL_EQUAL;
@@ -251,8 +292,13 @@ Token lexer_next_token(Lexer *lexer) {
             break;
         case '<':
             if (match(lexer, '<')) {
-                token.type = TOKEN_LESS_LESS;
-                token.length = 2;
+                if (match(lexer, '=')) {
+                    token.type = TOKEN_LESS_LESS_EQUAL;
+                    token.length = 3;
+                } else {
+                    token.type = TOKEN_LESS_LESS;
+                    token.length = 2;
+                }
             } else if (match(lexer, '=')) {
                 token.type = TOKEN_LESS_EQUAL;
                 token.length = 2;
@@ -262,8 +308,13 @@ Token lexer_next_token(Lexer *lexer) {
             break;
         case '>':
             if (match(lexer, '>')) {
-                token.type = TOKEN_GREATER_GREATER;
-                token.length = 2;
+                if (match(lexer, '=')) {
+                    token.type = TOKEN_GREATER_GREATER_EQUAL;
+                    token.length = 3;
+                } else {
+                    token.type = TOKEN_GREATER_GREATER;
+                    token.length = 2;
+                }
             } else if (match(lexer, '=')) {
                 token.type = TOKEN_GREATER_EQUAL;
                 token.length = 2;

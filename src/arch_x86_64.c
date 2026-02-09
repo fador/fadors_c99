@@ -1174,12 +1174,21 @@ static void gen_statement(ASTNode *node) {
         emit_inst2("cmp", op_imm(0), op_reg("rax"));
         emit_inst1("je", op_label(l_else));
         
-        gen_statement(node->data.if_stmt.then_branch);
+        // For ternary expressions (non-block branches), use gen_expression
+        if (node->data.if_stmt.then_branch && node->data.if_stmt.then_branch->type != AST_BLOCK) {
+            gen_expression(node->data.if_stmt.then_branch);
+        } else {
+            gen_statement(node->data.if_stmt.then_branch);
+        }
         emit_inst1("jmp", op_label(l_end));
         
         emit_label_def(l_else);
         if (node->data.if_stmt.else_branch) {
-            gen_statement(node->data.if_stmt.else_branch);
+            if (node->data.if_stmt.else_branch->type != AST_BLOCK) {
+                gen_expression(node->data.if_stmt.else_branch);
+            } else {
+                gen_statement(node->data.if_stmt.else_branch);
+            }
         }
         emit_label_def(l_end);
     } else if (node->type == AST_WHILE) {

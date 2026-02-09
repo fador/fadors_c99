@@ -66,6 +66,17 @@ typedef enum {
     TOKEN_ELLIPSIS,     // ...
     TOKEN_FLOAT,       // e.g. 3.14
     TOKEN_STRING,       // "string"
+    TOKEN_PLUS_EQUAL,   // +=
+    TOKEN_MINUS_EQUAL,  // -=
+    TOKEN_STAR_EQUAL,   // *=
+    TOKEN_SLASH_EQUAL,  // /=
+    TOKEN_PERCENT_EQUAL,// %=
+    TOKEN_PIPE_EQUAL,   // |=
+    TOKEN_AMPERSAND_EQUAL, // &=
+    TOKEN_CARET_EQUAL,  // ^=
+    TOKEN_LESS_LESS_EQUAL, // <<=
+    TOKEN_GREATER_GREATER_EQUAL, // >>=
+    TOKEN_QUESTION,     // ?
     TOKEN_UNKNOWN
 } TokenType;
 

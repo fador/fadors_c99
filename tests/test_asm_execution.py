@@ -4,7 +4,7 @@ import sys
 import glob
 
 # Configuration
-COMPILER = r"build\Debug\fadors99.exe"
+COMPILER = r"build\Release\fadors99.exe"
 ASSEMBLER = "ml64"
 LINKER = "link"
 

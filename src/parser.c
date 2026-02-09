@@ -667,8 +667,33 @@ static ASTNode *parse_logical_or(Parser *parser) {
     return left;
 }
 
+static TokenType get_compound_op(TokenType token) {
+    switch (token) {
+        case TOKEN_PLUS_EQUAL: return TOKEN_PLUS;
+        case TOKEN_MINUS_EQUAL: return TOKEN_MINUS;
+        case TOKEN_STAR_EQUAL: return TOKEN_STAR;
+        case TOKEN_SLASH_EQUAL: return TOKEN_SLASH;
+        case TOKEN_PERCENT_EQUAL: return TOKEN_PERCENT;
+        case TOKEN_PIPE_EQUAL: return TOKEN_PIPE;
+        case TOKEN_AMPERSAND_EQUAL: return TOKEN_AMPERSAND;
+        case TOKEN_CARET_EQUAL: return TOKEN_CARET;
+        case TOKEN_LESS_LESS_EQUAL: return TOKEN_LESS_LESS;
+        case TOKEN_GREATER_GREATER_EQUAL: return TOKEN_GREATER_GREATER;
+        default: return TOKEN_UNKNOWN;
+    }
+}
+
+static int is_compound_assign(TokenType t) {
+    return t == TOKEN_PLUS_EQUAL || t == TOKEN_MINUS_EQUAL ||
+           t == TOKEN_STAR_EQUAL || t == TOKEN_SLASH_EQUAL ||
+           t == TOKEN_PERCENT_EQUAL || t == TOKEN_PIPE_EQUAL ||
+           t == TOKEN_AMPERSAND_EQUAL || t == TOKEN_CARET_EQUAL ||
+           t == TOKEN_LESS_LESS_EQUAL || t == TOKEN_GREATER_GREATER_EQUAL;
+}
+
 static ASTNode *parse_expression(Parser *parser) {
     ASTNode *left = parse_logical_or(parser);
+    
     if (parser->current_token.type == TOKEN_EQUAL) {
         parser_advance(parser);
         ASTNode *node = ast_create_node(AST_ASSIGN);
@@ -676,6 +701,33 @@ static ASTNode *parse_expression(Parser *parser) {
         node->data.assign.value = parse_expression(parser);
         return node;
     }
+    
+    if (is_compound_assign(parser->current_token.type)) {
+        // Desugar: x += y  ->  x = x + y
+        TokenType op = get_compound_op(parser->current_token.type);
+        parser_advance(parser);
+        ASTNode *rhs = parse_expression(parser);
+        ASTNode *bin = ast_create_node(AST_BINARY_EXPR);
+        bin->data.binary_expr.op = op;
+        bin->data.binary_expr.left = left;
+        bin->data.binary_expr.right = rhs;
+        ASTNode *assign = ast_create_node(AST_ASSIGN);
+        assign->data.assign.left = left;  // Note: left is shared (evaluated twice)
+        assign->data.assign.value = bin;
+        return assign;
+    }
+    
+    // Ternary: condition ? true_expr : false_expr
+    if (parser->current_token.type == TOKEN_QUESTION) {
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_IF);
+        node->data.if_stmt.condition = left;
+        node->data.if_stmt.then_branch = parse_expression(parser);
+        parser_expect(parser, TOKEN_COLON);
+        node->data.if_stmt.else_branch = parse_expression(parser);
+        return node;
+    }
+    
     return left;
 }
 

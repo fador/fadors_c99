@@ -128,12 +128,12 @@ The goal is to compile the compiler using itself. Based on an audit of `src/`, t
 - [x] `<ctype.h>`: `isalpha`, `isdigit`, `isalnum`, `isspace`.
 - [x] `#include <...>` angle-bracket support with `include/` search path.
 
-#### Phase 3: Language Feature Completion
-- [ ] Initializer lists: `{1, 2, 3}` for arrays and structs (used in lookup tables).
-- [ ] `#pragma pack(push/pop)`: Required by `coff.h` for struct packing.
-- [ ] Variable declarations in `for` init: `for (int i = 0; ...)`.
-- [ ] Compound assignment operators: `+=`, `-=`, `*=`, `/=`, `%=`, `|=`, `&=`, `<<=`, `>>=`.
-- [ ] Ternary operator: `a ? b : c`.
+#### Phase 3: Language Feature Completion ✅
+- [x] Initializer lists: `{1, 2, 3}` for arrays and structs (used in lookup tables).
+- [x] `#pragma pack(push/pop)`: Required by `coff.h` for struct packing.
+- [x] Variable declarations in `for` init: `for (int i = 0; ...)`.
+- [x] Compound assignment operators: `+=`, `-=`, `*=`, `/=`, `%=`, `|=`, `&=`, `<<=`, `>>=`.
+- [x] Ternary operator: `a ? b : c`.
 
 #### Phase 4: Self-Hosting Verification
 - [ ] Module-by-module: Compile `buffer.c` → `types.c` → `lexer.c` → etc.
