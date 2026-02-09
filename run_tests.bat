@@ -19,19 +19,8 @@ if %errorlevel% neq 0 (
     echo [ERROR] 01_return.c compilation failed.
     exit /b %errorlevel%
 )
-
-echo [DUMPBIN 01_return]
-dumpbin /headers tests\01_return.obj
-dumpbin /symbols tests\01_return.obj
-
-echo [LINK 01_return]
-link /nologo /entry:main /subsystem:console /out:tests\01_return.exe tests\01_return.obj kernel32.lib
-if %errorlevel% neq 0 (
-    echo [ERROR] Linking 01_return failed.
-) else (
-    .\tests\01_return.exe
-    echo 01_return Exit Code: %errorlevel%
-)
+.\tests\01_return.exe
+echo 01_return result: %errorlevel%
 
 echo [TEST 04_if]
 .\build\Debug\fadors99.exe tests\04_if.c --obj
@@ -39,12 +28,16 @@ if %errorlevel% neq 0 (
     echo [ERROR] 04_if.c compilation failed.
     exit /b %errorlevel%
 )
-link /nologo /entry:main /subsystem:console /out:tests\04_if.exe tests\04_if.obj kernel32.lib
+.\tests\04_if.exe
+echo 04_if result: %errorlevel%
+
+echo [TEST 07_function]
+.\build\Debug\fadors99.exe tests\07_function.c --obj
 if %errorlevel% neq 0 (
-    echo [ERROR] Linking 04_if failed.
-) else (
-    .\tests\04_if.exe
-    echo 04_if Exit Code: %errorlevel%
+    echo [ERROR] 07_function.c compilation failed.
+    exit /b %errorlevel%
 )
+.\tests\07_function.exe
+echo 07_function result: %errorlevel%
 
 ENDLOCAL
