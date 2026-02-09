@@ -9,12 +9,13 @@ A lightweight C99-standard compliant compiler written in C99, targeting x86_64 W
 - **Macros**: Constant substitution via `#define NAME VALUE`.
 - **Conditional Compilation**: Basic header guard support with `#ifndef`.
 
-### Language Support
-- **Types**: `int`, `void`, `char`, and pointers.
-- **Data Structures**: Struct definition and member access (`.`, `->`).
-- **Control Flow**: `if`/`else`, `while`, function calls.
-- **Expressions**: Full operator precedence, assignments, and logic.
-- **Pointers**: Full support for pointer depth, address-of (`&`), and dereference (`*`) operators.
+- **Language Support**:
+  - **Types**: `int`, `void`, `char`, `float`, `double`, and pointers.
+  - **Data Structures**: Struct definition and member access (`.`, `->`).
+  - **Control Flow**: `if`/`else`, `while`, function calls.
+  - **Expressions**: Full C operator precedence, assignments, and logic (including short-circuiting `&&` and `||`).
+  - **Binary Operators**: Full support for `%`, `&`, `|`, `^`, `<<`, `>>`, and logical operators.
+  - **Pointers**: Full support for pointer depth, address-of (`&`), and dereference (`*`) operators.
 
 ### Backends / Assembly Generation
 - **Integrated Pipeline**: Automatically invokes system assemblers (`as`, `ml/ml64`) and linkers (`gcc`, `link.exe`) to produce executables.
@@ -99,7 +100,7 @@ Assembles a file with `fadors99`, links it manually, and executes it. Useful for
 - [x] Direct machine code generation (COFF) completion for verification without external tools.
 - [x] Global variable initialization support.
 - [x] Relocation handling for external symbols.
-- [ ] Floating Point Support (`float`, `double`, SSE/AVX).
+- [x] Floating Point Support (`float`, `double`, SSE/AVX).
 
 ### Language Features
 - [x] **Arrays**: Parser support for `T name[size]` and `expr[index]`. <!-- id: 25 -->

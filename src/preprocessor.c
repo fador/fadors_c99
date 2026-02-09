@@ -7,23 +7,52 @@
 typedef struct {
     char *name;
     char *value;
+    char **params;
+    int params_count;
+    int is_func;
 } Macro;
 
-static Macro macros[100];
+static Macro macros[200];
 static int macros_count = 0;
 
-static void add_macro(const char *name, const char *value) {
-    macros[macros_count].name = strdup(name);
-    macros[macros_count].value = value ? strdup(value) : strdup("");
-    macros_count++;
-}
+typedef struct {
+    int active;
+    int has_processed;
+} IfState;
 
-static const char *get_macro(const char *name) {
+static IfState if_stack[64];
+static int if_ptr = -1;
+
+static int find_macro(const char *name) {
     for (int i = 0; i < macros_count; i++) {
         if (strcmp(macros[i].name, name) == 0) {
-            return macros[i].value;
+            return i;
         }
     }
+    return -1;
+}
+
+static void add_macro(const char *name, const char *value, int is_func, char **params, int params_count) {
+    int idx = find_macro(name);
+    if (idx == -1) {
+        idx = macros_count++;
+    } else {
+        // Redefinition
+        free(macros[idx].name);
+        free(macros[idx].value);
+        for (int i = 0; i < macros[idx].params_count; i++) free(macros[idx].params[i]);
+        free(macros[idx].params);
+    }
+    macros[idx].name = strdup(name);
+    macros[idx].value = value ? strdup(value) : strdup("");
+    macros[idx].is_func = is_func;
+    macros[idx].params_count = params_count;
+    macros[idx].params = params;
+}
+
+static const char *get_macro_value(const char *name) {
+    int idx = find_macro(name);
+    if (idx != -1) return macros[idx].value;
     return NULL;
 }
 
@@ -41,11 +70,14 @@ static char *read_file(const char *filename) {
 }
 
 char *preprocess(const char *source, const char *filename) {
-    (void)filename; // TODO: Use for relative includes
-    
-    // Very simple preprocessor that handles #include and #define
-    // For now, it just concatenates includes and ignores other directives
-    
+    // Reset state for top-level call (poor man's reset)
+    // In a real compiler, we'd pass a context object.
+    static int top_level = 1;
+    if (top_level) {
+        if_ptr = -1;
+        top_level = 0;
+    }
+
     size_t out_size = strlen(source) * 2; // Rough estimate
     char *output = malloc(out_size);
     size_t out_pos = 0;
@@ -56,7 +88,10 @@ char *preprocess(const char *source, const char *filename) {
             p++;
             while (isspace(*p)) p++;
             
+            int skipping = (if_ptr >= 0 && !if_stack[if_ptr].active);
+            
             if (strncmp(p, "include", 7) == 0) {
+                if (skipping) { p += 7; goto skip_line; }
                 p += 7;
                 while (isspace(*p)) p++;
                 if (*p == '"' || *p == '<') {
@@ -70,10 +105,12 @@ char *preprocess(const char *source, const char *filename) {
                     inc_filename[len] = '\0';
                     if (*p == quote) p++;
                     
-                    // Recursive preprocess
                     char *inc_source = read_file(inc_filename);
                     if (inc_source) {
+                        int prev_top = top_level;
+                        top_level = 0;
                         char *preprocessed_inc = preprocess(inc_source, inc_filename);
+                        top_level = prev_top;
                         size_t inc_len = strlen(preprocessed_inc);
                         if (out_pos + inc_len >= out_size) {
                             out_size = out_pos + inc_len + 1024;
@@ -87,14 +124,39 @@ char *preprocess(const char *source, const char *filename) {
                     free(inc_filename);
                 }
             } else if (strncmp(p, "define", 6) == 0) {
+                if (skipping) { p += 6; goto skip_line; }
                 p += 6;
                 while (isspace(*p)) p++;
                 const char *name_start = p;
-                while (!isspace(*p) && *p != '\n' && *p != '\0') p++;
+                while (isalnum(*p) || *p == '_') p++;
                 size_t name_len = p - name_start;
                 char *name = malloc(name_len + 1);
                 strncpy(name, name_start, name_len);
                 name[name_len] = '\0';
+                
+                int is_func = 0;
+                char **params = NULL;
+                int params_count = 0;
+                
+                if (*p == '(') {
+                    is_func = 1;
+                    p++;
+                    while (*p != ')' && *p != '\n' && *p != '\0') {
+                        while (isspace(*p)) p++;
+                        const char *p_start = p;
+                        while (isalnum(*p) || *p == '_') p++;
+                        if (p > p_start) {
+                            params = realloc(params, sizeof(char *) * (params_count + 1));
+                            params[params_count] = malloc(p - p_start + 1);
+                            strncpy(params[params_count], p_start, p - p_start);
+                            params[params_count][p - p_start] = '\0';
+                            params_count++;
+                        }
+                        while (isspace(*p)) p++;
+                        if (*p == ',') p++;
+                    }
+                    if (*p == ')') p++;
+                }
                 
                 while (isspace(*p) && *p != '\n') p++;
                 const char *val_start = p;
@@ -104,11 +166,29 @@ char *preprocess(const char *source, const char *filename) {
                 strncpy(val, val_start, val_len);
                 val[val_len] = '\0';
                 
-                add_macro(name, val);
+                printf("DEBUG DEFINE: %s (func=%d, params=%d) = %s\n", name, is_func, params_count, val);
+                add_macro(name, val, is_func, params, params_count);
                 free(name);
                 free(val);
-            } else if (strncmp(p, "ifndef", 6) == 0) {
-                p += 6;
+            } else if (strncmp(p, "undef", 5) == 0) {
+                if (skipping) { p += 5; goto skip_line; }
+                p += 5;
+                while (isspace(*p)) p++;
+                const char *name_start = p;
+                while (isalnum(*p) || *p == '_') p++;
+                size_t name_len = p - name_start;
+                char *name = malloc(name_len + 1);
+                strncpy(name, name_start, name_len);
+                name[name_len] = '\0';
+                int idx = find_macro(name);
+                if (idx != -1) {
+                    free(macros[idx].name);
+                    macros[idx].name = strdup(""); 
+                }
+                free(name);
+            } else if (strncmp(p, "ifdef", 5) == 0 || strncmp(p, "ifndef", 6) == 0) {
+                int is_ifndef = (p[2] == 'n');
+                p += (is_ifndef ? 6 : 5);
                 while (isspace(*p)) p++;
                 const char *name_start = p;
                 while (!isspace(*p) && *p != '\n' && *p != '\0') p++;
@@ -117,24 +197,64 @@ char *preprocess(const char *source, const char *filename) {
                 strncpy(name, name_start, name_len);
                 name[name_len] = '\0';
                 
-                if (get_macro(name)) {
-                    // Skip until #endif or #else
-                    int depth = 1;
-                    while (depth > 0 && *p) {
-                        if (*p == '#') {
-                            p++;
-                            while (isspace(*p)) p++;
-                            if (strncmp(p, "ifndef", 6) == 0) depth++;
-                            else if (strncmp(p, "endif", 5) == 0) depth--;
-                        }
-                        p++;
+                int defined = find_macro(name) >= 0;
+                int active = is_ifndef ? !defined : defined;
+                
+                if (if_ptr < 63) {
+                    if_ptr++;
+                    int parent_active = (if_ptr == 0) ? 1 : if_stack[if_ptr - 1].active;
+                    if (!parent_active) {
+                        if_stack[if_ptr].active = 0;
+                        if_stack[if_ptr].has_processed = 1;
+                    } else {
+                        if_stack[if_ptr].active = active;
+                        if_stack[if_ptr].has_processed = active;
                     }
                 }
                 free(name);
+            } else if (strncmp(p, "elif", 4) == 0) {
+                p += 4;
+                while (isspace(*p)) p++;
+                const char *name_start = p;
+                while (!isspace(*p) && *p != '\n' && *p != '\0') p++;
+                size_t name_len = p - name_start;
+                char *name = malloc(name_len + 1);
+                strncpy(name, name_start, name_len);
+                name[name_len] = '\0';
+
+                if (if_ptr >= 0) {
+                    int parent_active = (if_ptr == 0) ? 1 : if_stack[if_ptr - 1].active;
+                    if (parent_active && !if_stack[if_ptr].has_processed) {
+                        int defined = find_macro(name) >= 0;
+                        if_stack[if_ptr].active = defined;
+                        if (defined) if_stack[if_ptr].has_processed = 1;
+                    } else {
+                        if_stack[if_ptr].active = 0;
+                    }
+                }
+                free(name);
+            } else if (strncmp(p, "else", 4) == 0) {
+                p += 4;
+                if (if_ptr >= 0) {
+                    int parent_active = (if_ptr == 0) ? 1 : if_stack[if_ptr - 1].active;
+                    if (parent_active && !if_stack[if_ptr].has_processed) {
+                        if_stack[if_ptr].active = 1;
+                        if_stack[if_ptr].has_processed = 1;
+                    } else {
+                        if_stack[if_ptr].active = 0;
+                    }
+                }
+            } else if (strncmp(p, "endif", 5) == 0) {
+                p += 5;
+                if (if_ptr >= 0) if_ptr--;
             } else {
-                // Ignore other directives for now
                 while (*p != '\n' && *p != '\0') p++;
             }
+
+skip_line:
+            while (*p != '\n' && *p != '\0') p++;
+        } else if (if_ptr >= 0 && !if_stack[if_ptr].active) {
+            p++;
         } else if (isalpha(*p) || *p == '_') {
             const char *start = p;
             while (isalnum(*p) || *p == '_') p++;
@@ -143,16 +263,119 @@ char *preprocess(const char *source, const char *filename) {
             strncpy(name, start, len);
             name[len] = '\0';
             
-            const char *val = get_macro(name);
-            if (val) {
-                size_t val_len = strlen(val);
-                if (out_pos + val_len >= out_size) {
-                    out_size = out_pos + val_len + 1024;
+            int m_idx = find_macro(name);
+            printf("DEBUG MATCH: %s (idx=%d)\n", name, m_idx);
+            if (m_idx != -1 && macros[m_idx].name[0] != '\0') {
+
+                Macro *m = &macros[m_idx];
+                if (m->is_func) {
+                    while (isspace(*p)) p++;
+                    if (*p == '(') {
+                        p++;
+                        char **args = NULL;
+                        int args_count = 0;
+                        while (*p != ')' && *p != '\0') {
+                            while (isspace(*p)) p++;
+                            const char *arg_start = p;
+                            int depth = 0;
+                            while ((*p != ',' && *p != ')' || depth > 0) && *p != '\0') {
+                                if (*p == '(') depth++;
+                                if (*p == ')') depth--;
+                                p++;
+                            }
+                            args = realloc(args, sizeof(char *) * (args_count + 1));
+                            args[args_count] = malloc(p - arg_start + 1);
+                            strncpy(args[args_count], arg_start, p - arg_start);
+                            args[args_count][p - arg_start] = '\0';
+                            args_count++;
+                            if (*p == ',') p++;
+                        }
+                        char *body = strdup(m->value);
+                        for (int i = 0; i < m->params_count && i < args_count; i++) {
+                            size_t p_len = strlen(m->params[i]);
+                            size_t a_len = strlen(args[i]);
+                            char *new_body = malloc(strlen(body) * 2 + a_len + 2); 
+                            char *src = body;
+                            char *dst = new_body;
+                            while (*src) {
+                                int prev_ok = (src == body || !(isalnum(src[-1]) || src[-1] == '_'));
+                                if (prev_ok && strncmp(src, m->params[i], p_len) == 0 && !isalnum(src[p_len]) && src[p_len] != '_') {
+                                    strcpy(dst, args[i]);
+                                    dst += a_len;
+                                    src += p_len;
+                                } else {
+                                    *dst++ = *src++;
+                                }
+                            }
+                            *dst = '\0';
+                            free(body);
+                            body = new_body;
+                        }
+                        if (*p == ')') p++;
+                        
+                        // Recursive preprocess the result
+                        int prev_top = top_level;
+                        top_level = 0;
+                        char *expanded = preprocess(body, "macro");
+                        top_level = prev_top;
+
+                        size_t exp_len = strlen(expanded);
+                        if (out_pos + exp_len >= out_size) {
+                            out_size = out_pos + exp_len + 1024;
+                            output = realloc(output, out_size);
+                        }
+                        strcpy(output + out_pos, expanded);
+                        out_pos += exp_len;
+                        free(body);
+                        free(expanded);
+                        for (int i = 0; i < args_count; i++) free(args[i]);
+                        free(args);
+                    } else {
+                        goto copy_normal;
+                    }
+                } else {
+                    // Recursive preprocess the simple macro value
+                    int prev_top = top_level;
+                    top_level = 0;
+                    char *expanded = preprocess(m->value, "macro");
+                    top_level = prev_top;
+
+                    size_t exp_len = strlen(expanded);
+                    if (out_pos + exp_len >= out_size) {
+                        out_size = out_pos + exp_len + 1024;
+                        output = realloc(output, out_size);
+                    }
+                    strcpy(output + out_pos, expanded);
+                    out_pos += exp_len;
+                    free(expanded);
+                }
+            } else if (strcmp(name, "__LINE__") == 0) {
+                // Calculate line number
+                int line = 1;
+                for (const char *it = source; it < start; it++) {
+                    if (*it == '\n') line++;
+                }
+                char buf[32];
+                sprintf(buf, "%d", line);
+                size_t b_len = strlen(buf);
+                if (out_pos + b_len >= out_size) {
+                    out_size = out_pos + b_len + 1024;
                     output = realloc(output, out_size);
                 }
-                strcpy(output + out_pos, val);
-                out_pos += val_len;
+                strcpy(output + out_pos, buf);
+                out_pos += b_len;
+            } else if (strcmp(name, "__FILE__") == 0) {
+                size_t f_len = strlen(filename);
+                if (out_pos + f_len + 4 >= out_size) { // +4 for quotes and null terminator
+                    out_size = out_pos + f_len + 1024;
+                    output = realloc(output, out_size);
+                }
+                output[out_pos++] = '"';
+                strcpy(output + out_pos, filename);
+                out_pos += f_len;
+                output[out_pos++] = '"';
             } else {
+copy_normal:
                 if (out_pos + len >= out_size) {
                     out_size = out_pos + len + 1024;
                     output = realloc(output, out_size);
