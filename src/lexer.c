@@ -180,11 +180,30 @@ Token lexer_next_token(Lexer *lexer) {
         case ';': token.type = TOKEN_SEMICOLON; break;
         case ':': token.type = TOKEN_COLON; break;
         case ',': token.type = TOKEN_COMMA; break;
-        case '.': token.type = TOKEN_DOT; break;
-        case '+': token.type = TOKEN_PLUS; break;
+        case '.':
+            if (peek(lexer) == '.' && lexer->source[lexer->position + 1] == '.') {
+                advance(lexer);
+                advance(lexer);
+                token.type = TOKEN_ELLIPSIS;
+                token.length = 3;
+            } else {
+                token.type = TOKEN_DOT;
+            }
+            break;
+        case '+':
+            if (match(lexer, '+')) {
+                token.type = TOKEN_PLUS_PLUS;
+                token.length = 2;
+            } else {
+                token.type = TOKEN_PLUS;
+            }
+            break;
         case '-':
             if (match(lexer, '>')) {
                 token.type = TOKEN_ARROW;
+                token.length = 2;
+            } else if (match(lexer, '-')) {
+                token.type = TOKEN_MINUS_MINUS;
                 token.length = 2;
             } else {
                 token.type = TOKEN_MINUS;

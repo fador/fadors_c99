@@ -319,6 +319,27 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand src, Operand dest) 
             buffer_write_byte(buf, 0xB6);
             emit_modrm(buf, 3, d, s);
         }
+    } else if (strcmp(mnemonic, "movsbq") == 0) {
+        if (src.type == OP_MEM && dest.type == OP_REG) {
+            int s = get_reg_id(src.data.mem.base);
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 1, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0xBE);
+            if (src.data.mem.offset == 0) {
+                emit_modrm(buf, 0, d, s);
+            } else {
+                emit_modrm(buf, 2, d, s);
+                buffer_write_dword(buf, src.data.mem.offset);
+            }
+        } else if (src.type == OP_REG && dest.type == OP_REG) {
+            int s = get_reg_id(src.data.reg);
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 1, d >= 8, 0, s >= 8); // dest is r64, src is r8
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0xBE);
+            emit_modrm(buf, 3, d, s);
+        }
     } else if (strcmp(mnemonic, "xor") == 0 || strcmp(mnemonic, "and") == 0 || strcmp(mnemonic, "or") == 0 || strcmp(mnemonic, "test") == 0) {
         if (src.type == OP_REG && dest.type == OP_REG) {
             int s = get_reg_id(src.data.reg);

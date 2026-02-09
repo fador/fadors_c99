@@ -466,10 +466,13 @@ static Type *get_expr_type(ASTNode *node) {
             return rt;
         }
         return lt ? lt : rt;
-    } else if (node->type == AST_NEG) {
+    } else if (node->type == AST_NEG || node->type == AST_PRE_INC || node->type == AST_PRE_DEC || 
+               node->type == AST_POST_INC || node->type == AST_POST_DEC) {
         return get_expr_type(node->data.unary.expression);
     } else if (node->type == AST_NOT) {
         return type_int();
+    } else if (node->type == AST_CAST) {
+        return node->data.cast.target_type;
     }
     return NULL;
 }
@@ -507,15 +510,20 @@ static void gen_addr(ASTNode *node) {
             }
         }
     } else if (node->type == AST_ARRAY_ACCESS) {
-        gen_addr(node->data.array_access.array);
+        gen_expression(node->data.array_access.array);
         emit_inst1("pushq", op_reg("rax"));
         gen_expression(node->data.array_access.index);
         
         // Element size calculation
         Type *array_type = node->data.array_access.array->resolved_type;
+        // Construct pointer type if needed or trust resolved_type
+        if (!array_type) array_type = get_expr_type(node->data.array_access.array);
+
         int element_size = 8;
-        if (array_type && array_type->data.ptr_to) {
-            element_size = array_type->data.ptr_to->size;
+        if (array_type) {
+             if (array_type->kind == TYPE_PTR || array_type->kind == TYPE_ARRAY) {
+                 if (array_type->data.ptr_to) element_size = array_type->data.ptr_to->size;
+             }
         }
         
         emit_inst2("imul", op_imm(element_size), op_reg("rax"));
@@ -835,6 +843,89 @@ static void gen_expression(ASTNode *node) {
         }
     } else if (node->type == AST_BINARY_EXPR) {
         gen_binary_expr(node);
+    } else if (node->type == AST_PRE_INC || node->type == AST_PRE_DEC || 
+               node->type == AST_POST_INC || node->type == AST_POST_DEC) {
+        int is_inc = (node->type == AST_PRE_INC || node->type == AST_POST_INC);
+        int is_pre = (node->type == AST_PRE_INC || node->type == AST_PRE_DEC);
+        
+        Type *t = get_expr_type(node->data.unary.expression);
+        gen_addr(node->data.unary.expression);
+        // Address is in RAX. 
+        
+        int size = 1;
+        if (t && (t->kind == TYPE_PTR || t->kind == TYPE_ARRAY) && t->data.ptr_to) {
+             size = t->data.ptr_to->size;
+        }
+        
+        // Load value to RCX
+        if (t && t->size == 1) {
+            emit_inst2("movzbq", op_mem("rax", 0), op_reg("rcx"));
+        } else {
+            emit_inst2("mov", op_mem("rax", 0), op_reg("rcx"));
+        }
+        
+        if (!is_pre) {
+            emit_inst1("pushq", op_reg("rcx")); // Save original value
+        }
+        
+        // Modify RCX
+        if (is_inc) {
+            emit_inst2("add", op_imm(size), op_reg("rcx"));
+        } else {
+            emit_inst2("sub", op_imm(size), op_reg("rcx"));
+        }
+        
+        // Store back
+        if (t && t->size == 1) {
+            emit_inst2("mov", op_reg("cl"), op_mem("rax", 0));
+        } else {
+            emit_inst2("mov", op_reg("rcx"), op_mem("rax", 0));
+        }
+        
+        if (!is_pre) {
+            emit_inst1("popq", op_reg("rax")); // Restore original value to result register
+        } else {
+            emit_inst2("mov", op_reg("rcx"), op_reg("rax")); // Result is new value
+        }
+        
+        node->resolved_type = t;
+    } else if (node->type == AST_CAST) {
+        gen_expression(node->data.cast.expression);
+        Type *src = get_expr_type(node->data.cast.expression);
+        Type *dst = node->data.cast.target_type;
+        
+        if (is_float_type(src) && is_float_type(dst)) {
+            // Float <-> Double
+            if (src->kind == TYPE_FLOAT && dst->kind == TYPE_DOUBLE) {
+                emit_inst2("cvtss2sd", op_reg("xmm0"), op_reg("xmm0"));
+            } else if (src->kind == TYPE_DOUBLE && dst->kind == TYPE_FLOAT) {
+                emit_inst2("cvtsd2ss", op_reg("xmm0"), op_reg("xmm0"));
+            }
+        } else if (is_float_type(src) && !is_float_type(dst)) {
+            // Float -> Int
+            if (src->kind == TYPE_FLOAT) {
+                emit_inst2("cvttss2si", op_reg("xmm0"), op_reg("rax"));
+            } else {
+                emit_inst2("cvttsd2si", op_reg("xmm0"), op_reg("rax"));
+            }
+        } else if (!is_float_type(src) && is_float_type(dst)) {
+            // Int -> Float
+            if (dst->kind == TYPE_FLOAT) {
+                emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm0"));
+            } else {
+                emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm0"));
+            }
+        } else {
+            // Int -> Int / Ptr
+            if (dst->kind == TYPE_CHAR) {
+                 // Cast to char: Truncate and sign-extend to 64-bit for consistency
+                 emit_inst2("movsbq", op_reg("al"), op_reg("rax"));
+            } 
+            // Other int-to-int casts usually no-op for same size or smaller-to-larger (implicit)
+            // Or larger-to-smaller (truncate, handled by using lower reg parts if needed)
+            // But if we cast int (32/64) to char, we explicitly truncated above.
+        }
+        node->resolved_type = dst;
     } else if (node->type == AST_ASSIGN) {
         gen_expression(node->data.assign.value);
         Type *t = get_expr_type(node->data.assign.left);

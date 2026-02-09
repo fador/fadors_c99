@@ -46,11 +46,19 @@ void ast_print(ASTNode *node, int indent) {
         case AST_STRING: printf("String: \"%s\"\n", node->data.string.value); break;
         case AST_NEG: printf("Neg\n"); break;
         case AST_NOT: printf("Not\n"); break;
+        case AST_PRE_INC: printf("PreInc\n"); break;
+        case AST_PRE_DEC: printf("PreDec\n"); break;
+        case AST_POST_INC: printf("PostInc\n"); break;
+        case AST_POST_DEC: printf("PostDec\n"); break;
+        case AST_CAST: printf("Cast\n"); break;
         case AST_UNKNOWN: printf("Unknown\n"); break;
     }
     
-    if (node->type == AST_DEREF || node->type == AST_ADDR_OF || node->type == AST_NEG || node->type == AST_NOT) {
-        ast_print(node->data.unary.expression, indent + 1);
+    if (node->type == AST_DEREF || node->type == AST_ADDR_OF || node->type == AST_NEG || node->type == AST_NOT ||
+        node->type == AST_PRE_INC || node->type == AST_PRE_DEC || node->type == AST_POST_INC || node->type == AST_POST_DEC ||
+        node->type == AST_CAST) {
+        if (node->type == AST_CAST) ast_print(node->data.cast.expression, indent + 1);
+        else ast_print(node->data.unary.expression, indent + 1);
     }
     
     if (node->type == AST_ASSIGN) {

@@ -209,7 +209,9 @@ static ASTNode *parse_primary(Parser *parser) {
 
 static ASTNode *parse_postfix(Parser *parser) {
     ASTNode *node = parse_primary(parser);
-    while (parser->current_token.type == TOKEN_DOT || parser->current_token.type == TOKEN_ARROW || parser->current_token.type == TOKEN_LBRACKET) {
+    while (parser->current_token.type == TOKEN_DOT || parser->current_token.type == TOKEN_ARROW || 
+           parser->current_token.type == TOKEN_LBRACKET || 
+           parser->current_token.type == TOKEN_PLUS_PLUS || parser->current_token.type == TOKEN_MINUS_MINUS) {
         if (parser->current_token.type == TOKEN_LBRACKET) {
             parser_advance(parser);
             ASTNode *index = parse_expression(parser);
@@ -224,6 +226,18 @@ static ASTNode *parse_postfix(Parser *parser) {
                 access->resolved_type = node->resolved_type->data.ptr_to;
             }
             node = access;
+        } else if (parser->current_token.type == TOKEN_PLUS_PLUS) {
+            parser_advance(parser);
+            ASTNode *inc = ast_create_node(AST_POST_INC);
+            inc->data.unary.expression = node;
+            if (node->resolved_type) inc->resolved_type = node->resolved_type;
+            node = inc;
+        } else if (parser->current_token.type == TOKEN_MINUS_MINUS) {
+            parser_advance(parser);
+            ASTNode *dec = ast_create_node(AST_POST_DEC);
+            dec->data.unary.expression = node;
+            if (node->resolved_type) dec->resolved_type = node->resolved_type;
+            node = dec;
         } else {
             int is_arrow = (parser->current_token.type == TOKEN_ARROW);
             parser_advance(parser);
@@ -261,40 +275,83 @@ static ASTNode *parse_postfix(Parser *parser) {
     return node;
 }
 
+static ASTNode *parse_cast(Parser *parser);
+
 static ASTNode *parse_unary(Parser *parser) {
-    if (parser->current_token.type == TOKEN_STAR) {
+    if (parser->current_token.type == TOKEN_PLUS_PLUS) {
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_PRE_INC);
+        node->data.unary.expression = parse_unary(parser);
+        return node;
+    } else if (parser->current_token.type == TOKEN_MINUS_MINUS) {
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_PRE_DEC);
+        node->data.unary.expression = parse_unary(parser);
+        return node;
+    } else if (parser->current_token.type == TOKEN_STAR) {
         parser_advance(parser);
         ASTNode *node = ast_create_node(AST_DEREF);
-        node->data.unary.expression = parse_unary(parser);
+        node->data.unary.expression = parse_cast(parser);
         return node;
     } else if (parser->current_token.type == TOKEN_AMPERSAND) {
         parser_advance(parser);
         ASTNode *node = ast_create_node(AST_ADDR_OF);
-        node->data.unary.expression = parse_unary(parser);
+        node->data.unary.expression = parse_cast(parser);
         return node;
     } else if (parser->current_token.type == TOKEN_MINUS) {
         parser_advance(parser);
         ASTNode *node = ast_create_node(AST_NEG);
-        node->data.unary.expression = parse_unary(parser);
+        node->data.unary.expression = parse_cast(parser);
         return node;
     } else if (parser->current_token.type == TOKEN_BANG) {
         parser_advance(parser);
         ASTNode *node = ast_create_node(AST_NOT);
-        node->data.unary.expression = parse_unary(parser);
+        node->data.unary.expression = parse_cast(parser);
         return node;
     }
     return parse_postfix(parser);
 }
 
+static int is_token_type_start(Parser *parser, Token t) {
+    TokenType type = t.type;
+    return (type == TOKEN_KEYWORD_INT || 
+            type == TOKEN_KEYWORD_CHAR || 
+            type == TOKEN_KEYWORD_FLOAT || 
+            type == TOKEN_KEYWORD_DOUBLE || 
+            type == TOKEN_KEYWORD_VOID || 
+            type == TOKEN_KEYWORD_STRUCT || 
+            type == TOKEN_KEYWORD_UNION || 
+            type == TOKEN_KEYWORD_ENUM || 
+            is_typedef_name(parser, t));
+}
+
+static ASTNode *parse_cast(Parser *parser) {
+    if (parser->current_token.type == TOKEN_LPAREN) {
+        Token next = lexer_peek_token(parser->lexer);
+        if (is_token_type_start(parser, next)) {
+            parser_advance(parser); // (
+            Type *type = parse_type(parser);
+            parser_expect(parser, TOKEN_RPAREN);
+            
+            ASTNode *node = ast_create_node(AST_CAST);
+            node->data.cast.target_type = type;
+            node->data.cast.expression = parse_cast(parser);
+            node->resolved_type = type;
+            return node;
+        }
+    }
+    return parse_unary(parser);
+}
+
 static ASTNode *parse_multiplicative(Parser *parser) {
-    ASTNode *left = parse_unary(parser);
+    ASTNode *left = parse_cast(parser);
     while (parser->current_token.type == TOKEN_STAR || parser->current_token.type == TOKEN_SLASH || parser->current_token.type == TOKEN_PERCENT) {
         TokenType op = parser->current_token.type;
         parser_advance(parser);
         ASTNode *node = ast_create_node(AST_BINARY_EXPR);
         node->data.binary_expr.op = op;
         node->data.binary_expr.left = left;
-        node->data.binary_expr.right = parse_unary(parser);
+        node->data.binary_expr.right = parse_cast(parser);
         left = node;
     }
     return left;
@@ -755,7 +812,25 @@ static ASTNode *parse_external_declaration(Parser *parser) {
             while (parser->current_token.type != TOKEN_RPAREN && parser->current_token.type != TOKEN_EOF) {
                 Type *param_type = parse_type(parser);
                 if (!param_type) {
-                    printf("Syntax Error: Expected parameter type at line %d\n", parser->current_token.line);
+                    if (parser->current_token.type == TOKEN_ELLIPSIS) {
+                        parser_advance(parser);
+                        parser_expect(parser, TOKEN_RPAREN); // Must be last
+                        // Mark function as variadic if we had a way, but type system assumes it for now
+                        // We need to return the node, but we consumed ')'
+                        // The loop condition checks for RPAREN, so breaking is trickier if we already consumed it.
+                        // Let's just return here.
+                        
+                        if (parser->current_token.type == TOKEN_SEMICOLON) {
+                            parser_advance(parser);
+                            node->data.function.body = NULL;
+                        } else {
+                            node->data.function.body = parse_block(parser);
+                        }
+                        return node;
+                        // Actually, the loop logic expects to continue if not RPAREN.
+                        // But ... must be last.
+                    }
+                    printf("Syntax Error: Expected parameter type or '...' at line %d\n", parser->current_token.line);
                     exit(1);
                 }
                 

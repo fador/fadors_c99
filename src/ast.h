@@ -32,6 +32,11 @@ typedef enum {
     AST_BREAK,
     AST_NEG,
     AST_NOT,
+    AST_PRE_INC,
+    AST_PRE_DEC,
+    AST_POST_INC,
+    AST_POST_DEC,
+    AST_CAST,
     AST_UNKNOWN,
     AST_FLOAT
 } ASTNodeType;
@@ -101,6 +106,10 @@ typedef struct ASTNode {
         struct {
             struct ASTNode *expression;
         } unary;
+        struct {
+            struct ASTNode *expression;
+            Type *target_type;
+        } cast;
         struct {
             struct ASTNode *init;
             struct ASTNode *condition;

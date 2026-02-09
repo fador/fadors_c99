@@ -264,7 +264,6 @@ skip_line:
             name[len] = '\0';
             
             int m_idx = find_macro(name);
-            printf("DEBUG MATCH: %s (idx=%d)\n", name, m_idx);
             if (m_idx != -1 && macros[m_idx].name[0] != '\0') {
 
                 Macro *m = &macros[m_idx];

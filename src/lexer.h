@@ -57,6 +57,9 @@ typedef enum {
     TOKEN_GREATER,      // >
     TOKEN_LESS_EQUAL,   // <=
     TOKEN_GREATER_EQUAL, // >=
+    TOKEN_PLUS_PLUS,    // ++
+    TOKEN_MINUS_MINUS,  // --
+    TOKEN_ELLIPSIS,     // ...
     TOKEN_FLOAT,       // e.g. 3.14
     TOKEN_STRING,       // "string"
     TOKEN_UNKNOWN

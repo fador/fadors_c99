@@ -151,7 +151,7 @@ int main(int argc, char **argv) {
             char linker_cmd[1024];
             sprintf(linker_cmd, linker_fmt, linker);
 
-            sprintf(cmd, "%s /nologo /entry:main /subsystem:console /out:\"%s\" \"%s\" kernel32.lib", linker_cmd, exe_filename, obj_filename);
+            sprintf(cmd, "%s /nologo /subsystem:console /out:\"%s\" \"%s\" kernel32.lib libcmt.lib legacy_stdio_definitions.lib", linker_cmd, exe_filename, obj_filename);
             
             if (run_command(cmd) != 0) {
                 printf("Error: Linking failed.\n");
