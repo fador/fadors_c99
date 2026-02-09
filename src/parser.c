@@ -21,6 +21,7 @@ static void parser_expect(Parser *parser, TokenType type) {
     } else {
         printf("Syntax Error: Expected token type %d, got %d ('%.*s') at line %d\n", 
                type, parser->current_token.type, (int)parser->current_token.length, parser->current_token.start, parser->current_token.line);
+        fflush(stdout);
         exit(1);
     }
 }
@@ -37,6 +38,17 @@ static int is_typedef_name(Parser *parser, Token token) {
 }
 
 static ASTNode *parse_expression(Parser *parser);
+static ASTNode *parse_logical_or(Parser *parser);
+static ASTNode *parse_logical_and(Parser *parser);
+static ASTNode *parse_inclusive_or(Parser *parser);
+static ASTNode *parse_exclusive_or(Parser *parser);
+static ASTNode *parse_and(Parser *parser);
+static ASTNode *parse_equality(Parser *parser);
+static ASTNode *parse_relational(Parser *parser);
+static ASTNode *parse_shift(Parser *parser);
+static ASTNode *parse_additive(Parser *parser);
+static ASTNode *parse_multiplicative(Parser *parser);
+static ASTNode *parse_unary(Parser *parser);
 static ASTNode *parse_tag_body(Parser *parser, Type *type);
 static ASTNode *parse_enum_body(Parser *parser, Type *type);
 
@@ -56,6 +68,12 @@ static Type *parse_type(Parser *parser) {
         parser_advance(parser);
     } else if (parser->current_token.type == TOKEN_KEYWORD_CHAR) {
         type = type_char();
+        parser_advance(parser);
+    } else if (parser->current_token.type == TOKEN_KEYWORD_FLOAT) {
+        type = type_float();
+        parser_advance(parser);
+    } else if (parser->current_token.type == TOKEN_KEYWORD_DOUBLE) {
+        type = type_double();
         parser_advance(parser);
     } else if (parser->current_token.type == TOKEN_KEYWORD_VOID) {
         type = type_void();
@@ -116,6 +134,22 @@ static ASTNode *parse_primary(Parser *parser) {
         node->data.integer.value = atoi(buffer);
         parser_advance(parser);
         return node;
+    } else if (parser->current_token.type == TOKEN_FLOAT) {
+        ASTNode *node = ast_create_node(AST_FLOAT);
+        char buffer[64];
+        size_t len = parser->current_token.length < 63 ? parser->current_token.length : 63;
+        strncpy(buffer, parser->current_token.start, len);
+        buffer[len] = '\0';
+        node->resolved_type = type_double(); // Default
+        if (buffer[len-1] == 'f' || buffer[len-1] == 'F') {
+             node->resolved_type = type_float();
+        }
+        // atof/strtod handles optional 'f' suffix? No, standard atof might stop at 'f'.
+        // Let's strip 'f' just in case or rely on stdlib behavior.
+        // Actually simple atof("1.0f") works on most platforms, stopping at 'f'.
+        node->data.float_val.value = atof(buffer);
+        parser_advance(parser);
+        return node;
     } else if (parser->current_token.type == TOKEN_IDENTIFIER) {
         char *name = malloc(parser->current_token.length + 1);
         strncpy(name, parser->current_token.start, parser->current_token.length);
@@ -169,6 +203,7 @@ static ASTNode *parse_primary(Parser *parser) {
     }
     printf("Syntax Error: Unexpected token %d ('%.*s') in expression at line %d\n", 
            parser->current_token.type, (int)parser->current_token.length, parser->current_token.start, parser->current_token.line);
+    fflush(stdout);
     exit(1);
 }
 
@@ -237,19 +272,43 @@ static ASTNode *parse_unary(Parser *parser) {
         ASTNode *node = ast_create_node(AST_ADDR_OF);
         node->data.unary.expression = parse_unary(parser);
         return node;
+    } else if (parser->current_token.type == TOKEN_MINUS) {
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_NEG);
+        node->data.unary.expression = parse_unary(parser);
+        return node;
+    } else if (parser->current_token.type == TOKEN_BANG) {
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_NOT);
+        node->data.unary.expression = parse_unary(parser);
+        return node;
     }
     return parse_postfix(parser);
 }
 
 static ASTNode *parse_multiplicative(Parser *parser) {
     ASTNode *left = parse_unary(parser);
-    while (parser->current_token.type == TOKEN_STAR || parser->current_token.type == TOKEN_SLASH) {
+    while (parser->current_token.type == TOKEN_STAR || parser->current_token.type == TOKEN_SLASH || parser->current_token.type == TOKEN_PERCENT) {
         TokenType op = parser->current_token.type;
         parser_advance(parser);
         ASTNode *node = ast_create_node(AST_BINARY_EXPR);
         node->data.binary_expr.op = op;
         node->data.binary_expr.left = left;
-        node->data.binary_expr.right = parse_primary(parser);
+        node->data.binary_expr.right = parse_unary(parser);
+        left = node;
+    }
+    return left;
+}
+
+static ASTNode *parse_shift(Parser *parser) {
+    ASTNode *left = parse_additive(parser);
+    while (parser->current_token.type == TOKEN_LESS_LESS || parser->current_token.type == TOKEN_GREATER_GREATER) {
+        TokenType op = parser->current_token.type;
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_BINARY_EXPR);
+        node->data.binary_expr.op = op;
+        node->data.binary_expr.left = left;
+        node->data.binary_expr.right = parse_additive(parser);
         left = node;
     }
     return left;
@@ -271,7 +330,7 @@ static ASTNode *parse_additive(Parser *parser) {
 
 
 static ASTNode *parse_relational(Parser *parser) {
-    ASTNode *left = parse_additive(parser);
+    ASTNode *left = parse_shift(parser);
     while (parser->current_token.type == TOKEN_LESS || parser->current_token.type == TOKEN_GREATER ||
            parser->current_token.type == TOKEN_LESS_EQUAL || parser->current_token.type == TOKEN_GREATER_EQUAL) {
         TokenType op = parser->current_token.type;
@@ -279,7 +338,7 @@ static ASTNode *parse_relational(Parser *parser) {
         ASTNode *node = ast_create_node(AST_BINARY_EXPR);
         node->data.binary_expr.op = op;
         node->data.binary_expr.left = left;
-        node->data.binary_expr.right = parse_additive(parser);
+        node->data.binary_expr.right = parse_shift(parser);
         left = node;
     }
     return left;
@@ -299,8 +358,73 @@ static ASTNode *parse_equality(Parser *parser) {
     return left;
 }
 
-static ASTNode *parse_expression(Parser *parser) {
+static ASTNode *parse_and(Parser *parser) {
     ASTNode *left = parse_equality(parser);
+    while (parser->current_token.type == TOKEN_AMPERSAND) {
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_BINARY_EXPR);
+        node->data.binary_expr.op = TOKEN_AMPERSAND;
+        node->data.binary_expr.left = left;
+        node->data.binary_expr.right = parse_equality(parser);
+        left = node;
+    }
+    return left;
+}
+
+static ASTNode *parse_exclusive_or(Parser *parser) {
+    ASTNode *left = parse_and(parser);
+    while (parser->current_token.type == TOKEN_CARET) {
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_BINARY_EXPR);
+        node->data.binary_expr.op = TOKEN_CARET;
+        node->data.binary_expr.left = left;
+        node->data.binary_expr.right = parse_and(parser);
+        left = node;
+    }
+    return left;
+}
+
+static ASTNode *parse_inclusive_or(Parser *parser) {
+    ASTNode *left = parse_exclusive_or(parser);
+    while (parser->current_token.type == TOKEN_PIPE) {
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_BINARY_EXPR);
+        node->data.binary_expr.op = TOKEN_PIPE;
+        node->data.binary_expr.left = left;
+        node->data.binary_expr.right = parse_exclusive_or(parser);
+        left = node;
+    }
+    return left;
+}
+
+static ASTNode *parse_logical_and(Parser *parser) {
+    ASTNode *left = parse_inclusive_or(parser);
+    while (parser->current_token.type == TOKEN_AMPERSAND_AMPERSAND) {
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_BINARY_EXPR);
+        node->data.binary_expr.op = TOKEN_AMPERSAND_AMPERSAND;
+        node->data.binary_expr.left = left;
+        node->data.binary_expr.right = parse_inclusive_or(parser);
+        left = node;
+    }
+    return left;
+}
+
+static ASTNode *parse_logical_or(Parser *parser) {
+    ASTNode *left = parse_logical_and(parser);
+    while (parser->current_token.type == TOKEN_PIPE_PIPE) {
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_BINARY_EXPR);
+        node->data.binary_expr.op = TOKEN_PIPE_PIPE;
+        node->data.binary_expr.left = left;
+        node->data.binary_expr.right = parse_logical_and(parser);
+        left = node;
+    }
+    return left;
+}
+
+static ASTNode *parse_expression(Parser *parser) {
+    ASTNode *left = parse_logical_or(parser);
     if (parser->current_token.type == TOKEN_EQUAL) {
         parser_advance(parser);
         ASTNode *node = ast_create_node(AST_ASSIGN);
@@ -348,6 +472,8 @@ static ASTNode *parse_statement(Parser *parser) {
         }
     } else if (parser->current_token.type == TOKEN_KEYWORD_INT || 
                parser->current_token.type == TOKEN_KEYWORD_CHAR ||
+               parser->current_token.type == TOKEN_KEYWORD_FLOAT ||
+               parser->current_token.type == TOKEN_KEYWORD_DOUBLE ||
                parser->current_token.type == TOKEN_KEYWORD_VOID ||
                parser->current_token.type == TOKEN_KEYWORD_EXTERN ||
                parser->current_token.type == TOKEN_KEYWORD_STRUCT ||
@@ -495,6 +621,8 @@ static ASTNode *parse_statement(Parser *parser) {
         } else {
             if (parser->current_token.type == TOKEN_KEYWORD_INT || 
                 parser->current_token.type == TOKEN_KEYWORD_CHAR ||
+                parser->current_token.type == TOKEN_KEYWORD_FLOAT ||
+                parser->current_token.type == TOKEN_KEYWORD_DOUBLE ||
                 parser->current_token.type == TOKEN_KEYWORD_VOID ||
                 parser->current_token.type == TOKEN_KEYWORD_STRUCT) {
                 node->data.for_stmt.init = parse_statement(parser);

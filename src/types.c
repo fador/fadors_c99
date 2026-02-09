@@ -18,6 +18,22 @@ Type *type_char() {
     return t;
 }
 
+Type *type_float() {
+    Type *t = malloc(sizeof(Type));
+    t->kind = TYPE_FLOAT;
+    t->size = 4;
+    t->array_len = 0;
+    return t;
+}
+
+Type *type_double() {
+    Type *t = malloc(sizeof(Type));
+    t->kind = TYPE_DOUBLE;
+    t->size = 8;
+    t->array_len = 0;
+    return t;
+}
+
 Type *type_ptr(Type *to) {
     Type *t = malloc(sizeof(Type));
     t->kind = TYPE_PTR;

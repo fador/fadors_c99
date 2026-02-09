@@ -96,9 +96,10 @@ Assembles a file with `fadors99`, links it manually, and executes it. Useful for
 
 ### Current Focus: Direct Code Generation
 - [x] Custom Assembler (COFF/ELF writer foundation)
-- [ ] Direct machine code generation (COFF) completion for verification without external tools.
-- [ ] Global variable initialization support.
-- [ ] Relocation handling for external symbols.
+- [x] Direct machine code generation (COFF) completion for verification without external tools.
+- [x] Global variable initialization support.
+- [x] Relocation handling for external symbols.
+- [ ] Floating Point Support (`float`, `double`, SSE/AVX).
 
 ### Language Features
 - [x] **Arrays**: Parser support for `T name[size]` and `expr[index]`. <!-- id: 25 -->

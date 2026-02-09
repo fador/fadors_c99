@@ -2,7 +2,7 @@
 #include <string.h>
 #include <stdio.h>
 
-static int get_reg_id(const char *reg) {
+int get_reg_id(const char *reg) {
     if (strcmp(reg, "rax") == 0 || strcmp(reg, "al") == 0) return 0;
     if (strcmp(reg, "rcx") == 0 || strcmp(reg, "cl") == 0) return 1;
     if (strcmp(reg, "rdx") == 0 || strcmp(reg, "dl") == 0) return 2;
@@ -20,6 +20,23 @@ static int get_reg_id(const char *reg) {
     if (strcmp(reg, "r13") == 0) return 13;
     if (strcmp(reg, "r14") == 0) return 14;
     if (strcmp(reg, "r15") == 0) return 15;
+    // XMM registers
+    if (strcmp(reg, "xmm0") == 0) return 0;
+    if (strcmp(reg, "xmm1") == 0) return 1;
+    if (strcmp(reg, "xmm2") == 0) return 2;
+    if (strcmp(reg, "xmm3") == 0) return 3;
+    if (strcmp(reg, "xmm4") == 0) return 4;
+    if (strcmp(reg, "xmm5") == 0) return 5;
+    if (strcmp(reg, "xmm6") == 0) return 6;
+    if (strcmp(reg, "xmm7") == 0) return 7;
+    if (strcmp(reg, "xmm8") == 0) return 8;
+    if (strcmp(reg, "xmm9") == 0) return 9;
+    if (strcmp(reg, "xmm10") == 0) return 10;
+    if (strcmp(reg, "xmm11") == 0) return 11;
+    if (strcmp(reg, "xmm12") == 0) return 12;
+    if (strcmp(reg, "xmm13") == 0) return 13;
+    if (strcmp(reg, "xmm14") == 0) return 14;
+    if (strcmp(reg, "xmm15") == 0) return 15;
     return -1;
 }
 
@@ -37,6 +54,10 @@ static void emit_modrm(Buffer *buf, int mod, int reg, int rm) {
     // ModR/M: mod(2) | reg(3) | rm(3)
     uint8_t modrm = ((mod & 3) << 6) | ((reg & 7) << 3) | (rm & 7);
     buffer_write_byte(buf, modrm);
+    if ((rm & 7) == 4 && mod != 3) {
+        // SIB byte: [RSP] or [R12]
+        buffer_write_byte(buf, 0x24); // scale=0, index=4(none), base=4(rsp)
+    }
 }
 
 void encode_inst0(Buffer *buf, const char *mnemonic) {
@@ -104,6 +125,10 @@ void encode_inst1(Buffer *buf, const char *mnemonic, Operand op1) {
             else if (strcmp(mnemonic, "setle") == 0) buffer_write_byte(buf, 0x9E);
             else if (strcmp(mnemonic, "setg") == 0) buffer_write_byte(buf, 0x9F);
             else if (strcmp(mnemonic, "setge") == 0) buffer_write_byte(buf, 0x9D);
+            else if (strcmp(mnemonic, "setb") == 0) buffer_write_byte(buf, 0x92);
+            else if (strcmp(mnemonic, "setbe") == 0) buffer_write_byte(buf, 0x96);
+            else if (strcmp(mnemonic, "seta") == 0) buffer_write_byte(buf, 0x97);
+            else if (strcmp(mnemonic, "setae") == 0) buffer_write_byte(buf, 0x93);
             emit_modrm(buf, 3, 0, reg);
         }
     } else if (strcmp(mnemonic, "neg") == 0) {
@@ -294,13 +319,171 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand src, Operand dest) 
             buffer_write_byte(buf, 0xB6);
             emit_modrm(buf, 3, d, s);
         }
-    } else if (strcmp(mnemonic, "xor") == 0) {
+    } else if (strcmp(mnemonic, "xor") == 0 || strcmp(mnemonic, "and") == 0 || strcmp(mnemonic, "or") == 0 || strcmp(mnemonic, "test") == 0) {
         if (src.type == OP_REG && dest.type == OP_REG) {
             int s = get_reg_id(src.data.reg);
             int d = get_reg_id(dest.data.reg);
             emit_rex(buf, 1, s >= 8, 0, d >= 8);
-            buffer_write_byte(buf, 0x31);
+            uint8_t opcode = 0x31; // xor
+            if (strcmp(mnemonic, "and") == 0) opcode = 0x21;
+            else if (strcmp(mnemonic, "or") == 0) opcode = 0x09;
+            else if (strcmp(mnemonic, "test") == 0) opcode = 0x85;
+            buffer_write_byte(buf, opcode);
             emit_modrm(buf, 3, s, d);
+        } else if (src.type == OP_IMM && dest.type == OP_REG) {
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 1, 0, 0, d >= 8);
+            uint8_t extension = 4; // and
+            if (strcmp(mnemonic, "or") == 0) extension = 1;
+            else if (strcmp(mnemonic, "xor") == 0) extension = 6;
+            
+            if (strcmp(mnemonic, "test") == 0) {
+                buffer_write_byte(buf, 0xF7);
+                emit_modrm(buf, 3, 0, d);
+                buffer_write_dword(buf, src.data.imm);
+            } else {
+                if (src.data.imm >= -128 && src.data.imm <= 127) {
+                    buffer_write_byte(buf, 0x83);
+                    emit_modrm(buf, 3, extension, d);
+                    buffer_write_byte(buf, (uint8_t)src.data.imm);
+                } else {
+                    buffer_write_byte(buf, 0x81);
+                    emit_modrm(buf, 3, extension, d);
+                    buffer_write_dword(buf, src.data.imm);
+                }
+            }
+        }
+    } else if (strcmp(mnemonic, "shl") == 0 || strcmp(mnemonic, "sar") == 0 || strcmp(mnemonic, "shr") == 0) {
+        if (src.type == OP_REG && dest.type == OP_REG && strcmp(src.data.reg, "cl") == 0) {
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 1, 0, 0, d >= 8);
+            buffer_write_byte(buf, 0xD3);
+            uint8_t extension = 4; // shl
+            if (strcmp(mnemonic, "sar") == 0) extension = 7;
+            else if (strcmp(mnemonic, "shr") == 0) extension = 5;
+            emit_modrm(buf, 3, extension, d);
+        } else if (src.type == OP_IMM && dest.type == OP_REG) {
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 1, 0, 0, d >= 8);
+            buffer_write_byte(buf, 0xC1);
+            uint8_t extension = 4; // shl
+            if (strcmp(mnemonic, "sar") == 0) extension = 7;
+            else if (strcmp(mnemonic, "shr") == 0) extension = 5;
+            emit_modrm(buf, 3, extension, d);
+            buffer_write_byte(buf, (uint8_t)src.data.imm);
+        }
+    } else if (strcmp(mnemonic, "idiv") == 0) {
+        // Unary idiv for modulo/div: idiv r/m64
+        if (dest.type == OP_REG) {
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 1, 0, 0, d >= 8);
+            buffer_write_byte(buf, 0xF7);
+            emit_modrm(buf, 3, 7, d); // /7 extension
+        }
+    } else if (strcmp(mnemonic, "movss") == 0 || strcmp(mnemonic, "movsd") == 0) {
+        int is_double = (strcmp(mnemonic, "movsd") == 0);
+        buffer_write_byte(buf, is_double ? 0xF2 : 0xF3);
+        
+        if (src.type == OP_REG && dest.type == OP_REG) {
+            int s = get_reg_id(src.data.reg);
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 0, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x10);
+            emit_modrm(buf, 3, d, s);
+        } else if (src.type == OP_REG && dest.type == OP_MEM) {
+            int s = get_reg_id(src.data.reg);
+            int d = get_reg_id(dest.data.mem.base);
+            emit_rex(buf, 0, s >= 8, 0, d >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x11);
+            if (dest.data.mem.offset == 0) emit_modrm(buf, 0, s, d);
+            else { emit_modrm(buf, 2, s, d); buffer_write_dword(buf, dest.data.mem.offset); }
+        } else if (src.type == OP_MEM && dest.type == OP_REG) {
+            int s = get_reg_id(src.data.mem.base);
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 0, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x10);
+            if (src.data.mem.offset == 0) emit_modrm(buf, 0, d, s);
+            else { emit_modrm(buf, 2, d, s); buffer_write_dword(buf, src.data.mem.offset); }
+        } else if (src.type == OP_LABEL && dest.type == OP_REG) {
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 0, d >= 8, 0, 0);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x10);
+            emit_modrm(buf, 0, d, 5); // RIP-relative
+            buffer_write_dword(buf, 0); // Placeholder
+        } else if (src.type == OP_REG && dest.type == OP_LABEL) {
+            int s = get_reg_id(src.data.reg);
+            emit_rex(buf, 0, s >= 8, 0, 0);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x11);
+            emit_modrm(buf, 0, s, 5); // RIP-relative
+            buffer_write_dword(buf, 0); // Placeholder
+        }
+    } else if (strcmp(mnemonic, "addss") == 0 || strcmp(mnemonic, "addsd") == 0 ||
+               strcmp(mnemonic, "subss") == 0 || strcmp(mnemonic, "subsd") == 0 ||
+               strcmp(mnemonic, "mulss") == 0 || strcmp(mnemonic, "mulsd") == 0 ||
+               strcmp(mnemonic, "divss") == 0 || strcmp(mnemonic, "divsd") == 0) {
+        int is_double = (mnemonic[4] == 'd');
+        uint8_t opcode = 0x58; // ADD
+        if (mnemonic[0] == 's') opcode = 0x5C;
+        else if (mnemonic[0] == 'm') opcode = 0x59;
+        else if (mnemonic[0] == 'd') opcode = 0x5E;
+        
+        buffer_write_byte(buf, is_double ? 0xF2 : 0xF3);
+        if (src.type == OP_REG && dest.type == OP_REG) {
+            int s = get_reg_id(src.data.reg);
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 0, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, opcode);
+            emit_modrm(buf, 3, d, s);
+        }
+    } else if (strcmp(mnemonic, "ucomiss") == 0 || strcmp(mnemonic, "ucomisd") == 0) {
+        int is_double = (strcmp(mnemonic, "ucomisd") == 0);
+        if (is_double) buffer_write_byte(buf, 0x66);
+        if (src.type == OP_REG && dest.type == OP_REG) {
+            int s = get_reg_id(src.data.reg);
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 0, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x2E);
+            emit_modrm(buf, 3, d, s);
+        }
+    } else if (strcmp(mnemonic, "cvtsi2ss") == 0 || strcmp(mnemonic, "cvtsi2sd") == 0) {
+        int is_double = (strcmp(mnemonic, "cvtsi2sd") == 0);
+        buffer_write_byte(buf, is_double ? 0xF2 : 0xF3);
+        if (src.type == OP_REG && dest.type == OP_REG) {
+            int s = get_reg_id(src.data.reg);
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 1, d >= 8, 0, s >= 8); // s is GPR (r64), d is XMM
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x2A);
+            emit_modrm(buf, 3, d, s);
+        }
+    } else if (strcmp(mnemonic, "cvttss2si") == 0 || strcmp(mnemonic, "cvttsd2si") == 0) {
+        int is_double = (strcmp(mnemonic, "cvttsd2si") == 0);
+        buffer_write_byte(buf, is_double ? 0xF2 : 0xF3);
+        if (src.type == OP_REG && dest.type == OP_REG) {
+            int s = get_reg_id(src.data.reg);
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 1, d >= 8, 0, s >= 8); // s is XMM, d is GPR (r64)
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x2C);
+            emit_modrm(buf, 3, d, s);
+        }
+    } else if (strcmp(mnemonic, "cvtss2sd") == 0 || strcmp(mnemonic, "cvtsd2ss") == 0) {
+        int to_double = (strcmp(mnemonic, "cvtss2sd") == 0);
+        buffer_write_byte(buf, to_double ? 0xF3 : 0xF2);
+        if (src.type == OP_REG && dest.type == OP_REG) {
+            int s = get_reg_id(src.data.reg);
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 0, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x5A);
+            emit_modrm(buf, 3, d, s);
         }
     }
 }

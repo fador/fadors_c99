@@ -63,6 +63,8 @@ static TokenType identifier_type(const char *start, size_t length) {
     if (check_keyword(start, length, "break", TOKEN_KEYWORD_BREAK) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_BREAK;
     if (check_keyword(start, length, "enum", TOKEN_KEYWORD_ENUM) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_ENUM;
     if (check_keyword(start, length, "union", TOKEN_KEYWORD_UNION) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_UNION;
+    if (check_keyword(start, length, "float", TOKEN_KEYWORD_FLOAT) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_FLOAT;
+    if (check_keyword(start, length, "double", TOKEN_KEYWORD_DOUBLE) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_DOUBLE;
     return TOKEN_IDENTIFIER;
 }
 
@@ -99,10 +101,53 @@ Token lexer_next_token(Lexer *lexer) {
     }
 
     if (isdigit(c) != 0) {
+        int is_float = 0;
+        
         while (isdigit(peek(lexer))) {
             advance(lexer);
         }
-        token.type = TOKEN_NUMBER;
+        
+        // Fraction part?
+        if (peek(lexer) == '.') {
+            // Need to distinguish struct member access vs float. e.g. "student.name".
+            // But if we already parsed digits, "1" is a number. "1." is a float.
+            // Standard C says "1." is a float.
+            is_float = 1;
+            advance(lexer);
+            while (isdigit(peek(lexer))) {
+                advance(lexer);
+            }
+        }
+        
+        // Exponent part?
+        if (peek(lexer) == 'e' || peek(lexer) == 'E') {
+            is_float = 1;
+            advance(lexer);
+            if (peek(lexer) == '+' || peek(lexer) == '-') {
+                advance(lexer);
+            }
+            while (isdigit(peek(lexer))) {
+                advance(lexer);
+            }
+        }
+        
+        // Float suffix?
+        if (peek(lexer) == 'f' || peek(lexer) == 'F') {
+            if (is_float) {
+                // If it is already float-like (has . or e), consume 'f'.
+                // If it's just '1f', standard compliance says invalid.
+                // But for now, let's allow 'f' to make it a float if we want `1f` to be float.
+                // Standard C: `1.0f` is float. `1f` is error.
+                // Let's stick to standardish: consume 'f' only if is_float is true OR if we treat `1f` as error/float.
+                // Actually `1f` is often a typo for `1.f`.
+                // Let's only consume 'f' if we saw '.', 'e', or if we decide `1f` is float.
+                // GCC: `1f` -> invalid suffix "f" on integer constant
+                // So valid floats MUST have `.` or `e`.
+                advance(lexer);
+            }
+        }
+
+        token.type = is_float ? TOKEN_FLOAT : TOKEN_NUMBER;
         token.length = &lexer->source[lexer->position] - token.start;
         return token;
     }
@@ -145,9 +190,26 @@ Token lexer_next_token(Lexer *lexer) {
                 token.type = TOKEN_MINUS;
             }
             break;
+        case '%': token.type = TOKEN_PERCENT; break;
         case '*': token.type = TOKEN_STAR; break;
         case '/': token.type = TOKEN_SLASH; break;
-        case '&': token.type = TOKEN_AMPERSAND; break;
+        case '&':
+            if (match(lexer, '&')) {
+                token.type = TOKEN_AMPERSAND_AMPERSAND;
+                token.length = 2;
+            } else {
+                token.type = TOKEN_AMPERSAND;
+            }
+            break;
+        case '|':
+            if (match(lexer, '|')) {
+                token.type = TOKEN_PIPE_PIPE;
+                token.length = 2;
+            } else {
+                token.type = TOKEN_PIPE;
+            }
+            break;
+        case '^': token.type = TOKEN_CARET; break;
         case '=':
             if (match(lexer, '=')) {
                 token.type = TOKEN_EQUAL_EQUAL;
@@ -161,11 +223,14 @@ Token lexer_next_token(Lexer *lexer) {
                 token.type = TOKEN_BANG_EQUAL;
                 token.length = 2;
             } else {
-                token.type = TOKEN_UNKNOWN;
+                token.type = TOKEN_BANG;
             }
             break;
         case '<':
-            if (match(lexer, '=')) {
+            if (match(lexer, '<')) {
+                token.type = TOKEN_LESS_LESS;
+                token.length = 2;
+            } else if (match(lexer, '=')) {
                 token.type = TOKEN_LESS_EQUAL;
                 token.length = 2;
             } else {
@@ -173,7 +238,10 @@ Token lexer_next_token(Lexer *lexer) {
             }
             break;
         case '>':
-            if (match(lexer, '=')) {
+            if (match(lexer, '>')) {
+                token.type = TOKEN_GREATER_GREATER;
+                token.length = 2;
+            } else if (match(lexer, '=')) {
                 token.type = TOKEN_GREATER_EQUAL;
                 token.length = 2;
             } else {

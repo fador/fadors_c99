@@ -24,8 +24,11 @@ typedef enum {
     TOKEN_KEYWORD_BREAK,
     TOKEN_KEYWORD_ENUM,
     TOKEN_KEYWORD_UNION,
+    TOKEN_KEYWORD_FLOAT,
+    TOKEN_KEYWORD_DOUBLE,
     TOKEN_LPAREN,       // (
     TOKEN_RPAREN,       // )
+    TOKEN_BANG,         // !
     TOKEN_LBRACE,       // {
     TOKEN_RBRACE,       // }
     TOKEN_LBRACKET,     // [
@@ -39,7 +42,14 @@ typedef enum {
     TOKEN_MINUS,        // -
     TOKEN_STAR,         // *
     TOKEN_SLASH,        // /
+    TOKEN_PERCENT,      // %
     TOKEN_AMPERSAND,    // &
+    TOKEN_PIPE,         // |
+    TOKEN_CARET,        // ^
+    TOKEN_AMPERSAND_AMPERSAND, // &&
+    TOKEN_PIPE_PIPE,    // ||
+    TOKEN_LESS_LESS,    // <<
+    TOKEN_GREATER_GREATER, // >>
     TOKEN_EQUAL,        // =
     TOKEN_EQUAL_EQUAL,  // ==
     TOKEN_BANG_EQUAL,   // !=
@@ -47,6 +57,7 @@ typedef enum {
     TOKEN_GREATER,      // >
     TOKEN_LESS_EQUAL,   // <=
     TOKEN_GREATER_EQUAL, // >=
+    TOKEN_FLOAT,       // e.g. 3.14
     TOKEN_STRING,       // "string"
     TOKEN_UNKNOWN
 } TokenType;

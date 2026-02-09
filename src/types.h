@@ -11,7 +11,9 @@ typedef enum {
     TYPE_UNION,
     TYPE_ENUM,
     TYPE_ARRAY,
-    TYPE_VOID
+    TYPE_VOID,
+    TYPE_FLOAT,
+    TYPE_DOUBLE
 } TypeKind;
 
 struct Type;
@@ -38,6 +40,8 @@ typedef struct Type {
 
 Type *type_int();
 Type *type_char();
+Type *type_float();
+Type *type_double();
 Type *type_ptr(Type *to);
 Type *type_array(Type *base, int len);
 Type *type_struct(const char *name);

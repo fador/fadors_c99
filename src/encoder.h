@@ -6,6 +6,7 @@
 
 // Note: Using Operand from arch_x86_64.c might be tricky if it's static.
 // I should probably move Operand definition to arch_x86_64.h or a shared header.
+int get_reg_id(const char *reg);
 
 void encode_inst0(Buffer *buf, const char *mnemonic);
 void encode_inst1(Buffer *buf, const char *mnemonic, Operand op1);

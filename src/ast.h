@@ -30,7 +30,10 @@ typedef enum {
     AST_CASE,
     AST_DEFAULT,
     AST_BREAK,
-    AST_UNKNOWN
+    AST_NEG,
+    AST_NOT,
+    AST_UNKNOWN,
+    AST_FLOAT
 } ASTNodeType;
 
 typedef struct ASTNode {
@@ -48,6 +51,9 @@ typedef struct ASTNode {
         struct {
             int value;
         } integer;
+        struct {
+            double value;
+        } float_val;
         struct {
             char *name;
         } identifier;

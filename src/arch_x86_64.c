@@ -13,13 +13,24 @@ typedef enum {
 
 static FILE *out;
 static COFFWriter *obj_writer = NULL;
+static ASTNode *current_program = NULL;
 static int label_count = 0;
 static CodegenSyntax current_syntax = SYNTAX_ATT;
 static Section current_section = SECTION_TEXT;
+static Type *current_func_return_type = NULL;
 
 static void gen_function(ASTNode *node);
 static void gen_statement(ASTNode *node);
 static void gen_global_decl(ASTNode *node);
+static void emit_inst0(const char *mnemonic);
+static void emit_inst1(const char *mnemonic, Operand op1);
+static void emit_inst2(const char *mnemonic, Operand op1, Operand op2);
+static Type *get_expr_type(ASTNode *node);
+static int is_float_type(Type *t);
+static Operand op_reg(const char *reg);
+static Operand op_imm(int imm);
+static Operand op_mem(const char *base, int offset);
+static Operand op_label(const char *label);
 
 typedef struct {
     char *label;
@@ -77,6 +88,7 @@ void arch_x86_64_set_syntax(CodegenSyntax syntax) {
 }
 
 void arch_x86_64_generate(ASTNode *program) {
+    current_program = program;
     for (size_t i = 0; i < program->children_count; i++) {
         ASTNode *child = program->children[i];
         if (child->type == AST_FUNCTION) {
@@ -176,6 +188,15 @@ static void gen_global_decl(ASTNode *node) {
                 buffer_write_dword(&obj_writer->data_section, (uint32_t)val);
                 buffer_write_dword(&obj_writer->data_section, 0); // Upper 32 bits
             }
+        } else if (node->data.var_decl.initializer && node->data.var_decl.initializer->type == AST_FLOAT) {
+            double val = node->data.var_decl.initializer->data.float_val.value;
+            int size = node->resolved_type ? node->resolved_type->size : 4;
+            if (size == 4) {
+                float f = (float)val;
+                buffer_write_bytes(&obj_writer->data_section, (const char*)&f, 4);
+            } else if (size == 8) {
+                buffer_write_bytes(&obj_writer->data_section, (const char*)&val, 8);
+            }
         } else {
             // Uninitialized or zero-initialized
             int size = node->resolved_type ? node->resolved_type->size : 4;
@@ -196,10 +217,12 @@ static void gen_global_decl(ASTNode *node) {
             
             if (node->data.var_decl.initializer && node->data.var_decl.initializer->type == AST_INTEGER) {
                 fprintf(out, "%s %d\n", directive, node->data.var_decl.initializer->data.integer.value);
+            } else if (node->data.var_decl.initializer && node->data.var_decl.initializer->type == AST_FLOAT) {
+                fprintf(out, "%s %f\n", directive, node->data.var_decl.initializer->data.float_val.value);
             } else {
-                fprintf(out, "%s 0\n", directive); // Arrays? Need generic zero-fill... for now just 1 element
-                if (size > 8) { // Array or struct
-                     fprintf(out, "DB %d DUP(0)\n", size);
+                fprintf(out, "%s 0\n", directive);
+                if (size > 8) {
+                     fprintf(out, "DB %d DUP(0)\n", size - (size > 1 ? (size > 4 ? 8 : 4) : 1)); // This logic was simplified before, let's just make it zero fill
                 }
             }
             fprintf(out, "_DATA ENDS\n");
@@ -213,6 +236,10 @@ static void gen_global_decl(ASTNode *node) {
                  if (size == 1) fprintf(out, "    .byte %d\n", val);
                  else if (size == 4) fprintf(out, "    .long %d\n", val);
                  else if (size == 8) fprintf(out, "    .quad %d\n", val);
+             } else if (node->data.var_decl.initializer && node->data.var_decl.initializer->type == AST_FLOAT) {
+                 int size = node->resolved_type ? node->resolved_type->size : 4;
+                 if (size == 4) fprintf(out, "    .float %f\n", node->data.var_decl.initializer->data.float_val.value);
+                 else fprintf(out, "    .double %f\n", node->data.var_decl.initializer->data.float_val.value);
              } else {
                  int size = node->resolved_type ? node->resolved_type->size : 4;
                  fprintf(out, "    .zero %d\n", size);
@@ -223,6 +250,16 @@ static void gen_global_decl(ASTNode *node) {
     globals[globals_count].name = node->data.var_decl.name;
     globals[globals_count].type = node->resolved_type;
     globals_count++;
+}
+
+static void emit_push_xmm(const char *reg) {
+    emit_inst2("sub", op_imm(8), op_reg("rsp"));
+    emit_inst2("movsd", op_reg(reg), op_mem("rsp", 0));
+}
+
+static void emit_pop_xmm(const char *reg) {
+    emit_inst2("movsd", op_mem("rsp", 0), op_reg(reg));
+    emit_inst2("add", op_imm(8), op_reg("rsp"));
 }
 
 
@@ -284,8 +321,11 @@ static void emit_inst1(const char *mnemonic, Operand op1) {
             uint32_t sym_idx = coff_writer_add_symbol(obj_writer, op1.data.label, 0, 0, type, storage_class);
             
             uint32_t offset = 1;
-            if (strcmp(mnemonic, "je") == 0 || strcmp(mnemonic, "jne") == 0) offset = 2;
-            else if (strcmp(mnemonic, "call") == 0) offset = 1;
+            if (strcmp(mnemonic, "je") == 0 || strcmp(mnemonic, "jne") == 0 || 
+                strcmp(mnemonic, "jz") == 0 || strcmp(mnemonic, "jnz") == 0 ||
+                strcmp(mnemonic, "jb") == 0 || strcmp(mnemonic, "jbe") == 0 ||
+                strcmp(mnemonic, "ja") == 0 || strcmp(mnemonic, "jae") == 0) offset = 2;
+            else if (strcmp(mnemonic, "call") == 0 || strcmp(mnemonic, "jmp") == 0) offset = 1;
             
             coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + offset, sym_idx, IMAGE_REL_AMD64_REL32);
         }
@@ -315,21 +355,30 @@ static void emit_inst1(const char *mnemonic, Operand op1) {
     fprintf(out, "\n");
 }
 
-static void emit_inst2(const char *mnemonic, Operand src, Operand dest) {
+static void emit_inst2(const char *mnemonic, Operand op1, Operand op2) {
     if (obj_writer) {
-        if (src.type == OP_LABEL) {
-            // LEA label, reg -> LEA label(%RIP), reg
-            // Relocation starts at offset 3 (REX + 8D + ModRM)
-            uint8_t storage_class = (src.data.label[0] == '.') ? IMAGE_SYM_CLASS_STATIC : IMAGE_SYM_CLASS_EXTERNAL;
-            uint32_t sym_idx = coff_writer_add_symbol(obj_writer, src.data.label, 0, 0, 0, storage_class);
-            coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + 3, sym_idx, IMAGE_REL_AMD64_REL32);
+        int offset_in_inst = 3; // REX + Opcode + ModRM (general)
+        if (strcmp(mnemonic, "movss") == 0 || strcmp(mnemonic, "movsd") == 0) {
+            int reg_id = -1;
+            if (op1.type == OP_REG) reg_id = get_reg_id(op1.data.reg);
+            else if (op2.type == OP_REG) reg_id = get_reg_id(op2.data.reg);
+            
+            // F3/F2 (1) + REX (if reg >= 8) (1) + 0F 10/11 (2) + ModRM (1)
+            offset_in_inst = 4;
+            if (reg_id >= 8) offset_in_inst = 5;
         }
-        if (dest.type == OP_LABEL) {
-            uint8_t storage_class = (dest.data.label[0] == '.') ? IMAGE_SYM_CLASS_STATIC : IMAGE_SYM_CLASS_EXTERNAL;
-            uint32_t sym_idx = coff_writer_add_symbol(obj_writer, dest.data.label, 0, 0, 0, storage_class);
-            coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + 3, sym_idx, IMAGE_REL_AMD64_REL32);
+
+        if (op1.type == OP_LABEL) {
+            uint8_t storage_class = (op1.data.label[0] == '.') ? IMAGE_SYM_CLASS_STATIC : IMAGE_SYM_CLASS_EXTERNAL;
+            uint32_t sym_idx = coff_writer_add_symbol(obj_writer, op1.data.label, 0, 0, 0, storage_class);
+            coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + offset_in_inst, sym_idx, IMAGE_REL_AMD64_REL32);
         }
-        encode_inst2(&obj_writer->text_section, mnemonic, src, dest);
+        if (op2.type == OP_LABEL) {
+            uint8_t storage_class = (op2.data.label[0] == '.') ? IMAGE_SYM_CLASS_STATIC : IMAGE_SYM_CLASS_EXTERNAL;
+            uint32_t sym_idx = coff_writer_add_symbol(obj_writer, op2.data.label, 0, 0, 0, storage_class);
+            coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + offset_in_inst, sym_idx, IMAGE_REL_AMD64_REL32);
+        }
+        encode_inst2(&obj_writer->text_section, mnemonic, op1, op2);
         return;
     }
     const char *m = mnemonic;
@@ -345,22 +394,29 @@ static void emit_inst2(const char *mnemonic, Operand src, Operand dest) {
 
     fprintf(out, "    %s ", m);
     if (current_syntax == SYNTAX_ATT) {
-        print_operand(src);
+        print_operand(op1);
         fprintf(out, ", ");
-        print_operand(dest);
+        print_operand(op2);
     } else {
-        print_operand(dest);
+        print_operand(op2);
         fprintf(out, ", ");
-        if (strcmp(mnemonic, "movzbq") == 0 && src.type == OP_MEM) {
+        if (strcmp(mnemonic, "movzbq") == 0 && op1.type == OP_MEM) {
             fprintf(out, "byte ptr ");
         }
-        print_operand(src);
+        print_operand(op1);
     }
     fprintf(out, "\n");
 }
 
 
+static int is_float_type(Type *t) {
+    return t && (t->kind == TYPE_FLOAT || t->kind == TYPE_DOUBLE);
+}
+
 static Type *get_expr_type(ASTNode *node) {
+    if (!node) return NULL;
+    if (node->type == AST_INTEGER) return type_int();
+    if (node->type == AST_FLOAT) return node->resolved_type ? node->resolved_type : type_double();
     if (node->type == AST_IDENTIFIER) {
         Type *t = get_local_type(node->data.identifier.name);
         if (!t) t = get_global_type(node->data.identifier.name);
@@ -371,18 +427,49 @@ static Type *get_expr_type(ASTNode *node) {
     } else if (node->type == AST_ADDR_OF) {
         Type *t = get_expr_type(node->data.unary.expression);
         return type_ptr(t);
+    } else if (node->type == AST_CALL) {
+        if (current_program) {
+            for (size_t i = 0; i < current_program->children_count; i++) {
+                ASTNode *child = current_program->children[i];
+                if (child->type == AST_FUNCTION && strcmp(child->data.function.name, node->data.call.name) == 0) {
+                    return child->resolved_type;
+                }
+            }
+        }
+        return type_int(); // Default
     } else if (node->type == AST_MEMBER_ACCESS) {
         Type *st = get_expr_type(node->data.member_access.struct_expr);
         if (node->data.member_access.is_arrow && st && st->kind == TYPE_PTR) {
             st = st->data.ptr_to;
         }
-        if (st && st->kind == TYPE_STRUCT) {
+        if (st && (st->kind == TYPE_STRUCT || st->kind == TYPE_UNION)) {
             for (int i = 0; i < st->data.struct_data.members_count; i++) {
                 if (strcmp(st->data.struct_data.members[i].name, node->data.member_access.member_name) == 0) {
                     return st->data.struct_data.members[i].type;
                 }
             }
         }
+    } else if (node->type == AST_BINARY_EXPR) {
+        TokenType op = node->data.binary_expr.op;
+        if (op == TOKEN_EQUAL_EQUAL || op == TOKEN_BANG_EQUAL ||
+            op == TOKEN_LESS || op == TOKEN_GREATER ||
+            op == TOKEN_LESS_EQUAL || op == TOKEN_GREATER_EQUAL ||
+            op == TOKEN_AMPERSAND_AMPERSAND || op == TOKEN_PIPE_PIPE) {
+            return type_int();
+        }
+        Type *lt = get_expr_type(node->data.binary_expr.left);
+        Type *rt = get_expr_type(node->data.binary_expr.right);
+        if (is_float_type(lt) || is_float_type(rt)) {
+            if (lt && lt->kind == TYPE_DOUBLE) return lt;
+            if (rt && rt->kind == TYPE_DOUBLE) return rt;
+            if (is_float_type(lt)) return lt;
+            return rt;
+        }
+        return lt ? lt : rt;
+    } else if (node->type == AST_NEG) {
+        return get_expr_type(node->data.unary.expression);
+    } else if (node->type == AST_NOT) {
+        return type_int();
     }
     return NULL;
 }
@@ -438,21 +525,118 @@ static void gen_addr(ASTNode *node) {
 }
 
 static void gen_binary_expr(ASTNode *node) {
+    if (node->data.binary_expr.op == TOKEN_AMPERSAND_AMPERSAND || node->data.binary_expr.op == TOKEN_PIPE_PIPE) {
+        int is_and = (node->data.binary_expr.op == TOKEN_AMPERSAND_AMPERSAND);
+        int l_short = label_count++;
+        int l_end = label_count++;
+        char sl[32], el[32];
+        sprintf(sl, ".L%d", l_short);
+        sprintf(el, ".L%d", l_end);
+
+        gen_expression(node->data.binary_expr.left);
+        Type *lt = get_expr_type(node->data.binary_expr.left);
+        if (is_float_type(lt)) {
+             emit_inst2("xor", op_reg("rax"), op_reg("rax"));
+             if (lt->kind == TYPE_FLOAT) {
+                 emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm1"));
+                 emit_inst2("ucomiss", op_reg("xmm1"), op_reg("xmm0"));
+             } else {
+                 emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm1"));
+                 emit_inst2("ucomisd", op_reg("xmm1"), op_reg("xmm0"));
+             }
+             emit_inst1(is_and ? "jz" : "jnz", op_label(sl));
+        } else {
+             emit_inst2("test", op_reg("rax"), op_reg("rax"));
+             emit_inst1(is_and ? "jz" : "jnz", op_label(sl));
+        }
+
+        gen_expression(node->data.binary_expr.right);
+        Type *rt = get_expr_type(node->data.binary_expr.right);
+        if (is_float_type(rt)) {
+             emit_inst2("xor", op_reg("rax"), op_reg("rax"));
+             if (rt->kind == TYPE_FLOAT) {
+                 emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm1"));
+                 emit_inst2("ucomiss", op_reg("xmm1"), op_reg("xmm0"));
+             } else {
+                 emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm1"));
+                 emit_inst2("ucomisd", op_reg("xmm1"), op_reg("xmm0"));
+             }
+             emit_inst1(is_and ? "jz" : "jnz", op_label(sl));
+        } else {
+             emit_inst2("test", op_reg("rax"), op_reg("rax"));
+             emit_inst1(is_and ? "jz" : "jnz", op_label(sl));
+        }
+
+        emit_inst2("mov", op_imm(is_and ? 1 : 0), op_reg("rax"));
+        emit_inst1("jmp", op_label(el));
+        emit_label_def(sl);
+        emit_inst2("mov", op_imm(is_and ? 0 : 1), op_reg("rax"));
+        emit_label_def(el);
+        node->resolved_type = type_int();
+        return;
+    }
+
+    Type *lt = get_expr_type(node->data.binary_expr.left);
+    Type *rt = get_expr_type(node->data.binary_expr.right);
+    int is_fp = is_float_type(lt) || is_float_type(rt);
+
+    if (is_fp) {
+        int is_double = (lt && lt->kind == TYPE_DOUBLE) || (rt && rt->kind == TYPE_DOUBLE);
+
+        gen_expression(node->data.binary_expr.right);
+        // If it was int, convert to float/double
+        if (!is_float_type(rt)) {
+             emit_inst2(is_double ? "cvtsi2sd" : "cvtsi2ss", op_reg("rax"), op_reg("xmm0"));
+        } else if (is_double && rt->kind == TYPE_FLOAT) {
+             emit_inst2("cvtss2sd", op_reg("xmm0"), op_reg("xmm0"));
+        }
+        emit_push_xmm("xmm0");
+        
+        gen_expression(node->data.binary_expr.left);
+        if (!is_float_type(lt)) {
+             emit_inst2(is_double ? "cvtsi2sd" : "cvtsi2ss", op_reg("rax"), op_reg("xmm0"));
+        } else if (is_double && lt->kind == TYPE_FLOAT) {
+             emit_inst2("cvtss2sd", op_reg("xmm0"), op_reg("xmm0"));
+        }
+        emit_pop_xmm("xmm1");
+        
+        // At this point: left in xmm0, right in xmm1
+        
+        switch (node->data.binary_expr.op) {
+            case TOKEN_PLUS: emit_inst2(is_double ? "addsd" : "addss", op_reg("xmm1"), op_reg("xmm0")); break;
+            case TOKEN_MINUS: emit_inst2(is_double ? "subsd" : "subss", op_reg("xmm1"), op_reg("xmm0")); break;
+            case TOKEN_STAR: emit_inst2(is_double ? "mulsd" : "mulss", op_reg("xmm1"), op_reg("xmm0")); break;
+            case TOKEN_SLASH: emit_inst2(is_double ? "divsd" : "divss", op_reg("xmm1"), op_reg("xmm0")); break;
+            case TOKEN_EQUAL_EQUAL:
+            case TOKEN_BANG_EQUAL:
+            case TOKEN_LESS:
+            case TOKEN_GREATER:
+            case TOKEN_LESS_EQUAL:
+            case TOKEN_GREATER_EQUAL:
+                emit_inst2(is_double ? "ucomisd" : "ucomiss", op_reg("xmm1"), op_reg("xmm0"));
+                if (node->data.binary_expr.op == TOKEN_EQUAL_EQUAL) emit_inst1("sete", op_reg("al"));
+                else if (node->data.binary_expr.op == TOKEN_BANG_EQUAL) emit_inst1("setne", op_reg("al"));
+                else if (node->data.binary_expr.op == TOKEN_LESS) emit_inst1("setb", op_reg("al")); // below
+                else if (node->data.binary_expr.op == TOKEN_LESS_EQUAL) emit_inst1("setbe", op_reg("al")); // below or equal
+                else if (node->data.binary_expr.op == TOKEN_GREATER) emit_inst1("seta", op_reg("al")); // above
+                else if (node->data.binary_expr.op == TOKEN_GREATER_EQUAL) emit_inst1("setae", op_reg("al")); // above or equal
+                emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
+                node->resolved_type = type_int();
+                return;
+            default: break;
+        }
+        node->resolved_type = is_double ? type_double() : type_float();
+        return;
+    }
+
+    // Integer branch
     gen_expression(node->data.binary_expr.right);
     emit_inst1("pushq", op_reg("rax"));
     gen_expression(node->data.binary_expr.left);
     emit_inst1("popq", op_reg("rcx"));
     
-    // Pointer arithmetic
     Type *left_type = node->data.binary_expr.left->resolved_type;
     Type *right_type = node->data.binary_expr.right->resolved_type;
-
-    /* Debugging */
-    /*
-    printf("Binary Op: %d\n", node->data.binary_expr.op);
-    if (left_type) printf("Left Kind: %d\n", left_type->kind); else printf("Left Type NULL\n");
-    if (right_type) printf("Right Kind: %d\n", right_type->kind); else printf("Right Type NULL\n");
-    */
     
     // Helper to get element size
     int size = 1;
@@ -461,22 +645,18 @@ static void gen_binary_expr(ASTNode *node) {
     } else if (right_type && (right_type->kind == TYPE_PTR || right_type->kind == TYPE_ARRAY) && right_type->data.ptr_to) {
         size = right_type->data.ptr_to->size;
     }
-    // printf("Element Size: %d\n", size);
     
     switch (node->data.binary_expr.op) {
         case TOKEN_PLUS:
             if ((left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY)) && 
                 (right_type && (right_type->kind == TYPE_INT || right_type->kind == TYPE_CHAR))) {
-                // PTR + INT -> scale INT (rcx)
                 if (size > 1) emit_inst2("imul", op_imm(size), op_reg("rcx"));
                 node->resolved_type = left_type;
             } else if ((left_type && (left_type->kind == TYPE_INT || left_type->kind == TYPE_CHAR)) && 
                        (right_type && (right_type->kind == TYPE_PTR || right_type->kind == TYPE_ARRAY))) {
-                // INT + PTR -> scale INT (rax)
                 if (size > 1) emit_inst2("imul", op_imm(size), op_reg("rax"));
                 node->resolved_type = right_type;
             } else {
-                // INT + INT
                 node->resolved_type = left_type ? left_type : right_type;
             }
             emit_inst2("add", op_reg("rcx"), op_reg("rax")); 
@@ -484,20 +664,18 @@ static void gen_binary_expr(ASTNode *node) {
         case TOKEN_MINUS: 
             if ((left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY)) && 
                 (right_type && (right_type->kind == TYPE_INT || right_type->kind == TYPE_CHAR))) {
-                // PTR - INT -> scale INT (rcx)
                 if (size > 1) emit_inst2("imul", op_imm(size), op_reg("rcx"));
                 emit_inst2("sub", op_reg("rcx"), op_reg("rax"));
                 node->resolved_type = left_type;
             } else if ((left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY)) && 
                        (right_type && (right_type->kind == TYPE_PTR || right_type->kind == TYPE_ARRAY))) {
-                // PTR - PTR -> diff / size
                 emit_inst2("sub", op_reg("rcx"), op_reg("rax"));
                 if (size > 1) {
                     emit_inst0("cqo");
                     emit_inst2("mov", op_imm(size), op_reg("rcx"));
                     emit_inst1("idiv", op_reg("rcx"));
                 }
-                node->resolved_type = type_int(); // Result is int (ptrdiff_t)
+                node->resolved_type = type_int();
             } else {
                 emit_inst2("sub", op_reg("rcx"), op_reg("rax"));
                 node->resolved_type = left_type;
@@ -508,8 +686,32 @@ static void gen_binary_expr(ASTNode *node) {
             node->resolved_type = left_type;
             break;
         case TOKEN_SLASH:
+        case TOKEN_PERCENT:
             emit_inst0("cqo");
             emit_inst1("idiv", op_reg("rcx"));
+            if (node->data.binary_expr.op == TOKEN_PERCENT) {
+                emit_inst2("mov", op_reg("rdx"), op_reg("rax"));
+            }
+            node->resolved_type = left_type;
+            break;
+        case TOKEN_AMPERSAND:
+            emit_inst2("and", op_reg("rcx"), op_reg("rax"));
+            node->resolved_type = left_type;
+            break;
+        case TOKEN_PIPE:
+            emit_inst2("or", op_reg("rcx"), op_reg("rax"));
+            node->resolved_type = left_type;
+            break;
+        case TOKEN_CARET:
+            emit_inst2("xor", op_reg("rcx"), op_reg("rax"));
+            node->resolved_type = left_type;
+            break;
+        case TOKEN_LESS_LESS:
+            emit_inst2("shl", op_reg("cl"), op_reg("rax"));
+            node->resolved_type = left_type;
+            break;
+        case TOKEN_GREATER_GREATER:
+            emit_inst2("sar", op_reg("cl"), op_reg("rax"));
             node->resolved_type = left_type;
             break;
         case TOKEN_EQUAL_EQUAL:
@@ -547,9 +749,52 @@ static void gen_binary_expr(ASTNode *node) {
 }
 
 static void gen_expression(ASTNode *node) {
+    if (!node) return;
     if (node->type == AST_INTEGER) {
         emit_inst2("mov", op_imm(node->data.integer.value), op_reg("rax"));
         node->resolved_type = type_int();
+    } else if (node->type == AST_FLOAT) {
+        char label[32];
+        sprintf(label, ".LF%d", label_count++);
+        node->resolved_type = node->resolved_type ? node->resolved_type : type_double();
+        
+        if (obj_writer) {
+            Section old_section = current_section;
+            current_section = SECTION_DATA;
+            emit_label_def(label);
+            if (node->resolved_type->kind == TYPE_FLOAT) {
+                float f = (float)node->data.float_val.value;
+                buffer_write_bytes(&obj_writer->data_section, &f, 4);
+            } else {
+                double d = node->data.float_val.value;
+                buffer_write_bytes(&obj_writer->data_section, &d, 8);
+            }
+            current_section = old_section;
+        } else {
+            if (current_syntax == SYNTAX_INTEL) {
+                fprintf(out, "_TEXT ENDS\n_DATA SEGMENT\n%s ", label + 1);
+                if (node->resolved_type->kind == TYPE_FLOAT) {
+                    fprintf(out, "DD %f\n", node->data.float_val.value);
+                } else {
+                    fprintf(out, "DQ %f\n", node->data.float_val.value);
+                }
+                fprintf(out, "_DATA ENDS\n_TEXT SEGMENT\n");
+            } else {
+                fprintf(out, ".data\n%s:\n", label);
+                if (node->resolved_type->kind == TYPE_FLOAT) {
+                    fprintf(out, "    .float %f\n", node->data.float_val.value);
+                } else {
+                    fprintf(out, "    .double %f\n", node->data.float_val.value);
+                }
+                fprintf(out, ".text\n");
+            }
+        }
+        
+        if (node->resolved_type->kind == TYPE_FLOAT) {
+            emit_inst2("movss", op_label(label), op_reg("xmm0"));
+        } else {
+            emit_inst2("movsd", op_label(label), op_reg("xmm0"));
+        }
     } else if (node->type == AST_IDENTIFIER) {
         int offset = get_local_offset(node->data.identifier.name);
         if (offset != 0) {
@@ -557,6 +802,9 @@ static void gen_expression(ASTNode *node) {
             if (t && t->kind == TYPE_ARRAY) {
                 // Array decays to pointer
                 emit_inst2("lea", op_mem("rbp", offset), op_reg("rax"));
+            } else if (is_float_type(t)) {
+                if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_mem("rbp", offset), op_reg("xmm0"));
+                else emit_inst2("movsd", op_mem("rbp", offset), op_reg("xmm0"));
             } else {
                 emit_inst2("mov", op_mem("rbp", offset), op_reg("rax"));
             }
@@ -566,6 +814,9 @@ static void gen_expression(ASTNode *node) {
             Type *t = get_global_type(node->data.identifier.name);
             if (t && t->kind == TYPE_ARRAY) {
                 emit_inst2("lea", op_label(node->data.identifier.name), op_reg("rax"));
+            } else if (is_float_type(t)) {
+                if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_label(node->data.identifier.name), op_reg("xmm0"));
+                else emit_inst2("movsd", op_label(node->data.identifier.name), op_reg("xmm0"));
             } else {
                 emit_inst2("mov", op_label(node->data.identifier.name), op_reg("rax"));
             }
@@ -574,7 +825,10 @@ static void gen_expression(ASTNode *node) {
     } else if (node->type == AST_ARRAY_ACCESS) {
         gen_addr(node);
         Type *t = node->resolved_type; // Element type
-        if (t && t->size == 1) {
+        if (is_float_type(t)) {
+            if (t->size == 4) emit_inst2("movss", op_mem("rax", 0), op_reg("xmm0"));
+            else emit_inst2("movsd", op_mem("rax", 0), op_reg("xmm0"));
+        } else if (t && t->size == 1) {
             emit_inst2("movzbq", op_mem("rax", 0), op_reg("rax"));
         } else {
             emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
@@ -583,50 +837,122 @@ static void gen_expression(ASTNode *node) {
         gen_binary_expr(node);
     } else if (node->type == AST_ASSIGN) {
         gen_expression(node->data.assign.value);
+        Type *t = get_expr_type(node->data.assign.left);
         if (node->data.assign.left->type == AST_IDENTIFIER) {
             int offset = get_local_offset(node->data.assign.left->data.identifier.name);
             if (offset != 0) {
-                emit_inst2("mov", op_reg("rax"), op_mem("rbp", offset));
+                if (is_float_type(t)) {
+                    if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm0"), op_mem("rbp", offset));
+                    else emit_inst2("movsd", op_reg("xmm0"), op_mem("rbp", offset));
+                } else {
+                    emit_inst2("mov", op_reg("rax"), op_mem("rbp", offset));
+                }
             } else {
                 // Global
-                emit_inst2("mov", op_reg("rax"), op_label(node->data.assign.left->data.identifier.name));
+                if (is_float_type(t)) {
+                    if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm0"), op_label(node->data.assign.left->data.identifier.name));
+                    else emit_inst2("movsd", op_reg("xmm0"), op_label(node->data.assign.left->data.identifier.name));
+                } else {
+                    emit_inst2("mov", op_reg("rax"), op_label(node->data.assign.left->data.identifier.name));
+                }
             }
         } else {
-            emit_inst1("pushq", op_reg("rax"));
-            gen_addr(node->data.assign.left);
-            emit_inst1("popq", op_reg("rcx"));
-            emit_inst2("mov", op_reg("rcx"), op_mem("rax", 0));
-            emit_inst2("mov", op_reg("rcx"), op_reg("rax")); // Result is the value
+            if (is_float_type(t)) {
+                emit_push_xmm("xmm0");
+                gen_addr(node->data.assign.left);
+                emit_pop_xmm("xmm1");
+                if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm1"), op_mem("rax", 0));
+                else emit_inst2("movsd", op_reg("xmm1"), op_mem("rax", 0));
+                // Result of assignment in xmm0
+                if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm1"), op_reg("xmm0"));
+                else emit_inst2("movsd", op_reg("xmm1"), op_reg("xmm0"));
+            } else {
+                emit_inst1("pushq", op_reg("rax"));
+                gen_addr(node->data.assign.left);
+                emit_inst1("popq", op_reg("rcx"));
+                emit_inst2("mov", op_reg("rcx"), op_mem("rax", 0));
+                emit_inst2("mov", op_reg("rcx"), op_reg("rax")); // Result is the value
+            }
         }
+        node->resolved_type = t;
     } else if (node->type == AST_DEREF) {
         gen_expression(node->data.unary.expression);
         Type *t = node->data.unary.expression->resolved_type;
-        if (t && t->kind == TYPE_PTR && t->data.ptr_to->kind == TYPE_CHAR) {
+        Type *ptr_to = (t && t->kind == TYPE_PTR) ? t->data.ptr_to : NULL;
+        if (is_float_type(ptr_to)) {
+            if (ptr_to->size == 4) emit_inst2("movss", op_mem("rax", 0), op_reg("xmm0"));
+            else emit_inst2("movsd", op_mem("rax", 0), op_reg("xmm0"));
+        } else if (ptr_to && ptr_to->kind == TYPE_CHAR) {
             emit_inst2("movzbq", op_mem("rax", 0), op_reg("rax"));
-            node->resolved_type = t->data.ptr_to;
         } else {
             emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
-            if (t && t->kind == TYPE_PTR) node->resolved_type = t->data.ptr_to;
         }
+        node->resolved_type = ptr_to;
     } else if (node->type == AST_ADDR_OF) {
         gen_addr(node->data.unary.expression);
+    } else if (node->type == AST_NEG) {
+        gen_expression(node->data.unary.expression);
+        Type *t = get_expr_type(node->data.unary.expression);
+        if (is_float_type(t)) {
+            if (t->kind == TYPE_FLOAT) {
+                emit_inst2("xor", op_reg("rax"), op_reg("rax"));
+                emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm1")); // xmm1 = 0.0
+                emit_inst2("subss", op_reg("xmm0"), op_reg("xmm1"));  // xmm1 = 0.0 - xmm0
+                emit_inst2("movss", op_reg("xmm1"), op_reg("xmm0"));
+            } else {
+                emit_inst2("xor", op_reg("rax"), op_reg("rax"));
+                emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm1"));
+                emit_inst2("subsd", op_reg("xmm0"), op_reg("xmm1"));
+                emit_inst2("movsd", op_reg("xmm1"), op_reg("xmm0"));
+            }
+        } else {
+            emit_inst1("neg", op_reg("rax"));
+        }
+        node->resolved_type = t;
+    } else if (node->type == AST_NOT) {
+        gen_expression(node->data.unary.expression);
+        Type *t = get_expr_type(node->data.unary.expression);
+        if (is_float_type(t)) {
+            emit_inst2("xor", op_reg("rax"), op_reg("rax"));
+            if (t->kind == TYPE_FLOAT) {
+                emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm1"));
+                emit_inst2("ucomiss", op_reg("xmm1"), op_reg("xmm0"));
+            } else {
+                emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm1"));
+                emit_inst2("ucomisd", op_reg("xmm1"), op_reg("xmm0"));
+            }
+            emit_inst1("setz", op_reg("al"));
+            emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
+        } else {
+            emit_inst2("test", op_reg("rax"), op_reg("rax"));
+            emit_inst1("setz", op_reg("al"));
+            emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
+        }
+        node->resolved_type = type_int();
     } else if (node->type == AST_MEMBER_ACCESS) {
         gen_addr(node);
         emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
     } else if (node->type == AST_CALL) {
         const char *arg_regs[] = {"rcx", "rdx", "r8", "r9"};
+        const char *xmm_arg_regs[] = {"xmm0", "xmm1", "xmm2", "xmm3"};
         for (size_t i = 0; i < node->children_count; i++) {
             gen_expression(node->children[i]);
-            emit_inst1("pushq", op_reg("rax"));
+            if (is_float_type(node->children[i]->resolved_type)) {
+                emit_push_xmm("xmm0");
+            } else {
+                emit_inst1("pushq", op_reg("rax"));
+            }
         }
         
         for (int i = (int)node->children_count - 1; i >= 0; i--) {
             if (i < 4) {
-                emit_inst1("popq", op_reg(arg_regs[i]));
+               if (is_float_type(node->children[i]->resolved_type)) {
+                    emit_pop_xmm(xmm_arg_regs[i]);
+                } else {
+                    emit_inst1("popq", op_reg(arg_regs[i]));
+                }
             } else {
                 // For i >= 4, arguments are already on stack.
-                // But they are below the shadow space if we just sub RSP, 32.
-                // For now, only 4 args are fully supported.
             }
         }
         
@@ -645,8 +971,8 @@ static void gen_expression(ASTNode *node) {
             buffer_write_bytes(&obj_writer->data_section, node->data.string.value, strlen(node->data.string.value) + 1);
             current_section = old_section;
         } else {
-            string_literals[string_literals_count].label = strdup(label);
-            string_literals[string_literals_count].value = strdup(node->data.string.value);
+            string_literals[string_literals_count].label = _strdup(label);
+            string_literals[string_literals_count].value = _strdup(node->data.string.value);
             string_literals_count++;
         }
         
@@ -686,9 +1012,31 @@ static void collect_cases(ASTNode *node, ASTNode **cases, int *case_count, ASTNo
 }
 
 static void gen_statement(ASTNode *node) {
+    if (!node) return;
     if (node->type == AST_RETURN) {
         if (node->data.return_stmt.expression) {
             gen_expression(node->data.return_stmt.expression);
+            Type *expr_type = get_expr_type(node->data.return_stmt.expression);
+            
+            // Convert to function return type if needed
+            if (current_func_return_type && expr_type) {
+                if (is_float_type(current_func_return_type) && !is_float_type(expr_type)) {
+                    // int -> float/double
+                    if (current_func_return_type->kind == TYPE_FLOAT) emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm0"));
+                    else emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm0"));
+                } else if (!is_float_type(current_func_return_type) && is_float_type(expr_type)) {
+                    // float/double -> int
+                    if (expr_type->kind == TYPE_FLOAT) emit_inst2("cvttss2si", op_reg("xmm0"), op_reg("rax"));
+                    else emit_inst2("cvttsd2si", op_reg("xmm0"), op_reg("rax"));
+                } else if (is_float_type(current_func_return_type) && is_float_type(expr_type)) {
+                    // float <-> double
+                    if (current_func_return_type->kind == TYPE_DOUBLE && expr_type->kind == TYPE_FLOAT) {
+                        emit_inst2("cvtss2sd", op_reg("xmm0"), op_reg("xmm0"));
+                    } else if (current_func_return_type->kind == TYPE_FLOAT && expr_type->kind == TYPE_DOUBLE) {
+                        emit_inst2("cvtsd2ss", op_reg("xmm0"), op_reg("xmm0"));
+                    }
+                }
+            }
         }
         char dest_label[32];
         sprintf(dest_label, ".Lend_%d", current_function_end_label);
@@ -697,10 +1045,19 @@ static void gen_statement(ASTNode *node) {
         if (node->data.var_decl.initializer) {
             gen_expression(node->data.var_decl.initializer);
         } else {
-            emit_inst2("mov", op_imm(0), op_reg("rax"));
+            if (is_float_type(node->resolved_type)) {
+                emit_inst2("xor", op_reg("rax"), op_reg("rax"));
+                if (node->resolved_type->kind == TYPE_FLOAT) emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm0"));
+                else emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm0"));
+            } else {
+                emit_inst2("mov", op_imm(0), op_reg("rax"));
+            }
         }
         
         int size = node->resolved_type ? node->resolved_type->size : 8;
+        if (size < 8 && node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
+            size = 8;
+        }
         stack_offset -= size;
         
         locals[locals_count].name = node->data.var_decl.name;
@@ -708,7 +1065,9 @@ static void gen_statement(ASTNode *node) {
         locals[locals_count].type = node->resolved_type;
         locals_count++;
         
-        if (node->resolved_type && (node->resolved_type->kind == TYPE_STRUCT || node->resolved_type->kind == TYPE_ARRAY)) {
+        if (is_float_type(node->resolved_type)) {
+            emit_push_xmm("xmm0");
+        } else if (node->resolved_type && (node->resolved_type->kind == TYPE_STRUCT || node->resolved_type->kind == TYPE_ARRAY)) {
             emit_inst2("sub", op_imm(size), op_reg("rsp"));
         } else {
             emit_inst1("pushq", op_reg("rax"));
@@ -792,18 +1151,8 @@ static void gen_statement(ASTNode *node) {
         collect_cases(node->data.switch_stmt.body, cases, &case_count, &default_node);
         
         for (int i = 0; i < case_count; i++) {
-            int l_case = label_count++;
-            cases[i]->data.case_stmt.value = cases[i]->data.case_stmt.value; // Store the label index if needed?
-                                                                         // Actually, I'll just use a trick.
-            // I need to pass the label to the Case node generation.
-            // Let's store it in children_count or something unused? No.
-            // I'll attach it to the node.
-            // Wait, I can't easily add fields to node.
-            // Let's just generate the jump here and assign a unique label to each case.
             int l_num = label_count++;
             cases[i]->data.case_stmt.value = cases[i]->data.case_stmt.value; // value is the constant
-            // I'll repurpose resolved_type as a pointer to the label string? Hacky.
-            // Better: just generate the cmp/je here and we'll know the labels.
         }
         
         // Let's restart: assign labels to cases first.
@@ -814,13 +1163,13 @@ static void gen_statement(ASTNode *node) {
             emit_inst2("cmp", op_imm(cases[i]->data.case_stmt.value), op_reg("rax"));
             emit_inst1("je", op_label(case_labels[i]));
             // Hack to pass label to gen_statement:
-            cases[i]->resolved_type = (Type *)strdup(case_labels[i]); // WARNING: memory leak, but it works
+            cases[i]->resolved_type = (Type *)_strdup(case_labels[i]); // WARNING: memory leak, but it works
         }
         
         char default_label[32];
         if (default_node) {
             sprintf(default_label, ".L%d", label_count++);
-            default_node->resolved_type = (Type *)strdup(default_label);
+            default_node->resolved_type = (Type *)_strdup(default_label);
             emit_inst1("jmp", op_label(default_label));
         } else {
             emit_inst1("jmp", op_label(l_end));
@@ -882,14 +1231,19 @@ static void gen_function(ASTNode *node) {
     emit_inst2("mov", op_reg("rsp"), op_reg("rbp"));
     
     locals_count = 0;
+    current_func_return_type = node->resolved_type;
     stack_offset = 0;
     
     // Handle parameters (Win64 ABI)
     const char *arg_regs[] = {"rcx", "rdx", "r8", "r9"};
+    const char *xmm_arg_regs[] = {"xmm0", "xmm1", "xmm2", "xmm3"};
     for (size_t i = 0; i < node->children_count; i++) {
         ASTNode *param = node->children[i];
         if (param->type == AST_VAR_DECL) {
             int size = param->resolved_type ? param->resolved_type->size : 8;
+            if (size < 8 && param->resolved_type && param->resolved_type->kind != TYPE_STRUCT && param->resolved_type->kind != TYPE_ARRAY) {
+                size = 8;
+            }
             stack_offset -= size;
             
             locals[locals_count].name = param->data.var_decl.name;
@@ -898,7 +1252,11 @@ static void gen_function(ASTNode *node) {
             locals_count++;
             
             if (i < 4U) {
-                emit_inst1("pushq", op_reg(arg_regs[i]));
+                if (is_float_type(param->resolved_type)) {
+                    emit_push_xmm(xmm_arg_regs[i]);
+                } else {
+                    emit_inst1("pushq", op_reg(arg_regs[i]));
+                }
             }
         }
     }
