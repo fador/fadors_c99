@@ -136,6 +136,20 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand src, Operand dest) 
             emit_rex(buf, 1, s >= 8, 0, d >= 8);
             buffer_write_byte(buf, 0x89);
             emit_modrm(buf, 3, s, d);
+        } else if (src.type == OP_REG && dest.type == OP_LABEL) {
+            // MOV [Label], Reg -> MOV [RIP+disp], Reg (89 /r)
+            int s = get_reg_id(src.data.reg);
+            emit_rex(buf, 1, s >= 8, 0, 0); // W=1, R=s, X=0, B=0
+            buffer_write_byte(buf, 0x89);
+            emit_modrm(buf, 0, s, 5); // Mod=00, Reg=s, R/M=101 -> RIP-rel 32
+            buffer_write_dword(buf, 0); // Placeholder for relocation
+        } else if (src.type == OP_LABEL && dest.type == OP_REG) {
+            // MOV Reg, [Label] -> MOV Reg, [RIP+disp] (8B /r)
+            int d = get_reg_id(dest.data.reg);
+            emit_rex(buf, 1, d >= 8, 0, 0); // W=1, R=d, X=0, B=0
+            buffer_write_byte(buf, 0x8B);
+            emit_modrm(buf, 0, d, 5); // Mod=00, Reg=d, R/M=101 -> RIP-rel 32
+            buffer_write_dword(buf, 0); // Placeholder for relocation
         } else if (src.type == OP_REG && dest.type == OP_MEM) {
             int s = get_reg_id(src.data.reg);
             int d = get_reg_id(dest.data.mem.base);

@@ -19,6 +19,7 @@ static Section current_section = SECTION_TEXT;
 
 static void gen_function(ASTNode *node);
 static void gen_statement(ASTNode *node);
+static void gen_global_decl(ASTNode *node);
 
 typedef struct {
     char *label;
@@ -80,6 +81,8 @@ void arch_x86_64_generate(ASTNode *program) {
         ASTNode *child = program->children[i];
         if (child->type == AST_FUNCTION) {
             gen_function(child);
+        } else if (child->type == AST_VAR_DECL) {
+            gen_global_decl(child);
         }
     }
     if (!obj_writer && current_syntax == SYNTAX_INTEL) {
@@ -129,6 +132,97 @@ static Type *get_local_type(const char *name) {
         }
     }
     return NULL;
+}
+
+typedef struct {
+    char *name;
+    Type *type;
+} GlobalVar;
+
+static GlobalVar globals[100];
+static int globals_count = 0;
+
+static Type *get_global_type(const char *name) {
+    for (int i = 0; i < globals_count; i++) {
+        if (strcmp(globals[i].name, name) == 0) {
+            return globals[i].type;
+        }
+    }
+    return NULL;
+}
+
+static void gen_global_decl(ASTNode *node) {
+    if (obj_writer) {
+        // Switch to .data section
+        Section old_section = current_section;
+        current_section = SECTION_DATA;
+        
+        // Define symbol
+        uint32_t offset = (uint32_t)obj_writer->data_section.size;
+        int16_t section_num = 2; // .data
+        uint8_t storage_class = IMAGE_SYM_CLASS_EXTERNAL;
+        // If static, use IMAGE_SYM_CLASS_STATIC... but let's assume all globals are extern for now unless 'static' keyword is supported
+        
+        coff_writer_add_symbol(obj_writer, node->data.var_decl.name, offset, section_num, 0, storage_class);
+        
+        // Write initial value
+        // For now, only support integer/char initialization
+        if (node->data.var_decl.initializer && node->data.var_decl.initializer->type == AST_INTEGER) {
+            int val = node->data.var_decl.initializer->data.integer.value;
+            int size = node->resolved_type ? node->resolved_type->size : 4;
+            if (size == 1) buffer_write_byte(&obj_writer->data_section, (uint8_t)val);
+            else if (size == 4) buffer_write_dword(&obj_writer->data_section, (uint32_t)val);
+            else if (size == 8) {
+                buffer_write_dword(&obj_writer->data_section, (uint32_t)val);
+                buffer_write_dword(&obj_writer->data_section, 0); // Upper 32 bits
+            }
+        } else {
+            // Uninitialized or zero-initialized
+            int size = node->resolved_type ? node->resolved_type->size : 4;
+            for (int i=0; i<size; i++) buffer_write_byte(&obj_writer->data_section, 0);
+        }
+        
+        current_section = old_section;
+    } else {
+        if (current_syntax == SYNTAX_INTEL) {
+            fprintf(out, "_DATA SEGMENT\n");
+            fprintf(out, "PUBLIC %s\n", node->data.var_decl.name);
+            fprintf(out, "%s ", node->data.var_decl.name);
+            
+            int size = node->resolved_type ? node->resolved_type->size : 4;
+            const char *directive = "DD";
+            if (size == 1) directive = "DB";
+            else if (size == 8) directive = "DQ";
+            
+            if (node->data.var_decl.initializer && node->data.var_decl.initializer->type == AST_INTEGER) {
+                fprintf(out, "%s %d\n", directive, node->data.var_decl.initializer->data.integer.value);
+            } else {
+                fprintf(out, "%s 0\n", directive); // Arrays? Need generic zero-fill... for now just 1 element
+                if (size > 8) { // Array or struct
+                     fprintf(out, "DB %d DUP(0)\n", size);
+                }
+            }
+            fprintf(out, "_DATA ENDS\n");
+        } else {
+            fprintf(out, ".data\n");
+            fprintf(out, ".globl %s\n", node->data.var_decl.name);
+            fprintf(out, "%s:\n", node->data.var_decl.name);
+             if (node->data.var_decl.initializer && node->data.var_decl.initializer->type == AST_INTEGER) {
+                 int val = node->data.var_decl.initializer->data.integer.value;
+                 int size = node->resolved_type ? node->resolved_type->size : 4;
+                 if (size == 1) fprintf(out, "    .byte %d\n", val);
+                 else if (size == 4) fprintf(out, "    .long %d\n", val);
+                 else if (size == 8) fprintf(out, "    .quad %d\n", val);
+             } else {
+                 int size = node->resolved_type ? node->resolved_type->size : 4;
+                 fprintf(out, "    .zero %d\n", size);
+             }
+        }
+    }
+    
+    globals[globals_count].name = node->data.var_decl.name;
+    globals[globals_count].type = node->resolved_type;
+    globals_count++;
 }
 
 
@@ -230,6 +324,11 @@ static void emit_inst2(const char *mnemonic, Operand src, Operand dest) {
             uint32_t sym_idx = coff_writer_add_symbol(obj_writer, src.data.label, 0, 0, 0, storage_class);
             coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + 3, sym_idx, IMAGE_REL_AMD64_REL32);
         }
+        if (dest.type == OP_LABEL) {
+            uint8_t storage_class = (dest.data.label[0] == '.') ? IMAGE_SYM_CLASS_STATIC : IMAGE_SYM_CLASS_EXTERNAL;
+            uint32_t sym_idx = coff_writer_add_symbol(obj_writer, dest.data.label, 0, 0, 0, storage_class);
+            coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + 3, sym_idx, IMAGE_REL_AMD64_REL32);
+        }
         encode_inst2(&obj_writer->text_section, mnemonic, src, dest);
         return;
     }
@@ -263,7 +362,9 @@ static void emit_inst2(const char *mnemonic, Operand src, Operand dest) {
 
 static Type *get_expr_type(ASTNode *node) {
     if (node->type == AST_IDENTIFIER) {
-        return get_local_type(node->data.identifier.name);
+        Type *t = get_local_type(node->data.identifier.name);
+        if (!t) t = get_global_type(node->data.identifier.name);
+        return t;
     } else if (node->type == AST_DEREF) {
         Type *t = get_expr_type(node->data.unary.expression);
         return t ? t->data.ptr_to : NULL;
@@ -294,6 +395,10 @@ static void gen_addr(ASTNode *node) {
         if (offset != 0) {
             emit_inst2("lea", op_mem("rbp", offset), op_reg("rax"));
             node->resolved_type = type_ptr(get_local_type(node->data.identifier.name));
+        } else {
+            // Global
+            emit_inst2("lea", op_label(node->data.identifier.name), op_reg("rax"));
+            node->resolved_type = type_ptr(get_global_type(node->data.identifier.name));
         }
     } else if (node->type == AST_DEREF) {
         gen_expression(node->data.unary.expression);
@@ -456,6 +561,15 @@ static void gen_expression(ASTNode *node) {
                 emit_inst2("mov", op_mem("rbp", offset), op_reg("rax"));
             }
             node->resolved_type = t;
+        } else {
+            // Global
+            Type *t = get_global_type(node->data.identifier.name);
+            if (t && t->kind == TYPE_ARRAY) {
+                emit_inst2("lea", op_label(node->data.identifier.name), op_reg("rax"));
+            } else {
+                emit_inst2("mov", op_label(node->data.identifier.name), op_reg("rax"));
+            }
+            node->resolved_type = t;
         }
     } else if (node->type == AST_ARRAY_ACCESS) {
         gen_addr(node);
@@ -473,6 +587,9 @@ static void gen_expression(ASTNode *node) {
             int offset = get_local_offset(node->data.assign.left->data.identifier.name);
             if (offset != 0) {
                 emit_inst2("mov", op_reg("rax"), op_mem("rbp", offset));
+            } else {
+                // Global
+                emit_inst2("mov", op_reg("rax"), op_label(node->data.assign.left->data.identifier.name));
             }
         } else {
             emit_inst1("pushq", op_reg("rax"));
