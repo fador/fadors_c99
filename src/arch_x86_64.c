@@ -388,7 +388,7 @@ static void gen_binary_expr(ASTNode *node) {
                 // PTR - PTR -> diff / size
                 emit_inst2("sub", op_reg("rcx"), op_reg("rax"));
                 if (size > 1) {
-                    emit_inst0("cqto");
+                    emit_inst0("cqo");
                     emit_inst2("mov", op_imm(size), op_reg("rcx"));
                     emit_inst1("idiv", op_reg("rcx"));
                 }
@@ -403,7 +403,7 @@ static void gen_binary_expr(ASTNode *node) {
             node->resolved_type = left_type;
             break;
         case TOKEN_SLASH:
-            emit_inst0("cqto");
+            emit_inst0("cqo");
             emit_inst1("idiv", op_reg("rcx"));
             node->resolved_type = left_type;
             break;
@@ -444,6 +444,7 @@ static void gen_binary_expr(ASTNode *node) {
 static void gen_expression(ASTNode *node) {
     if (node->type == AST_INTEGER) {
         emit_inst2("mov", op_imm(node->data.integer.value), op_reg("rax"));
+        node->resolved_type = type_int();
     } else if (node->type == AST_IDENTIFIER) {
         int offset = get_local_offset(node->data.identifier.name);
         if (offset != 0) {

@@ -162,7 +162,7 @@ int main(int argc, char **argv) {
         }
     } else {
         char asm_filename[260];
-        strcpy(asm_filename, out_base);
+        strncpy(asm_filename, out_base, 255);
         
         if (use_masm) {
             strcat(asm_filename, ".asm");
