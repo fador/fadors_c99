@@ -35,6 +35,9 @@ typedef struct {
         struct Type *type;
     } globals[100];
     int globals_count;
+
+    int packing_stack[16];
+    int packing_ptr;
 } Parser;
 
 void parser_init(Parser *parser, Lexer *lexer);

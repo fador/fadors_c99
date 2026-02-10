@@ -70,6 +70,9 @@ static TokenType identifier_type(const char *start, size_t length) {
     if (check_keyword(start, length, "static", TOKEN_KEYWORD_STATIC) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_STATIC;
     if (check_keyword(start, length, "unsigned", TOKEN_KEYWORD_UNSIGNED) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_UNSIGNED;
     if (check_keyword(start, length, "long", TOKEN_KEYWORD_LONG) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_LONG;
+    if (check_keyword(start, length, "__pragma_pack_push", TOKEN_PRAGMA_PACK_PUSH) != TOKEN_IDENTIFIER) return TOKEN_PRAGMA_PACK_PUSH;
+    if (check_keyword(start, length, "__pragma_pack_pop", TOKEN_PRAGMA_PACK_POP) != TOKEN_IDENTIFIER) return TOKEN_PRAGMA_PACK_POP;
+    if (check_keyword(start, length, "__pragma_pack", TOKEN_PRAGMA_PACK_SET) != TOKEN_IDENTIFIER) return TOKEN_PRAGMA_PACK_SET;
     return TOKEN_IDENTIFIER;
 }
 

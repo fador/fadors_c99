@@ -219,7 +219,6 @@ char *preprocess(const char *source, const char *filename) {
                 }
                 val[val_len] = '\0';
                 
-                printf("DEBUG DEFINE: %s (func=%d, params=%d) = %s\n", name, is_func, params_count, val);
                 add_macro(name, val, is_func, params, params_count);
                 free(name);
                 free(val);
@@ -303,7 +302,66 @@ char *preprocess(const char *source, const char *filename) {
             } else if (strncmp(p, "pragma", 6) == 0) {
                 if (skipping) { p += 6; goto skip_line; }
                 p += 6;
-                // Just skip the line for now
+                while (isspace(*p) && *p != '\n') p++;
+                if (strncmp(p, "pack", 4) == 0) {
+                    p += 4;
+                    while (isspace(*p) && *p != '\n') p++;
+                    if (*p == '(') {
+                        p++;
+                        while (isspace(*p) && *p != '\n') p++;
+                        if (strncmp(p, "push", 4) == 0) {
+                            p += 4;
+                            int val = 8;
+                            while (isspace(*p) && *p != '\n') p++;
+                            if (*p == ',') {
+                                p++;
+                                while (isspace(*p) && *p != '\n') p++;
+                                if (isdigit(*p)) {
+                                    val = atoi(p);
+                                    while (isdigit(*p)) p++;
+                                }
+                            }
+                            while (*p != ')' && *p != '\n' && *p != '\0') p++;
+                            if (*p == ')') p++;
+                            
+                            char buf[64];
+                            sprintf(buf, "__pragma_pack_push(%d)", val);
+                            size_t blen = strlen(buf);
+                            if (out_pos + blen >= out_size) {
+                                out_size = out_pos + blen + 1024;
+                                output = realloc(output, out_size);
+                            }
+                            strcpy(output + out_pos, buf);
+                            out_pos += blen;
+                        } else if (strncmp(p, "pop", 3) == 0) {
+                            p += 3;
+                            while (*p != ')' && *p != '\n' && *p != '\0') p++;
+                            if (*p == ')') p++;
+                            const char *buf = "__pragma_pack_pop()";
+                            size_t blen = strlen(buf);
+                            if (out_pos + blen >= out_size) {
+                                out_size = out_pos + blen + 1024;
+                                output = realloc(output, out_size);
+                            }
+                            strcpy(output + out_pos, buf);
+                            out_pos += blen;
+                        } else if (isdigit(*p)) {
+                            int val = atoi(p);
+                            while (isdigit(*p)) p++;
+                            while (*p != ')' && *p != '\n' && *p != '\0') p++;
+                            if (*p == ')') p++;
+                            char buf[64];
+                            sprintf(buf, "__pragma_pack(%d)", val);
+                            size_t blen = strlen(buf);
+                            if (out_pos + blen >= out_size) {
+                                out_size = out_pos + blen + 1024;
+                                output = realloc(output, out_size);
+                            }
+                            strcpy(output + out_pos, buf);
+                            out_pos += blen;
+                        }
+                    }
+                }
                 goto skip_line;
             } else {
                 while (*p != '\n' && *p != '\0') p++;

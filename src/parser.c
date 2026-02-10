@@ -13,6 +13,9 @@ void parser_init(Parser *parser, Lexer *lexer) {
     parser->structs_count = 0;
     parser->locals_count = 0;
     parser->globals_count = 0;
+    
+    parser->packing_stack[0] = 8;
+    parser->packing_ptr = 0;
 }
 
 static void add_local(Parser *parser, const char *name, Type *type) {
@@ -806,6 +809,39 @@ static ASTNode *parse_statement(Parser *parser) {
         }
         parser_expect(parser, TOKEN_SEMICOLON);
         return node;
+    } else if (parser->current_token.type == TOKEN_PRAGMA_PACK_PUSH) {
+        parser_advance(parser);
+        parser_expect(parser, TOKEN_LPAREN);
+        int val = 8;
+        if (parser->current_token.type == TOKEN_NUMBER) {
+            val = atoi(parser->current_token.start);
+            parser_advance(parser);
+        }
+        parser_expect(parser, TOKEN_RPAREN);
+        if (parser->packing_ptr < 15) {
+            parser->packing_ptr++;
+            parser->packing_stack[parser->packing_ptr] = val;
+        }
+        return NULL;
+    } else if (parser->current_token.type == TOKEN_PRAGMA_PACK_POP) {
+        parser_advance(parser);
+        parser_expect(parser, TOKEN_LPAREN);
+        parser_expect(parser, TOKEN_RPAREN);
+        if (parser->packing_ptr > 0) {
+            parser->packing_ptr--;
+        }
+        return NULL;
+    } else if (parser->current_token.type == TOKEN_PRAGMA_PACK_SET) {
+        parser_advance(parser);
+        parser_expect(parser, TOKEN_LPAREN);
+        int val = 8;
+        if (parser->current_token.type == TOKEN_NUMBER) {
+            val = atoi(parser->current_token.start);
+            parser_advance(parser);
+        }
+        parser_expect(parser, TOKEN_RPAREN);
+        parser->packing_stack[parser->packing_ptr] = val;
+        return NULL;
     } else if (parser->current_token.type == TOKEN_KEYWORD_TYPEDEF) {
         parser_advance(parser);
         Type *type = parse_type(parser);
@@ -1257,6 +1293,12 @@ static ASTNode *parse_tag_body(Parser *parser, Type *type) {
                 type->data.struct_data.members[type->data.struct_data.members_count].offset = 0;
                 if (member_type->size > max_size) max_size = member_type->size;
             } else {
+                int pack = parser->packing_stack[parser->packing_ptr];
+                int align = member_type->size;
+                if (align > pack) align = pack;
+                if (align > 0) {
+                    current_offset = (current_offset + align - 1) & ~(align - 1);
+                }
                 type->data.struct_data.members[type->data.struct_data.members_count].offset = current_offset;
                 current_offset += member_type->size;
             }
@@ -1267,6 +1309,24 @@ static ASTNode *parse_tag_body(Parser *parser, Type *type) {
     }
     parser_expect(parser, TOKEN_RBRACE);
     
+    int pack = parser->packing_stack[parser->packing_ptr];
+    if (type->kind != TYPE_UNION) {
+        if (current_offset % pack != 0) {
+            // current_offset = (current_offset + pack - 1) & ~(pack - 1);
+            // Actually, struct alignment is usually min(max_member_align, pack)
+            // But let's simplify for now as the goal is basically pack(1) or pack(8)
+            int struct_align = 1;
+            for (int i=0; i<type->data.struct_data.members_count; i++) {
+                int m_align = type->data.struct_data.members[i].type->size;
+                if (m_align > struct_align) struct_align = m_align;
+            }
+            if (struct_align > pack) struct_align = pack;
+            if (struct_align > 0) {
+                current_offset = (current_offset + struct_align - 1) & ~(struct_align - 1);
+            }
+        }
+    }
+
     type->size = (type->kind == TYPE_UNION) ? max_size : current_offset;
     
     if (type->data.struct_data.name && parser->structs_count < 100) {
@@ -1325,7 +1385,10 @@ ASTNode *parser_parse(Parser *parser) {
             continue;
         }
         
-        if (parser->current_token.type == TOKEN_KEYWORD_TYPEDEF) {
+        if (parser->current_token.type == TOKEN_KEYWORD_TYPEDEF ||
+            parser->current_token.type == TOKEN_PRAGMA_PACK_PUSH ||
+            parser->current_token.type == TOKEN_PRAGMA_PACK_POP ||
+            parser->current_token.type == TOKEN_PRAGMA_PACK_SET) {
             parse_statement(parser);
         } else if (parser->current_token.type == TOKEN_KEYWORD_STRUCT || 
                    parser->current_token.type == TOKEN_KEYWORD_UNION || 
