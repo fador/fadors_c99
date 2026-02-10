@@ -136,15 +136,15 @@ The goal is to compile the compiler using itself. Based on an audit of `src/`, t
 
 #### Phase 4: Critical Self-Hosting Blockers
 Discovered by attempting to compile `types.c`, `buffer.c`, `lexer.c` with the compiler itself:
-- [ ] **`#include "file.h"` relative path resolution**: Currently resolves relative to CWD, not to the source file's directory. Blocks all compilation.
+- [x] **`#include "file.h"` relative path resolution**: Resolves relative to the source file's directory, with CWD fallback.
 - [ ] **Forward struct declarations**: `struct Type;` (used in `types.h`).
 - [ ] **Named unions in structs**: `union { ... } data;` (used in `types.h`, `ast.h`).
 - [ ] **`static` local variables**: `static int x = 1;` (used in `preprocessor.c`).
-- [ ] **`long` type**: `long size = ftell(f);` (used in `preprocessor.c`, `coff_writer.c`).
-- [ ] **Hex integer literals**: `0x8664`, `0x00000020` (used in `coff.h`, `coff_writer.c`).
-- [ ] **Character escape sequences in code**: `'\n'`, `'\0'`, `'\\'` (used in `lexer.c`, `preprocessor.c`).
+- [x] **`long` type**: `long size = ftell(f);` (treated as `int`, both 8 bytes).
+- [x] **Hex integer literals**: `0x8664`, `0x00000020` (lexer + `strtol`-based parsing).
+- [x] **Character escape sequences in code**: `'\n'`, `'\0'`, `'\\'` (full escape table).
 - [ ] **`#pragma pack(push/pop)`**: Required by `coff.h` for struct packing.
-- [ ] **Multi-line `#define` with `\` continuation**: Used in several headers.
+- [x] **Multi-line `#define` with `\` continuation**: Backslash-newline joining in preprocessor.
 
 #### Phase 5: Self-Hosting Verification
 - [ ] Module-by-module: Compile `buffer.c` → `types.c` → `lexer.c` → etc.

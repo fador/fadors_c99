@@ -69,6 +69,7 @@ static TokenType identifier_type(const char *start, size_t length) {
     if (check_keyword(start, length, "const", TOKEN_KEYWORD_CONST) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_CONST;
     if (check_keyword(start, length, "static", TOKEN_KEYWORD_STATIC) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_STATIC;
     if (check_keyword(start, length, "unsigned", TOKEN_KEYWORD_UNSIGNED) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_UNSIGNED;
+    if (check_keyword(start, length, "long", TOKEN_KEYWORD_LONG) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_LONG;
     return TOKEN_IDENTIFIER;
 }
 
@@ -107,15 +108,32 @@ Token lexer_next_token(Lexer *lexer) {
     if (isdigit(c) != 0) {
         int is_float = 0;
         
+        // Hex literal: 0x... or 0X...
+        // c is the peeked '0', not yet consumed - advance past it first
+        if (c == '0') {
+            advance(lexer); // consume '0'
+            if (peek(lexer) == 'x' || peek(lexer) == 'X') {
+                advance(lexer); // consume 'x'/'X'
+                while (isdigit(peek(lexer)) || (peek(lexer) >= 'a' && peek(lexer) <= 'f') || (peek(lexer) >= 'A' && peek(lexer) <= 'F')) {
+                    advance(lexer);
+                }
+                // Consume optional integer suffixes (U, L, UL, etc.)
+                while (peek(lexer) == 'u' || peek(lexer) == 'U' || peek(lexer) == 'l' || peek(lexer) == 'L') {
+                    advance(lexer);
+                }
+                token.type = TOKEN_NUMBER;
+                token.length = &lexer->source[lexer->position] - token.start;
+                return token;
+            }
+            // Just '0' followed by more digits (octal) or nothing
+        }
+        
         while (isdigit(peek(lexer))) {
             advance(lexer);
         }
         
         // Fraction part?
         if (peek(lexer) == '.') {
-            // Need to distinguish struct member access vs float. e.g. "student.name".
-            // But if we already parsed digits, "1" is a number. "1." is a float.
-            // Standard C says "1." is a float.
             is_float = 1;
             advance(lexer);
             while (isdigit(peek(lexer))) {
@@ -138,23 +156,37 @@ Token lexer_next_token(Lexer *lexer) {
         // Float suffix?
         if (peek(lexer) == 'f' || peek(lexer) == 'F') {
             if (is_float) {
-                // If it is already float-like (has . or e), consume 'f'.
-                // If it's just '1f', standard compliance says invalid.
-                // But for now, let's allow 'f' to make it a float if we want `1f` to be float.
-                // Standard C: `1.0f` is float. `1f` is error.
-                // Let's stick to standardish: consume 'f' only if is_float is true OR if we treat `1f` as error/float.
-                // Actually `1f` is often a typo for `1.f`.
-                // Let's only consume 'f' if we saw '.', 'e', or if we decide `1f` is float.
-                // GCC: `1f` -> invalid suffix "f" on integer constant
-                // So valid floats MUST have `.` or `e`.
                 advance(lexer);
             }
+        }
+        
+        // Long suffix (e.g. 0L, 1UL) - just consume and ignore
+        while (peek(lexer) == 'u' || peek(lexer) == 'U' || peek(lexer) == 'l' || peek(lexer) == 'L') {
+            advance(lexer);
         }
 
         token.type = is_float ? TOKEN_FLOAT : TOKEN_NUMBER;
         token.length = &lexer->source[lexer->position] - token.start;
         return token;
     }
+    
+    // Character literal: 'a', '\n', '\0', '\\', etc.
+    if (c == '\'') {
+        advance(lexer); // consume opening quote
+        if (peek(lexer) == '\\') {
+            advance(lexer); // consume backslash
+            advance(lexer); // consume escape char (n, 0, t, \\, ', etc.)
+        } else {
+            advance(lexer); // consume the char
+        }
+        if (peek(lexer) == '\'') {
+            advance(lexer); // consume closing quote
+        }
+        token.type = TOKEN_NUMBER; // char literals are integers
+        token.length = &lexer->source[lexer->position] - token.start;
+        return token;
+    }
+    
     if (c == '"') {
         advance(lexer); // Consume opening quote
         while (peek(lexer) != '"' && peek(lexer) != '\0') {

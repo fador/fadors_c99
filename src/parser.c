@@ -202,15 +202,26 @@ static Type *parse_type(Parser *parser) {
     
     if (parser->current_token.type == TOKEN_KEYWORD_UNSIGNED) {
         parser_advance(parser);
-        // unsigned int, unsigned char, or just unsigned (= unsigned int)
+        // unsigned int, unsigned char, unsigned long, or just unsigned (= unsigned int)
         if (parser->current_token.type == TOKEN_KEYWORD_INT) {
             parser_advance(parser);
         } else if (parser->current_token.type == TOKEN_KEYWORD_CHAR) {
             type = type_char();
             parser_advance(parser);
             goto done_base;
+        } else if (parser->current_token.type == TOKEN_KEYWORD_LONG) {
+            parser_advance(parser); // consume 'long'
+            if (parser->current_token.type == TOKEN_KEYWORD_LONG) parser_advance(parser); // unsigned long long
+            if (parser->current_token.type == TOKEN_KEYWORD_INT) parser_advance(parser); // unsigned long int
         }
         type = type_int(); // unsigned int -> int for now
+        goto done_base;
+    } else if (parser->current_token.type == TOKEN_KEYWORD_LONG) {
+        parser_advance(parser);
+        // long, long int, long long, long long int
+        if (parser->current_token.type == TOKEN_KEYWORD_LONG) parser_advance(parser); // long long
+        if (parser->current_token.type == TOKEN_KEYWORD_INT) parser_advance(parser); // long int
+        type = type_int(); // long -> int (both 8 bytes)
         goto done_base;
     } else if (parser->current_token.type == TOKEN_KEYWORD_INT) {
         type = type_int();
@@ -290,7 +301,31 @@ static ASTNode *parse_primary(Parser *parser) {
         size_t len = parser->current_token.length < 63 ? parser->current_token.length : 63;
         strncpy(buffer, parser->current_token.start, len);
         buffer[len] = '\0';
-        node->data.integer.value = atoi(buffer);
+        
+        if (buffer[0] == '\'') {
+            // Character literal
+            if (buffer[1] == '\\') {
+                // Escape sequence
+                switch (buffer[2]) {
+                    case 'n': node->data.integer.value = 10; break;
+                    case 't': node->data.integer.value = 9; break;
+                    case 'r': node->data.integer.value = 13; break;
+                    case '0': node->data.integer.value = 0; break;
+                    case '\\': node->data.integer.value = 92; break;
+                    case '\'': node->data.integer.value = 39; break;
+                    case '"': node->data.integer.value = 34; break;
+                    case 'a': node->data.integer.value = 7; break;
+                    case 'b': node->data.integer.value = 8; break;
+                    case 'f': node->data.integer.value = 12; break;
+                    default: node->data.integer.value = buffer[2]; break;
+                }
+            } else {
+                node->data.integer.value = (unsigned char)buffer[1];
+            }
+        } else {
+            // Decimal or hex integer (strtol handles 0x prefix)
+            node->data.integer.value = (int)strtol(buffer, NULL, 0);
+        }
         parser_advance(parser);
         return node;
     } else if (parser->current_token.type == TOKEN_FLOAT) {
@@ -509,6 +544,7 @@ static int is_token_type_start(Parser *parser, Token t) {
             type == TOKEN_KEYWORD_CONST ||
             type == TOKEN_KEYWORD_STATIC ||
             type == TOKEN_KEYWORD_UNSIGNED ||
+            type == TOKEN_KEYWORD_LONG ||
             is_typedef_name(parser, t));
 }
 
@@ -797,6 +833,7 @@ static ASTNode *parse_statement(Parser *parser) {
                parser->current_token.type == TOKEN_KEYWORD_CONST ||
                parser->current_token.type == TOKEN_KEYWORD_STATIC ||
                parser->current_token.type == TOKEN_KEYWORD_UNSIGNED ||
+               parser->current_token.type == TOKEN_KEYWORD_LONG ||
                is_typedef_name(parser, parser->current_token)) {
         // Variable or struct/union/enum declaration/definition
         if (parser->current_token.type == TOKEN_KEYWORD_STRUCT || parser->current_token.type == TOKEN_KEYWORD_UNION || parser->current_token.type == TOKEN_KEYWORD_ENUM) {
@@ -942,7 +979,8 @@ static ASTNode *parse_statement(Parser *parser) {
                 parser->current_token.type == TOKEN_KEYWORD_STRUCT ||
                 parser->current_token.type == TOKEN_KEYWORD_CONST ||
                 parser->current_token.type == TOKEN_KEYWORD_STATIC ||
-                parser->current_token.type == TOKEN_KEYWORD_UNSIGNED) {
+                parser->current_token.type == TOKEN_KEYWORD_UNSIGNED ||
+                parser->current_token.type == TOKEN_KEYWORD_LONG) {
                 node->data.for_stmt.init = parse_statement(parser);
             } else {
                 node->data.for_stmt.init = parse_expression(parser);

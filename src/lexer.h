@@ -30,6 +30,7 @@ typedef enum {
     TOKEN_KEYWORD_CONST,
     TOKEN_KEYWORD_STATIC,
     TOKEN_KEYWORD_UNSIGNED,
+    TOKEN_KEYWORD_LONG,
     TOKEN_LPAREN,       // (
     TOKEN_RPAREN,       // )
     TOKEN_BANG,         // !

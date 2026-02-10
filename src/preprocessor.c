@@ -124,7 +124,25 @@ char *preprocess(const char *source, const char *filename) {
                             inc_source = read_file(path_buf);
                         }
                     } else {
-                        inc_source = read_file(inc_filename);
+                        // Try relative to the source file's directory first
+                        const char *last_sep = NULL;
+                        const char *fp = filename;
+                        while (*fp) {
+                            if (*fp == '/' || *fp == '\\') last_sep = fp;
+                            fp++;
+                        }
+                        if (last_sep) {
+                            size_t dir_len = last_sep - filename + 1;
+                            char *rel_path = malloc(dir_len + len + 1);
+                            strncpy(rel_path, filename, dir_len);
+                            strcpy(rel_path + dir_len, inc_filename);
+                            inc_source = read_file(rel_path);
+                            free(rel_path);
+                        }
+                        // Fall back to CWD-relative
+                        if (!inc_source) {
+                            inc_source = read_file(inc_filename);
+                        }
                     }
                     
                     if (inc_source) {
@@ -180,11 +198,25 @@ char *preprocess(const char *source, const char *filename) {
                 }
                 
                 while (isspace(*p) && *p != '\n') p++;
-                const char *val_start = p;
-                while (*p != '\n' && *p != '\0') p++;
-                size_t val_len = p - val_start;
-                char *val = malloc(val_len + 1);
-                strncpy(val, val_start, val_len);
+                // Collect value, handling backslash-newline continuation
+                size_t val_cap = 256;
+                char *val = malloc(val_cap);
+                size_t val_len = 0;
+                while (*p != '\0') {
+                    if (*p == '\n') break;
+                    // Check for backslash-newline continuation
+                    if (*p == '\\' && (*(p+1) == '\n' || (*(p+1) == '\r' && *(p+2) == '\n'))) {
+                        p++; // skip backslash
+                        if (*p == '\r') p++; // skip \r
+                        if (*p == '\n') p++; // skip \n
+                        // Add a space as separator
+                        if (val_len + 1 >= val_cap) { val_cap *= 2; val = realloc(val, val_cap); }
+                        val[val_len++] = ' ';
+                        continue;
+                    }
+                    if (val_len + 1 >= val_cap) { val_cap *= 2; val = realloc(val, val_cap); }
+                    val[val_len++] = *p++;
+                }
                 val[val_len] = '\0';
                 
                 printf("DEBUG DEFINE: %s (func=%d, params=%d) = %s\n", name, is_func, params_count, val);

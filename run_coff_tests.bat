@@ -4,21 +4,49 @@ call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build
 
 set "FADORS=.\build\Release\fadors99.exe"
 
-set TEST_LIST=01_return 02_arithmetic 03_variables 04_if 06_while 07_function 12_string 14_params 15_nested_calls 19_array 20_switch 21_enum 22_union 23_pointer_math
+:: Format: test_name:expected_return_code
+set TEST_LIST=01_return:42 02_arithmetic:7 03_variables:30 04_if:100 06_while:10 07_function:123 12_string:72 14_params:10 15_nested_calls:10 19_array:100 20_switch:120 21_enum:6 22_union:42 23_pointer_math:0
+
+set PASS=0
+set FAIL=0
+set TOTAL=0
 
 echo Running COFF tests...
 echo ===================
 
 for %%T in (%TEST_LIST%) do (
-    echo [TEST] %%T
-    %FADORS% tests\%%T.c --obj
+    set /a TOTAL+=1
+    for /f "tokens=1,2 delims=:" %%A in ("%%T") do (
+        set "TNAME=%%A"
+        set "EXPECTED=%%B"
+    )
+    echo [TEST] !TNAME! ^(expected: !EXPECTED!^)
+    %FADORS% tests\!TNAME!.c --obj > nul 2>&1
     if errorlevel 1 (
-        echo [FAIL] Compilation/Linking failed for %%T
+        echo [FAIL] Compilation/Linking failed for !TNAME!
+        set /a FAIL+=1
     ) else (
-        tests\%%T.exe
-        echo [DONE] Return Code: !errorlevel!
+        tests\!TNAME!.exe
+        set "RC=!errorlevel!"
+        if "!RC!"=="!EXPECTED!" (
+            echo [PASS] !TNAME! returned !RC!
+            set /a PASS+=1
+        ) else (
+            echo [FAIL] !TNAME! returned !RC!, expected !EXPECTED!
+            set /a FAIL+=1
+        )
     )
     echo -------------------
 )
 
-echo All COFF tests completed.
+echo.
+echo ====================
+echo RESULTS: !PASS!/!TOTAL! passed, !FAIL! failed
+echo ====================
+if !FAIL! GTR 0 (
+    echo SOME TESTS FAILED.
+    exit /b 1
+) else (
+    echo ALL COFF TESTS PASSED!
+    exit /b 0
+)
