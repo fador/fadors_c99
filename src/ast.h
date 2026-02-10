@@ -131,6 +131,7 @@ typedef struct ASTNode {
         } array_access;
         struct {
             char *value;
+            int length;
         } string;
     } data;
 } ASTNode;

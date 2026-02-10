@@ -193,8 +193,13 @@ Token lexer_next_token(Lexer *lexer) {
     if (c == '"') {
         advance(lexer); // Consume opening quote
         while (peek(lexer) != '"' && peek(lexer) != '\0') {
-            if (peek(lexer) == '\n') lexer->line++;
-            advance(lexer);
+            if (peek(lexer) == '\\') {
+                advance(lexer); // Consume backslash
+                if (peek(lexer) != '\0') advance(lexer); // Consume escaped char
+            } else {
+                if (peek(lexer) == '\n') lexer->line++;
+                advance(lexer);
+            }
         }
         if (peek(lexer) == '"') {
             advance(lexer); // Consume closing quote

@@ -37,6 +37,7 @@ static Operand op_label(const char *label);
 typedef struct {
     char *label;
     char *value;
+    int length;
 } StringLiteral;
 
 static StringLiteral string_literals[100];
@@ -99,23 +100,33 @@ void arch_x86_64_generate(ASTNode *program) {
             gen_global_decl(child);
         }
     }
-    if (!obj_writer && current_syntax == SYNTAX_INTEL) {
+    if (!obj_writer) {
         if (string_literals_count > 0) {
-            fprintf(out, "_TEXT ENDS\n");
-            fprintf(out, "_DATA SEGMENT\n");
-            for (int i = 0; i < string_literals_count; i++) {
-                if (string_literals[i].label[0] == '.') {
-                    fprintf(out, "%s:\n", string_literals[i].label + 1);
-                } else {
-                    fprintf(out, "%s:\n", string_literals[i].label);
+            if (current_syntax == SYNTAX_INTEL) {
+                fprintf(out, "_TEXT ENDS\n_DATA SEGMENT\n");
+                for (int i = 0; i < string_literals_count; i++) {
+                    const char *label = string_literals[i].label;
+                    if (label[0] == '.') fprintf(out, "%s:\n", label + 1);
+                    else fprintf(out, "%s:\n", label);
+                    for (int j = 0; j < string_literals[i].length; j++) {
+                        fprintf(out, "    DB %d\n", (unsigned char)string_literals[i].value[j]);
+                    }
+                    fprintf(out, "    DB 0\n");
                 }
-                fprintf(out, "    DB \"%s\", 0\n", string_literals[i].value);
+                fprintf(out, "_DATA ENDS\nEND\n");
+            } else {
+                fprintf(out, ".data\n");
+                for (int i = 0; i < string_literals_count; i++) {
+                    fprintf(out, "%s:\n", string_literals[i].label);
+                    for (int j = 0; j < string_literals[i].length; j++) {
+                        fprintf(out, "    .byte %d\n", (unsigned char)string_literals[i].value[j]);
+                    }
+                    fprintf(out, "    .byte 0\n");
+                }
+                fprintf(out, ".text\n");
             }
-            fprintf(out, "_DATA ENDS\n");
-            fprintf(out, "END\n");
-        } else {
-            fprintf(out, "_TEXT ENDS\n");
-            fprintf(out, "END\n");
+        } else if (current_syntax == SYNTAX_INTEL) {
+            fprintf(out, "_TEXT ENDS\nEND\n");
         }
     }
 }
@@ -1088,15 +1099,19 @@ static void gen_expression(ASTNode *node) {
         char label[32];
         sprintf(label, ".LC%d", label_count++);
         
+        int len = node->data.string.length;
+        
         if (obj_writer) {
             Section old_section = current_section;
             current_section = SECTION_DATA;
             emit_label_def(label);
-            buffer_write_bytes(&obj_writer->data_section, node->data.string.value, strlen(node->data.string.value) + 1);
+            buffer_write_bytes(&obj_writer->data_section, node->data.string.value, len + 1);
             current_section = old_section;
         } else {
             string_literals[string_literals_count].label = _strdup(label);
-            string_literals[string_literals_count].value = _strdup(node->data.string.value);
+            string_literals[string_literals_count].value = malloc(len + 1);
+            memcpy(string_literals[string_literals_count].value, node->data.string.value, len + 1);
+            string_literals[string_literals_count].length = len;
             string_literals_count++;
         }
         

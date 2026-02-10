@@ -394,12 +394,32 @@ static ASTNode *parse_primary(Parser *parser) {
         }
     } else if (parser->current_token.type == TOKEN_STRING) {
         ASTNode *node = ast_create_node(AST_STRING);
-        char *val = malloc(parser->current_token.length + 1);
-        if (parser->current_token.start != NULL) {
-            strncpy(val, parser->current_token.start, parser->current_token.length);
+        char *cooked = malloc(parser->current_token.length + 1);
+        int j = 0;
+        for (int i = 0; i < parser->current_token.length; i++) {
+            if (parser->current_token.start[i] == '\\' && i + 1 < parser->current_token.length) {
+                i++;
+                switch (parser->current_token.start[i]) {
+                    case 'n': cooked[j++] = '\n'; break;
+                    case 't': cooked[j++] = '\t'; break;
+                    case 'r': cooked[j++] = '\r'; break;
+                    case '0': cooked[j++] = '\0'; break;
+                    case '\\': cooked[j++] = '\\'; break;
+                    case '"': cooked[j++] = '"'; break;
+                    case '\'': cooked[j++] = '\''; break;
+                    case 'a': cooked[j++] = '\a'; break;
+                    case 'b': cooked[j++] = '\b'; break;
+                    case 'f': cooked[j++] = '\f'; break;
+                    case 'v': cooked[j++] = '\v'; break;
+                    default: cooked[j++] = parser->current_token.start[i]; break;
+                }
+            } else {
+                cooked[j++] = parser->current_token.start[i];
+            }
         }
-        val[parser->current_token.length] = '\0';
-        node->data.string.value = val;
+        cooked[j] = '\0';
+        node->data.string.value = cooked;
+        node->data.string.length = j;
         parser_advance(parser);
         return node;
     } else if (parser->current_token.type == TOKEN_LPAREN) {
