@@ -77,6 +77,7 @@ typedef struct ASTNode {
         struct {
             char *name;
             struct ASTNode *initializer;
+            int is_static;
         } var_decl;
         struct {
             struct ASTNode *left;

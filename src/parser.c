@@ -195,8 +195,7 @@ static Type *parse_type(Parser *parser) {
     Type *type = NULL;
     
     // Skip const qualifier (before type)
-    while (parser->current_token.type == TOKEN_KEYWORD_CONST || 
-           parser->current_token.type == TOKEN_KEYWORD_STATIC) {
+    while (parser->current_token.type == TOKEN_KEYWORD_CONST) {
         parser_advance(parser);
     }
     
@@ -249,19 +248,29 @@ static Type *parse_type(Parser *parser) {
             
             if (tag_kind == TOKEN_KEYWORD_ENUM) {
                 type = type_enum(name);
+                if (parser->current_token.type == TOKEN_LBRACE) parse_enum_body(parser, type);
             } else if (tag_kind == TOKEN_KEYWORD_UNION) {
-                type = find_struct(parser, name); // find_struct handles both struct and union tags
+                type = find_struct(parser, name);
                 if (!type) type = type_union(name);
+                if (parser->current_token.type == TOKEN_LBRACE) parse_tag_body(parser, type);
             } else { // TOKEN_KEYWORD_STRUCT
                 type = find_struct(parser, name);
                 if (!type) type = type_struct(name);
+                if (parser->current_token.type == TOKEN_LBRACE) parse_tag_body(parser, type);
             }
             free(name);
         } else {
             // Anonymous struct/union/enum
-            if (tag_kind == TOKEN_KEYWORD_ENUM) type = type_enum(NULL);
-            else if (tag_kind == TOKEN_KEYWORD_UNION) type = type_union(NULL);
-            else type = type_struct(NULL);
+            if (tag_kind == TOKEN_KEYWORD_ENUM) {
+                type = type_enum(NULL);
+                if (parser->current_token.type == TOKEN_LBRACE) parse_enum_body(parser, type);
+            } else if (tag_kind == TOKEN_KEYWORD_UNION) {
+                type = type_union(NULL);
+                if (parser->current_token.type == TOKEN_LBRACE) parse_tag_body(parser, type);
+            } else {
+                type = type_struct(NULL);
+                if (parser->current_token.type == TOKEN_LBRACE) parse_tag_body(parser, type);
+            }
         }
     } else if (parser->current_token.type == TOKEN_IDENTIFIER) {
         // Check for typedefs
@@ -913,6 +922,12 @@ static ASTNode *parse_statement(Parser *parser) {
             }
         }
 
+        int is_static = 0;
+        if (parser->current_token.type == TOKEN_KEYWORD_STATIC) {
+            is_static = 1;
+            parser_advance(parser);
+        }
+        
         Type *type = parse_type(parser);
         if (!type) {
             // Error handling...
@@ -920,6 +935,7 @@ static ASTNode *parse_statement(Parser *parser) {
         
         ASTNode *node = ast_create_node(AST_VAR_DECL);
         node->resolved_type = type;
+        node->data.var_decl.is_static = is_static;
         if (parser->current_token.type == TOKEN_IDENTIFIER) {
             node->data.var_decl.name = malloc(parser->current_token.length + 1);
             memcpy(node->data.var_decl.name, parser->current_token.start, parser->current_token.length);

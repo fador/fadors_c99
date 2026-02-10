@@ -300,6 +300,11 @@ char *preprocess(const char *source, const char *filename) {
             } else if (strncmp(p, "endif", 5) == 0) {
                 p += 5;
                 if (if_ptr >= 0) if_ptr--;
+            } else if (strncmp(p, "pragma", 6) == 0) {
+                if (skipping) { p += 6; goto skip_line; }
+                p += 6;
+                // Just skip the line for now
+                goto skip_line;
             } else {
                 while (*p != '\n' && *p != '\0') p++;
             }

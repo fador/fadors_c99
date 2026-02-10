@@ -3,7 +3,7 @@
 #include <stdio.h>
 
 ASTNode *ast_create_node(ASTNodeType type) {
-    ASTNode *node = (ASTNode *)malloc(sizeof(ASTNode));
+    ASTNode *node = (ASTNode *)calloc(1, sizeof(ASTNode));
     if (node) {
         node->type = type;
         node->children = NULL;

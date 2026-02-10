@@ -18,6 +18,8 @@ static int label_count = 0;
 static CodegenSyntax current_syntax = SYNTAX_ATT;
 static Section current_section = SECTION_TEXT;
 static Type *current_func_return_type = NULL;
+static char *current_func_name = NULL;
+static int static_label_count = 0;
 
 static void gen_function(ASTNode *node);
 static void gen_statement(ASTNode *node);
@@ -121,6 +123,7 @@ void arch_x86_64_generate(ASTNode *program) {
 typedef struct {
     char *name;
     int offset;
+    char *label;
     Type *type;
 } LocalVar;
 
@@ -135,6 +138,15 @@ static int get_local_offset(const char *name) {
         }
     }
     return 0;
+}
+
+static const char *get_local_label(const char *name) {
+    for (int i = 0; i < locals_count; i++) {
+        if (strcmp(locals[i].name, name) == 0) {
+            return locals[i].label;
+        }
+    }
+    return NULL;
 }
 
 static Type *get_local_type(const char *name) {
@@ -295,7 +307,8 @@ static void print_operand(Operand op) {
             fprintf(out, "]");
         }
     } else if (op.type == OP_LABEL) {
-        fprintf(out, "%s", op.data.label);
+        if (current_syntax == SYNTAX_ATT) fprintf(out, "%s(%%rip)", op.data.label);
+        else fprintf(out, "[%s]", op.data.label);
     }
 }
 
@@ -481,6 +494,12 @@ static void gen_expression(ASTNode *node);
 
 static void gen_addr(ASTNode *node) {
     if (node->type == AST_IDENTIFIER) {
+        const char *label = get_local_label(node->data.identifier.name);
+        if (label) {
+            emit_inst2("lea", op_label(label), op_reg("rax"));
+            node->resolved_type = type_ptr(get_local_type(node->data.identifier.name));
+            return;
+        }
         int offset = get_local_offset(node->data.identifier.name);
         if (offset != 0) {
             emit_inst2("lea", op_mem("rbp", offset), op_reg("rax"));
@@ -804,6 +823,20 @@ static void gen_expression(ASTNode *node) {
             emit_inst2("movsd", op_label(label), op_reg("xmm0"));
         }
     } else if (node->type == AST_IDENTIFIER) {
+        const char *label = get_local_label(node->data.identifier.name);
+        if (label) {
+            Type *t = get_local_type(node->data.identifier.name);
+            if (t && t->kind == TYPE_ARRAY) {
+                emit_inst2("lea", op_label(label), op_reg("rax"));
+            } else if (is_float_type(t)) {
+                if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_label(label), op_reg("xmm0"));
+                else emit_inst2("movsd", op_label(label), op_reg("xmm0"));
+            } else {
+                emit_inst2("mov", op_label(label), op_reg("rax"));
+            }
+            node->resolved_type = t;
+            return;
+        }
         int offset = get_local_offset(node->data.identifier.name);
         if (offset != 0) {
             Type *t = get_local_type(node->data.identifier.name);
@@ -1133,6 +1166,58 @@ static void gen_statement(ASTNode *node) {
         sprintf(dest_label, ".Lend_%d", current_function_end_label);
         emit_inst1("jmp", op_label(dest_label));
     } else if (node->type == AST_VAR_DECL) {
+        if (node->data.var_decl.is_static) {
+            // Static local variable
+            char slabel[64];
+            sprintf(slabel, "_S_%s_%s_%d", current_func_name ? current_func_name : "global", node->data.var_decl.name, static_label_count++);
+            
+            Section old_section = current_section;
+            current_section = SECTION_DATA;
+            
+            if (obj_writer) {
+                emit_label_def(slabel);
+                int size = node->resolved_type ? node->resolved_type->size : 8;
+                int val = 0;
+                if (node->data.var_decl.initializer && node->data.var_decl.initializer->type == AST_INTEGER) {
+                    val = node->data.var_decl.initializer->data.integer.value;
+                }
+                buffer_write_bytes(&obj_writer->data_section, &val, size);
+            } else {
+                if (current_syntax == SYNTAX_INTEL) {
+                    fprintf(out, "_TEXT ENDS\n_DATA SEGMENT\n");
+                    emit_label_def(slabel);
+                    int size = node->resolved_type ? node->resolved_type->size : 8;
+                    int val = 0;
+                    if (node->data.var_decl.initializer && node->data.var_decl.initializer->type == AST_INTEGER) {
+                        val = node->data.var_decl.initializer->data.integer.value;
+                    }
+                    if (size == 1) fprintf(out, "DB %d\n", val);
+                    else if (size == 4) fprintf(out, "DD %d\n", val);
+                    else fprintf(out, "DQ %d\n", val);
+                    fprintf(out, "_DATA ENDS\n_TEXT SEGMENT\n");
+                } else {
+                    fprintf(out, ".data\n");
+                    emit_label_def(slabel);
+                    int size = node->resolved_type ? node->resolved_type->size : 8;
+                    int val = 0;
+                    if (node->data.var_decl.initializer && node->data.var_decl.initializer->type == AST_INTEGER) {
+                        val = node->data.var_decl.initializer->data.integer.value;
+                    }
+                    if (size == 1) fprintf(out, ".byte %d\n", val);
+                    else if (size == 4) fprintf(out, ".long %d\n", val);
+                    else fprintf(out, ".quad %d\n", val);
+                    fprintf(out, ".text\n");
+                }
+            }
+            current_section = old_section;
+            
+            locals[locals_count].name = node->data.var_decl.name;
+            locals[locals_count].label = strdup(slabel);
+            locals[locals_count].offset = 0;
+            locals[locals_count].type = node->resolved_type;
+            locals_count++;
+            return;
+        }
         int size = node->resolved_type ? node->resolved_type->size : 8;
         
         if (node->data.var_decl.initializer && node->data.var_decl.initializer->type == AST_INIT_LIST) {
@@ -1146,6 +1231,7 @@ static void gen_statement(ASTNode *node) {
             
             locals[locals_count].name = node->data.var_decl.name;
             locals[locals_count].offset = stack_offset;
+            locals[locals_count].label = NULL;
             locals[locals_count].type = node->resolved_type;
             locals_count++;
             
@@ -1224,6 +1310,7 @@ static void gen_statement(ASTNode *node) {
             
             locals[locals_count].name = node->data.var_decl.name;
             locals[locals_count].offset = stack_offset;
+            locals[locals_count].label = NULL;
             locals[locals_count].type = node->resolved_type;
             locals_count++;
             
@@ -1398,6 +1485,7 @@ static void gen_function(ASTNode *node) {
     
     locals_count = 0;
     current_func_return_type = node->resolved_type;
+    current_func_name = node->data.function.name;
     stack_offset = 0;
     
     // Handle parameters (Win64 ABI)
@@ -1414,6 +1502,7 @@ static void gen_function(ASTNode *node) {
             
             locals[locals_count].name = param->data.var_decl.name;
             locals[locals_count].offset = stack_offset;
+            locals[locals_count].label = NULL;
             locals[locals_count].type = param->resolved_type;
             locals_count++;
             
