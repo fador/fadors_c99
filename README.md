@@ -143,7 +143,7 @@ Discovered by attempting to compile `types.c`, `buffer.c`, `lexer.c` with the co
 - [x] **`long` type**: `long size = ftell(f);` (treated as `int`, both 8 bytes).
 - [x] **Hex integer literals**: `0x8664`, `0x00000020` (lexer + `strtol`-based parsing).
 - [x] **Character escape sequences in code**: `'\n'`, `'\0'`, `'\\'` (full escape table).
-- [ ] **`#pragma pack(push/pop)`**: Required by `coff.h` for struct packing.
+- [x] **`#pragma pack(push/pop)`**: Required by `coff.h` for struct packing.
 - [x] **Multi-line `#define` with `\` continuation**: Backslash-newline joining in preprocessor.
 
 #### Phase 5: Self-Hosting Verification

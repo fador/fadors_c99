@@ -14,6 +14,7 @@ ASTNode *ast_create_node(ASTNodeType type) {
 }
 
 void ast_add_child(ASTNode *parent, ASTNode *child) {
+    // printf("TRACE: ast_add_child\n");
     if (!parent || !child) return;
     
     parent->children_count++;
@@ -52,6 +53,13 @@ void ast_print(ASTNode *node, int indent) {
         case AST_POST_DEC: printf("PostDec\n"); break;
         case AST_CAST: printf("Cast\n"); break;
         case AST_UNKNOWN: printf("Unknown\n"); break;
+        case AST_DO_WHILE: printf("DoWhile\n"); break;
+        case AST_FOR: printf("For\n"); break;
+        case AST_SWITCH: printf("Switch\n"); break;
+        case AST_CASE: printf("Case: %d\n", node->data.case_stmt.value); break;
+        case AST_DEFAULT: printf("Default\n"); break;
+        case AST_BREAK: printf("Break\n"); break;
+        case AST_CONTINUE: printf("Continue\n"); break;
     }
     
     if (node->type == AST_DEREF || node->type == AST_ADDR_OF || node->type == AST_NEG || node->type == AST_NOT ||
@@ -61,9 +69,27 @@ void ast_print(ASTNode *node, int indent) {
         else ast_print(node->data.unary.expression, indent + 1);
     }
     
-    if (node->type == AST_ASSIGN) {
+    else if (node->type == AST_ASSIGN) {
         ast_print(node->data.assign.left, indent + 1);
         ast_print(node->data.assign.value, indent + 1);
+    } else if (node->type == AST_IF) {
+        ast_print(node->data.if_stmt.condition, indent + 1);
+        ast_print(node->data.if_stmt.then_branch, indent + 1);
+        if (node->data.if_stmt.else_branch) ast_print(node->data.if_stmt.else_branch, indent + 1);
+    } else if (node->type == AST_WHILE) {
+        ast_print(node->data.while_stmt.condition, indent + 1);
+        ast_print(node->data.while_stmt.body, indent + 1);
+    } else if (node->type == AST_DO_WHILE) {
+        ast_print(node->data.while_stmt.body, indent + 1);
+        ast_print(node->data.while_stmt.condition, indent + 1);
+    } else if (node->type == AST_FOR) {
+        if (node->data.for_stmt.init) ast_print(node->data.for_stmt.init, indent + 1);
+        if (node->data.for_stmt.condition) ast_print(node->data.for_stmt.condition, indent + 1);
+        if (node->data.for_stmt.increment) ast_print(node->data.for_stmt.increment, indent + 1);
+        ast_print(node->data.for_stmt.body, indent + 1);
+    } else if (node->type == AST_SWITCH) {
+         ast_print(node->data.switch_stmt.condition, indent + 1);
+         ast_print(node->data.switch_stmt.body, indent + 1);
     }
     
     for (size_t i = 0; i < node->children_count; i++) {

@@ -187,6 +187,12 @@ static Type *get_global_type(const char *name) {
 }
 
 static void gen_global_decl(ASTNode *node) {
+    if (node->data.var_decl.is_extern) {
+        globals[globals_count].name = node->data.var_decl.name;
+        globals[globals_count].type = node->resolved_type;
+        globals_count++;
+        return;
+    }
     if (obj_writer) {
         // Switch to .data section
         Section old_section = current_section;
@@ -491,7 +497,7 @@ static Type *get_expr_type(ASTNode *node) {
         }
         return lt ? lt : rt;
     } else if (node->type == AST_NEG || node->type == AST_PRE_INC || node->type == AST_PRE_DEC || 
-               node->type == AST_POST_INC || node->type == AST_POST_DEC) {
+               node->type == AST_POST_INC || node->type == AST_POST_DEC || node->type == AST_BITWISE_NOT) {
         return get_expr_type(node->data.unary.expression);
     } else if (node->type == AST_NOT) {
         return type_int();
@@ -1064,6 +1070,10 @@ static void gen_expression(ASTNode *node) {
             emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
         }
         node->resolved_type = type_int();
+    } else if (node->type == AST_BITWISE_NOT) {
+        gen_expression(node->data.unary.expression);
+        emit_inst1("not", op_reg("rax"));
+        node->resolved_type = node->data.unary.expression->resolved_type;
     } else if (node->type == AST_MEMBER_ACCESS) {
         gen_addr(node);
         emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
@@ -1122,8 +1132,10 @@ static void gen_expression(ASTNode *node) {
 
 static int current_function_end_label = 0;
 
-static int break_label_stack[10];
+static int break_label_stack[32];
 static int break_label_ptr = 0;
+static int continue_label_stack[32];
+static int continue_label_ptr = 0;
 
 static void collect_cases(ASTNode *node, ASTNode **cases, int *case_count, ASTNode **default_node) {
     if (!node) return;
@@ -1181,6 +1193,14 @@ static void gen_statement(ASTNode *node) {
         sprintf(dest_label, ".Lend_%d", current_function_end_label);
         emit_inst1("jmp", op_label(dest_label));
     } else if (node->type == AST_VAR_DECL) {
+        if (node->data.var_decl.is_extern) {
+             locals[locals_count].name = node->data.var_decl.name;
+             locals[locals_count].label = node->data.var_decl.name;
+             locals[locals_count].offset = 0;
+             locals[locals_count].type = node->resolved_type;
+             locals_count++;
+             return;
+        }
         if (node->data.var_decl.is_static) {
             // Static local variable
             char slabel[64];
@@ -1372,22 +1392,49 @@ static void gen_statement(ASTNode *node) {
         emit_inst1("je", op_label(l_end));
         
         break_label_stack[break_label_ptr++] = label_end;
+        continue_label_stack[continue_label_ptr++] = label_start;
         gen_statement(node->data.while_stmt.body);
+        continue_label_ptr--;
         break_label_ptr--;
         
         emit_inst1("jmp", op_label(l_start));
         
         emit_label_def(l_end);
+    } else if (node->type == AST_DO_WHILE) {
+        int label_start = label_count++;
+        int label_continue = label_count++; // condition check
+        int label_end = label_count++;
+        char l_start[32], l_cont[32], l_end[32];
+        sprintf(l_start, ".L%d", label_start);
+        sprintf(l_cont, ".L%d", label_continue);
+        sprintf(l_end, ".L%d", label_end);
+        
+        emit_label_def(l_start);
+        
+        break_label_stack[break_label_ptr++] = label_end;
+        continue_label_stack[continue_label_ptr++] = label_continue;
+        gen_statement(node->data.while_stmt.body);
+        continue_label_ptr--;
+        break_label_ptr--;
+
+        emit_label_def(l_cont);
+        gen_expression(node->data.while_stmt.condition);
+        emit_inst2("cmp", op_imm(0), op_reg("rax"));
+        emit_inst1("jne", op_label(l_start));
+        
+        emit_label_def(l_end);
     } else if (node->type == AST_FOR) {
+        int label_start = label_count++;
+        int label_continue = label_count++; // increment
+        int label_end = label_count++;
+        char l_start[32], l_cont[32], l_end[32];
+        sprintf(l_start, ".L%d", label_start);
+        sprintf(l_cont, ".L%d", label_continue);
+        sprintf(l_end, ".L%d", label_end);
+        
         if (node->data.for_stmt.init) {
             gen_statement(node->data.for_stmt.init);
         }
-        
-        int label_start = label_count++;
-        int label_end = label_count++;
-        char l_start[32], l_end[32];
-        sprintf(l_start, ".L%d", label_start);
-        sprintf(l_end, ".L%d", label_end);
         
         emit_label_def(l_start);
         if (node->data.for_stmt.condition) {
@@ -1397,15 +1444,34 @@ static void gen_statement(ASTNode *node) {
         }
         
         break_label_stack[break_label_ptr++] = label_end;
+        continue_label_stack[continue_label_ptr++] = label_continue;
         gen_statement(node->data.for_stmt.body);
+        continue_label_ptr--;
         break_label_ptr--;
         
+        emit_label_def(l_cont);
         if (node->data.for_stmt.increment) {
             gen_expression(node->data.for_stmt.increment);
         }
         emit_inst1("jmp", op_label(l_start));
         
         emit_label_def(l_end);
+    } else if (node->type == AST_BREAK) {
+        if (break_label_ptr > 0) {
+            char l_break[32];
+            sprintf(l_break, ".L%d", break_label_stack[break_label_ptr - 1]);
+            emit_inst1("jmp", op_label(l_break));
+        }
+    } else if (node->type == AST_CONTINUE) {
+        if (continue_label_ptr > 0) {
+            char l_cont[32];
+            sprintf(l_cont, ".L%d", continue_label_stack[continue_label_ptr - 1]);
+            emit_inst1("jmp", op_label(l_cont));
+        }
+    } else if (node->type == AST_GOTO) {
+        emit_inst1("jmp", op_label(node->data.goto_stmt.label));
+    } else if (node->type == AST_LABEL) {
+        emit_label_def(node->data.label_stmt.name);
     } else if (node->type == AST_SWITCH) {
         gen_expression(node->data.switch_stmt.condition);
         

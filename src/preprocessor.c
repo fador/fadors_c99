@@ -109,22 +109,19 @@ char *preprocess(const char *source, const char *filename) {
                     
                     char *inc_source = NULL;
                     
+                    char *found_path = NULL;
                     if (is_system) {
-                        // Search relative to compiler executable's include/ directory
-                        // Try known include paths
                         char path_buf[512];
-                        
-                        // Try relative to source file directory
                         sprintf(path_buf, "include/%s", inc_filename);
                         inc_source = read_file(path_buf);
+                        if (inc_source) found_path = strdup(path_buf);
                         
                         if (!inc_source) {
-                            // Try relative to compiler binary (typical install layout)
                             sprintf(path_buf, "../include/%s", inc_filename);
                             inc_source = read_file(path_buf);
+                            if (inc_source) found_path = strdup(path_buf);
                         }
                     } else {
-                        // Try relative to the source file's directory first
                         const char *last_sep = NULL;
                         const char *fp = filename;
                         while (*fp) {
@@ -137,18 +134,22 @@ char *preprocess(const char *source, const char *filename) {
                             strncpy(rel_path, filename, dir_len);
                             strcpy(rel_path + dir_len, inc_filename);
                             inc_source = read_file(rel_path);
-                            free(rel_path);
+                            if (inc_source) {
+                                found_path = rel_path;
+                            } else {
+                                free(rel_path);
+                            }
                         }
-                        // Fall back to CWD-relative
                         if (!inc_source) {
                             inc_source = read_file(inc_filename);
+                            if (inc_source) found_path = strdup(inc_filename);
                         }
                     }
                     
                     if (inc_source) {
                         int prev_top = top_level;
                         top_level = 0;
-                        char *preprocessed_inc = preprocess(inc_source, inc_filename);
+                        char *preprocessed_inc = preprocess(inc_source, found_path ? found_path : inc_filename);
                         top_level = prev_top;
                         size_t inc_len = strlen(preprocessed_inc);
                         if (out_pos + inc_len >= out_size) {
@@ -159,7 +160,10 @@ char *preprocess(const char *source, const char *filename) {
                         out_pos += inc_len;
                         free(preprocessed_inc);
                         free(inc_source);
+                    } else {
+                        // printf("Warning: Could not find include file '%s'\n", inc_filename);
                     }
+                    if (found_path) free(found_path);
                     free(inc_filename);
                 }
             } else if (strncmp(p, "define", 6) == 0) {

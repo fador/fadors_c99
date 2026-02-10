@@ -37,7 +37,12 @@ typedef enum {
     AST_POST_INC,
     AST_POST_DEC,
     AST_CAST,
+    AST_BITWISE_NOT,
     AST_INIT_LIST,
+    AST_GOTO,
+    AST_LABEL,
+    AST_CONTINUE,
+    AST_DO_WHILE,
     AST_UNKNOWN,
     AST_FLOAT
 } ASTNodeType;
@@ -78,6 +83,7 @@ typedef struct ASTNode {
             char *name;
             struct ASTNode *initializer;
             int is_static;
+            int is_extern;
         } var_decl;
         struct {
             struct ASTNode *left;
@@ -133,6 +139,12 @@ typedef struct ASTNode {
             char *value;
             int length;
         } string;
+        struct {
+            char *label;
+        } goto_stmt;
+        struct {
+            char *name;
+        } label_stmt;
     } data;
 } ASTNode;
 

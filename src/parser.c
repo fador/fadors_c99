@@ -19,7 +19,7 @@ void parser_init(Parser *parser, Lexer *lexer) {
 }
 
 static void add_local(Parser *parser, const char *name, Type *type) {
-    if (name && parser->locals_count < 100) {
+    if (name && parser->locals_count < 256) {
         parser->locals[parser->locals_count].name = strdup(name);
         parser->locals[parser->locals_count].type = type;
         parser->locals_count++;
@@ -27,7 +27,7 @@ static void add_local(Parser *parser, const char *name, Type *type) {
 }
 
 static void add_global(Parser *parser, const char *name, Type *type) {
-    if (name && parser->globals_count < 100) {
+    if (name && parser->globals_count < 1024) {
         parser->globals[parser->globals_count].name = strdup(name);
         parser->globals[parser->globals_count].type = type;
         parser->globals_count++;
@@ -60,6 +60,8 @@ static Type *find_variable_type(Parser *parser, const char *name) {
 
 static void parser_advance(Parser *parser) {
     parser->current_token = lexer_next_token(parser->lexer);
+    // printf("Token: %d '%.*s' at line %d\n", parser->current_token.type, (int)parser->current_token.length, parser->current_token.start, parser->current_token.line);
+    fflush(stdout);
 }
 
 static void parser_expect(Parser *parser, TokenType type) {
@@ -100,6 +102,8 @@ static ASTNode *parse_multiplicative(Parser *parser);
 static ASTNode *parse_unary(Parser *parser);
 static ASTNode *parse_tag_body(Parser *parser, Type *type);
 static ASTNode *parse_enum_body(Parser *parser, Type *type);
+static ASTNode *parse_statement(Parser *parser);
+static ASTNode *parse_block(Parser *parser);
 
 static Type *get_expr_type(Parser *parser, ASTNode *node) {
     if (!node) return NULL;
@@ -167,6 +171,10 @@ static Type *get_expr_type(Parser *parser, ASTNode *node) {
 static int eval_constant_expression(ASTNode *node) {
     if (!node) return 0;
     if (node->type == AST_INTEGER) return node->data.integer.value;
+    if (node->type == AST_NEG) return -eval_constant_expression(node->data.unary.expression);
+    if (node->type == AST_NOT) return !eval_constant_expression(node->data.unary.expression);
+    if (node->type == AST_CAST) return eval_constant_expression(node->data.cast.expression);
+    
     if (node->type == AST_BINARY_EXPR) {
         int left = eval_constant_expression(node->data.binary_expr.left);
         int right = eval_constant_expression(node->data.binary_expr.right);
@@ -178,6 +186,9 @@ static int eval_constant_expression(ASTNode *node) {
             case TOKEN_PERCENT: return right != 0 ? left % right : 0;
             case TOKEN_LESS_LESS: return left << right;
             case TOKEN_GREATER_GREATER: return left >> right;
+            case TOKEN_AMPERSAND: return left & right;
+            case TOKEN_PIPE: return left | right;
+            case TOKEN_CARET: return left ^ right;
             default: return 0;
         }
     }
@@ -549,6 +560,12 @@ static ASTNode *parse_unary(Parser *parser) {
         ASTNode *node = ast_create_node(AST_ADDR_OF);
         node->data.unary.expression = parse_cast(parser);
         return node;
+    } else if (parser->current_token.type == TOKEN_BITWISE_NOT) {
+        // printf("DEBUG: Handling TILDE\n");
+        parser_advance(parser);
+        ASTNode *node = ast_create_node(AST_BITWISE_NOT);
+        node->data.unary.expression = parse_cast(parser);
+        return node;
     } else if (parser->current_token.type == TOKEN_MINUS) {
         parser_advance(parser);
         ASTNode *node = ast_create_node(AST_NEG);
@@ -819,6 +836,9 @@ static ASTNode *parse_initializer(Parser *parser) {
 }
 
 static ASTNode *parse_statement(Parser *parser) {
+    if (parser->current_token.type == TOKEN_KEYWORD_EXTERN) {
+        fprintf(stderr, "DEBUG_STMT: extern at line %d\n", parser->current_token.line); fflush(stderr);
+    }
     if (parser->current_token.type == TOKEN_KEYWORD_RETURN) {
         parser_advance(parser);
         ASTNode *node = ast_create_node(AST_RETURN);
@@ -862,6 +882,125 @@ static ASTNode *parse_statement(Parser *parser) {
         parser_expect(parser, TOKEN_RPAREN);
         parser->packing_stack[parser->packing_ptr] = val;
         return NULL;
+    } else if (parser->current_token.type == TOKEN_KEYWORD_IF) {
+        parser_advance(parser);
+        parser_expect(parser, TOKEN_LPAREN);
+        ASTNode *condition = parse_expression(parser);
+        parser_expect(parser, TOKEN_RPAREN);
+        ASTNode *then_branch = parse_statement(parser);
+        ASTNode *else_branch = NULL;
+        if (parser->current_token.type == TOKEN_KEYWORD_ELSE) {
+            parser_advance(parser);
+            else_branch = parse_statement(parser);
+        }
+        ASTNode *node = ast_create_node(AST_IF);
+        node->data.if_stmt.condition = condition;
+        node->data.if_stmt.then_branch = then_branch;
+        node->data.if_stmt.else_branch = else_branch;
+        return node;
+    } else if (parser->current_token.type == TOKEN_KEYWORD_WHILE) {
+        parser_advance(parser);
+        parser_expect(parser, TOKEN_LPAREN);
+        ASTNode *condition = parse_expression(parser);
+        parser_expect(parser, TOKEN_RPAREN);
+        ASTNode *body = parse_statement(parser);
+        ASTNode *node = ast_create_node(AST_WHILE);
+        node->data.while_stmt.condition = condition;
+        node->data.while_stmt.body = body;
+        return node;
+    } else if (parser->current_token.type == TOKEN_KEYWORD_DO) {
+        parser_advance(parser);
+        ASTNode *body = parse_statement(parser);
+        parser_expect(parser, TOKEN_KEYWORD_WHILE);
+        parser_expect(parser, TOKEN_LPAREN);
+        ASTNode *condition = parse_expression(parser);
+        parser_expect(parser, TOKEN_RPAREN);
+        parser_expect(parser, TOKEN_SEMICOLON);
+        ASTNode *node = ast_create_node(AST_DO_WHILE);
+        node->data.while_stmt.condition = condition;
+        node->data.while_stmt.body = body;
+        return node;
+    } else if (parser->current_token.type == TOKEN_KEYWORD_FOR) {
+        parser_advance(parser);
+        parser_expect(parser, TOKEN_LPAREN);
+        ASTNode *init = NULL;
+        if (parser->current_token.type != TOKEN_SEMICOLON) {
+            if (is_typedef_name(parser, parser->current_token) || 
+                parser->current_token.type == TOKEN_KEYWORD_INT || 
+                parser->current_token.type == TOKEN_KEYWORD_CHAR /* ... others ... */) {
+                // Declaration in for loop? Not standard C90 but C99.
+                // Our parsing logic might struggle with decl inside expression position.
+                // Assuming expression statement or null.
+                // Actually C99 allows declaration.
+                // Let's assume expression statement or declaration if we can detect it.
+                // For now, simpler C90 style: expression statement.
+                init = parse_statement(parser); // This handles expression statement ;
+            } else {
+                init = parse_statement(parser);
+            }
+        } else {
+            parser_expect(parser, TOKEN_SEMICOLON);
+        }
+        
+        ASTNode *condition = NULL;
+        if (parser->current_token.type != TOKEN_SEMICOLON) {
+            condition = parse_expression(parser);
+        }
+        parser_expect(parser, TOKEN_SEMICOLON);
+        
+        ASTNode *increment = NULL;
+        if (parser->current_token.type != TOKEN_RPAREN) {
+            increment = parse_expression(parser);
+        }
+        parser_expect(parser, TOKEN_RPAREN);
+        
+        ASTNode *body = parse_statement(parser);
+        
+        ASTNode *node = ast_create_node(AST_FOR);
+        node->data.for_stmt.init = init;
+        node->data.for_stmt.condition = condition;
+        node->data.for_stmt.increment = increment;
+        node->data.for_stmt.body = body;
+        return node;
+    } else if (parser->current_token.type == TOKEN_KEYWORD_SWITCH) {
+         parser_advance(parser);
+         parser_expect(parser, TOKEN_LPAREN);
+         ASTNode *condition = parse_expression(parser);
+         parser_expect(parser, TOKEN_RPAREN);
+         ASTNode *body = parse_statement(parser);
+         ASTNode *node = ast_create_node(AST_SWITCH);
+         node->data.switch_stmt.condition = condition;
+         node->data.switch_stmt.body = body;
+         return node;
+    } else if (parser->current_token.type == TOKEN_KEYWORD_CASE) {
+         parser_advance(parser);
+         ASTNode *expr = parse_expression(parser); // Only parsing const expr
+         parser_expect(parser, TOKEN_COLON);
+         ASTNode *node = ast_create_node(AST_CASE);
+         // node->data.case_stmt.value = eval_const_expr(expr); // Need eval?
+         // For now assume simple integer or char
+         if (expr && expr->type == AST_INTEGER) {
+             node->data.case_stmt.value = expr->data.integer.value;
+         } else {
+             // Handle complex const expr later or assume 0
+             node->data.case_stmt.value = 0; 
+         }
+         // Case falls through to next statement usually, but in AST we might treat it as a label?
+         // Or just return the case node.
+         return node;
+    } else if (parser->current_token.type == TOKEN_KEYWORD_DEFAULT) {
+         parser_advance(parser);
+         parser_expect(parser, TOKEN_COLON);
+         ASTNode *node = ast_create_node(AST_DEFAULT);
+         return node;
+    } else if (parser->current_token.type == TOKEN_KEYWORD_BREAK) {
+         parser_advance(parser);
+         parser_expect(parser, TOKEN_SEMICOLON);
+         return ast_create_node(AST_BREAK);
+    } else if (parser->current_token.type == TOKEN_KEYWORD_CONTINUE) {
+         parser_advance(parser);
+         parser_expect(parser, TOKEN_SEMICOLON);
+         return ast_create_node(AST_CONTINUE);
     } else if (parser->current_token.type == TOKEN_KEYWORD_TYPEDEF) {
         parser_advance(parser);
         Type *type = parse_type(parser);
@@ -875,7 +1014,7 @@ static ASTNode *parse_statement(Parser *parser) {
             name[parser->current_token.length] = '\0';
             parser_advance(parser);
 
-            if (parser->typedefs_count < 100) {
+            if (parser->typedefs_count < 1024) {
                 parser->typedefs[parser->typedefs_count].name = name;
                 parser->typedefs[parser->typedefs_count].type = type;
                 parser->typedefs_count++;
@@ -978,9 +1117,29 @@ static ASTNode *parse_statement(Parser *parser) {
             }
         }
 
+        int is_typedef = 0;
+        int is_extern = 0;
         int is_static = 0;
-        if (parser->current_token.type == TOKEN_KEYWORD_STATIC) {
-            is_static = 1;
+        // int is_inline = 0; // Not used yet
+        // int is_restrict = 0; // Not used yet
+        // int is_volatile = 0; // Not used yet
+        
+        while (parser->current_token.type == TOKEN_KEYWORD_TYPEDEF ||
+               parser->current_token.type == TOKEN_KEYWORD_EXTERN || 
+               parser->current_token.type == TOKEN_KEYWORD_STATIC ||
+               parser->current_token.type == TOKEN_KEYWORD_INLINE ||
+               parser->current_token.type == TOKEN_KEYWORD_RESTRICT ||
+               parser->current_token.type == TOKEN_KEYWORD_VOLATILE ||
+               parser->current_token.type == TOKEN_KEYWORD_REGISTER || 
+               parser->current_token.type == TOKEN_KEYWORD_AUTO) {
+            
+            if (parser->current_token.type == TOKEN_KEYWORD_TYPEDEF) is_typedef = 1;
+            else if (parser->current_token.type == TOKEN_KEYWORD_EXTERN) is_extern = 1;
+            else if (parser->current_token.type == TOKEN_KEYWORD_STATIC) is_static = 1;
+            // else if (parser->current_token.type == TOKEN_KEYWORD_INLINE) is_inline = 1;
+            // else if (parser->current_token.type == TOKEN_KEYWORD_RESTRICT) is_restrict = 1;
+            // else if (parser->current_token.type == TOKEN_KEYWORD_VOLATILE) is_volatile = 1;
+            
             parser_advance(parser);
         }
         
@@ -992,6 +1151,7 @@ static ASTNode *parse_statement(Parser *parser) {
         ASTNode *node = ast_create_node(AST_VAR_DECL);
         node->resolved_type = type;
         node->data.var_decl.is_static = is_static;
+        node->data.var_decl.is_extern = is_extern;
         if (parser->current_token.type == TOKEN_IDENTIFIER) {
             node->data.var_decl.name = malloc(parser->current_token.length + 1);
             memcpy(node->data.var_decl.name, parser->current_token.start, parser->current_token.length);
@@ -1005,6 +1165,20 @@ static ASTNode *parse_statement(Parser *parser) {
                     node->resolved_type = type_array(node->resolved_type, size);
                 }
                 parser_expect(parser, TOKEN_RBRACKET);
+            } else if (parser->current_token.type == TOKEN_LPAREN) {
+                int depth = 0;
+                // Initial check and advance
+                if (parser->current_token.type == TOKEN_LPAREN) depth++;
+                parser_advance(parser);
+                
+                while (depth > 0 && parser->current_token.type != TOKEN_EOF) {
+                    if (parser->current_token.type == TOKEN_LPAREN) depth++;
+                    else if (parser->current_token.type == TOKEN_RPAREN) depth--;
+                    parser_advance(parser);
+                }
+                parser_expect(parser, TOKEN_SEMICOLON);
+                add_local(parser, node->data.var_decl.name, node->resolved_type);
+                return node;
             }
 
             add_local(parser, node->data.var_decl.name, node->resolved_type);
@@ -1043,16 +1217,7 @@ static ASTNode *parse_statement(Parser *parser) {
             node->data.for_stmt.init = NULL;
             parser_advance(parser);
         } else {
-            if (parser->current_token.type == TOKEN_KEYWORD_INT || 
-                parser->current_token.type == TOKEN_KEYWORD_CHAR ||
-                parser->current_token.type == TOKEN_KEYWORD_FLOAT ||
-                parser->current_token.type == TOKEN_KEYWORD_DOUBLE ||
-                parser->current_token.type == TOKEN_KEYWORD_VOID ||
-                parser->current_token.type == TOKEN_KEYWORD_STRUCT ||
-                parser->current_token.type == TOKEN_KEYWORD_CONST ||
-                parser->current_token.type == TOKEN_KEYWORD_STATIC ||
-                parser->current_token.type == TOKEN_KEYWORD_UNSIGNED ||
-                parser->current_token.type == TOKEN_KEYWORD_LONG) {
+            if (is_token_type_start(parser, parser->current_token)) {
                 node->data.for_stmt.init = parse_statement(parser);
             } else {
                 node->data.for_stmt.init = parse_expression(parser);
@@ -1104,18 +1269,10 @@ static ASTNode *parse_statement(Parser *parser) {
     } else if (parser->current_token.type == TOKEN_KEYWORD_CASE) {
         parser_advance(parser);
         ASTNode *node = ast_create_node(AST_CASE);
-        // Expect a constant expression (integer for now)
-        if (parser->current_token.type == TOKEN_NUMBER) {
-            char buffer[64];
-            size_t len = parser->current_token.length < 63 ? parser->current_token.length : 63;
-            strncpy(buffer, parser->current_token.start, len);
-            buffer[len] = '\0';
-            node->data.case_stmt.value = atoi(buffer);
-            parser_advance(parser);
-        } else {
-            printf("Syntax Error: Expected constant integer after 'case' at line %d\n", parser->current_token.line);
-            exit(1);
-        }
+        // Expect a constant expression
+        ASTNode *expr = parse_expression(parser);
+        node->data.case_stmt.value = eval_constant_expression(expr);
+        // FIXME: leak expr if not used, but we don't have a free_ast yet.
         parser_expect(parser, TOKEN_COLON);
         return node;
     } else if (parser->current_token.type == TOKEN_KEYWORD_DEFAULT) {
@@ -1128,12 +1285,42 @@ static ASTNode *parse_statement(Parser *parser) {
         ASTNode *node = ast_create_node(AST_BREAK);
         parser_expect(parser, TOKEN_SEMICOLON);
         return node;
+    } else if (parser->current_token.type == TOKEN_KEYWORD_GOTO) {
+        parser_advance(parser);
+        if (parser->current_token.type != TOKEN_IDENTIFIER) {
+            printf("Syntax Error: Expected identifier after 'goto' at line %d\n", parser->current_token.line);
+            exit(1);
+        }
+        char *label = malloc(parser->current_token.length + 1);
+        strncpy(label, parser->current_token.start, parser->current_token.length);
+        label[parser->current_token.length] = '\0';
+        parser_advance(parser);
+        parser_expect(parser, TOKEN_SEMICOLON);
+        ASTNode *node = ast_create_node(AST_GOTO);
+        node->data.goto_stmt.label = label;
+        return node;
     } else if (parser->current_token.type == TOKEN_LBRACE) {
         // Handle blocks as statements
-        extern ASTNode *parse_block(Parser *parser);
         return parse_block(parser);
     }
     
+    // Label check
+    if (parser->current_token.type == TOKEN_IDENTIFIER) {
+        Token next = lexer_peek_token(parser->lexer);
+        if (next.type == TOKEN_COLON) {
+            char *name = malloc(parser->current_token.length + 1);
+            strncpy(name, parser->current_token.start, parser->current_token.length);
+            name[parser->current_token.length] = '\0';
+            
+            parser_advance(parser); // identifier
+            parser_advance(parser); // :
+            
+            ASTNode *node = ast_create_node(AST_LABEL);
+            node->data.label_stmt.name = name;
+            return node;
+        }
+    }
+
     // Assignment or expression statement?
     ASTNode *expr = parse_expression(parser);
     parser_expect(parser, TOKEN_SEMICOLON);
@@ -1154,13 +1341,24 @@ ASTNode *parse_block(Parser *parser) {
 }
 
 static ASTNode *parse_external_declaration(Parser *parser) {
-    if (parser->current_token.type == TOKEN_KEYWORD_EXTERN) {
+    int is_static = 0;
+    int is_extern = 0;
+    while (parser->current_token.type == TOKEN_KEYWORD_EXTERN || 
+           parser->current_token.type == TOKEN_KEYWORD_STATIC ||
+           parser->current_token.type == TOKEN_KEYWORD_CONST) {
+        if (parser->current_token.type == TOKEN_KEYWORD_STATIC) is_static = 1;
+        else if (parser->current_token.type == TOKEN_KEYWORD_EXTERN) is_extern = 1;
         parser_advance(parser);
     }
     
+    printf("TRACE: parse_external_declaration start line %d\n", parser->current_token.line); fflush(stdout);
+    printf("TRACE: ped token=%d '%.*s'\n", parser->current_token.type, (int)parser->current_token.length, parser->current_token.start); fflush(stdout);
+
     Type *type = parse_type(parser);
+    printf("TRACE: ped parse_type returned %p\n", (void*)type); fflush(stdout);
     if (!type) {
-        printf("Syntax Error: Expected return type or variable type at line %d\n", parser->current_token.line);
+        printf("Syntax Error: Expected return type or variable type at line %d (token_type=%d '%.*s')\n", parser->current_token.line, parser->current_token.type, (int)parser->current_token.length, parser->current_token.start);
+        fflush(stdout);
         exit(1);
     }
     
@@ -1241,6 +1439,8 @@ static ASTNode *parse_external_declaration(Parser *parser) {
             // Global Variable
             node = ast_create_node(AST_VAR_DECL);
             node->resolved_type = type;
+            node->data.var_decl.is_static = is_static;
+            node->data.var_decl.is_extern = is_extern;
             node->data.var_decl.name = name;
             // Array support: int a[10];
             if (parser->current_token.type == TOKEN_LBRACKET) {
@@ -1349,7 +1549,7 @@ static ASTNode *parse_tag_body(Parser *parser, Type *type) {
 
     type->size = (type->kind == TYPE_UNION) ? max_size : current_offset;
     
-    if (type->data.struct_data.name && parser->structs_count < 100) {
+    if (type->data.struct_data.name && parser->structs_count < 1024) {
         parser->structs[parser->structs_count++] = type;
     }
     
@@ -1378,7 +1578,7 @@ static ASTNode *parse_enum_body(Parser *parser, Type *type) {
                 }
             }
             
-            if (parser->enum_constants_count < 200) {
+            if (parser->enum_constants_count < 1024) {
                 parser->enum_constants[parser->enum_constants_count].name = name;
                 parser->enum_constants[parser->enum_constants_count].value = current_value;
                 parser->enum_constants_count++;
@@ -1400,6 +1600,7 @@ static ASTNode *parse_enum_body(Parser *parser, Type *type) {
 ASTNode *parser_parse(Parser *parser) {
     ASTNode *program = ast_create_node(AST_PROGRAM);
     while (parser->current_token.type != TOKEN_EOF) {
+        printf("TRACE: parser loop line %d type %d\n", parser->current_token.line, parser->current_token.type);
         if (parser->current_token.type == TOKEN_SEMICOLON) {
             parser_advance(parser);
             continue;

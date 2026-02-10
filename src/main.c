@@ -109,13 +109,22 @@ int main(int argc, char **argv) {
     char *preprocessed = preprocess(source, source_filename);
     free(source);
     
+    // Debug: dump preprocessed source
+    FILE *pf = fopen("preprocessed.i", "w");
+    if (pf) {
+        fputs(preprocessed, pf);
+        fclose(pf);
+    }
+    
     Lexer lexer;
     lexer_init(&lexer, preprocessed);
     
     Parser parser;
     parser_init(&parser, &lexer);
     
+    printf("Parsing...\n");
     ASTNode *program = parser_parse(&parser);
+    printf("Parsing complete.\n");
     
     char out_base[256];
     strncpy(out_base, source_filename, 250);
@@ -128,13 +137,16 @@ int main(int argc, char **argv) {
         // Normalize paths for Windows
         for (char *p = obj_filename; *p; p++) if (*p == '/') *p = '\\';
 
+        printf("Generating OBJ to %s...\n", obj_filename);
         COFFWriter writer;
         coff_writer_init(&writer);
         codegen_set_writer(&writer);
         codegen_init(NULL);
         codegen_generate(program);
+        printf("Writing OBJ...\n");
         coff_writer_write(&writer, obj_filename);
         coff_writer_free(&writer);
+        printf("OBJ complete.\n");
         printf("Generated Object: %s\n", obj_filename);
 
         if (!stop_at_asm) {
