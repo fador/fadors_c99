@@ -137,9 +137,9 @@ The goal is to compile the compiler using itself. Based on an audit of `src/`, t
 #### Phase 4: Critical Self-Hosting Blockers
 Discovered by attempting to compile `types.c`, `buffer.c`, `lexer.c` with the compiler itself:
 - [x] **`#include "file.h"` relative path resolution**: Resolves relative to the source file's directory, with CWD fallback.
-- [ ] **Forward struct declarations**: `struct Type;` (used in `types.h`).
-- [ ] **Named unions in structs**: `union { ... } data;` (used in `types.h`, `ast.h`).
-- [ ] **`static` local variables**: `static int x = 1;` (used in `preprocessor.c`).
+- [x] **Forward struct declarations**: `struct Type;` (used in `types.h`).
+- [x] **Named unions in structs**: `union { ... } data;` (used in `types.h`, `ast.h`).
+- [x] **`static` local variables**: `static int x = 1;` (used in `preprocessor.c`).
 - [x] **`long` type**: `long size = ftell(f);` (treated as `int`, both 8 bytes).
 - [x] **Hex integer literals**: `0x8664`, `0x00000020` (lexer + `strtol`-based parsing).
 - [x] **Character escape sequences in code**: `'\n'`, `'\0'`, `'\\'` (full escape table).

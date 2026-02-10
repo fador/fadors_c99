@@ -5,7 +5,7 @@ call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build
 set "FADORS=.\build\Release\fadors99.exe"
 
 :: Format: test_name:expected_return_code
-set TEST_LIST=01_return:42 02_arithmetic:7 03_variables:30 04_if:100 06_while:10 07_function:123 12_string:72 14_params:10 15_nested_calls:10 19_array:100 20_switch:120 21_enum:6 22_union:42 23_pointer_math:0
+set TEST_LIST=01_return:42 02_arithmetic:7 03_variables:30 04_if:100 06_while:10 07_function:123 12_string:72 14_params:10 15_nested_calls:10 19_array:100 20_switch:120 21_enum:6 22_union:42 23_pointer_math:0 50_hex_char_long:0 51_named_union_static_local:0 52_forward_struct:0
 
 set PASS=0
 set FAIL=0
