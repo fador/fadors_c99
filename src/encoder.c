@@ -1,6 +1,23 @@
 #include "encoder.h"
 #include <string.h>
 #include <stdio.h>
+#include "coff_writer.h"
+
+static COFFWriter *encoder_writer = NULL;
+
+void encoder_set_writer(COFFWriter *writer) {
+    encoder_writer = writer;
+}
+
+static void emit_reloc(Buffer *buf, const char *label, uint32_t offset) {
+    if (!encoder_writer) return;
+    int32_t sym_idx = coff_writer_find_symbol(encoder_writer, label);
+    if (sym_idx < 0) {
+        sym_idx = coff_writer_add_symbol(encoder_writer, label, 0, 0, 0, IMAGE_SYM_CLASS_EXTERNAL);
+    }
+    // IMAGE_REL_AMD64_REL32 is 0x0004
+    coff_writer_add_reloc(encoder_writer, offset, (uint32_t)sym_idx, 0x0004, 1 /* .text */);
+}
 
 int get_reg_id(const char *reg) {
     if (strcmp(reg, "rax") == 0 || strcmp(reg, "eax") == 0 || strcmp(reg, "ax") == 0 || strcmp(reg, "al") == 0) return 0;
@@ -79,24 +96,37 @@ void encode_inst1(Buffer *buf, const char *mnemonic, Operand op1) {
     } else if (strcmp(mnemonic, "jmp") == 0) {
         if (op1.type == OP_LABEL) {
             buffer_write_byte(buf, 0xE9);
-            buffer_write_dword(buf, 0); // Placeholder
+            emit_reloc(buf, op1.data.label, (uint32_t)buf->size);
+            buffer_write_dword(buf, (uint32_t)-4); // Placeholder
         }
-    } else if (strcmp(mnemonic, "je") == 0 || strcmp(mnemonic, "jz") == 0) {
+    } else if (strcmp(mnemonic, "je") == 0 || strcmp(mnemonic, "jz") == 0 ||
+               strcmp(mnemonic, "jne") == 0 || strcmp(mnemonic, "jnz") == 0 ||
+               strcmp(mnemonic, "jl") == 0 || strcmp(mnemonic, "jge") == 0 ||
+               strcmp(mnemonic, "jle") == 0 || strcmp(mnemonic, "jg") == 0 ||
+               strcmp(mnemonic, "jb") == 0 || strcmp(mnemonic, "jae") == 0 ||
+               strcmp(mnemonic, "jbe") == 0 || strcmp(mnemonic, "ja") == 0) {
         if (op1.type == OP_LABEL) {
+            uint8_t opcode = 0x84; // je
+            if (strcmp(mnemonic, "jne") == 0 || strcmp(mnemonic, "jnz") == 0) opcode = 0x85;
+            else if (strcmp(mnemonic, "jl") == 0) opcode = 0x8C;
+            else if (strcmp(mnemonic, "jge") == 0) opcode = 0x8D;
+            else if (strcmp(mnemonic, "jle") == 0) opcode = 0x8E;
+            else if (strcmp(mnemonic, "jg") == 0) opcode = 0x8F;
+            else if (strcmp(mnemonic, "jb") == 0) opcode = 0x82;
+            else if (strcmp(mnemonic, "jae") == 0) opcode = 0x83;
+            else if (strcmp(mnemonic, "jbe") == 0) opcode = 0x86;
+            else if (strcmp(mnemonic, "ja") == 0) opcode = 0x87;
+            
             buffer_write_byte(buf, 0x0F);
-            buffer_write_byte(buf, 0x84);
-            buffer_write_dword(buf, 0); // Placeholder
-        }
-    } else if (strcmp(mnemonic, "jne") == 0 || strcmp(mnemonic, "jnz") == 0) {
-        if (op1.type == OP_LABEL) {
-            buffer_write_byte(buf, 0x0F);
-            buffer_write_byte(buf, 0x85);
-            buffer_write_dword(buf, 0); // Placeholder
+            buffer_write_byte(buf, opcode);
+            emit_reloc(buf, op1.data.label, (uint32_t)buf->size);
+            buffer_write_dword(buf, (uint32_t)-4); // Placeholder
         }
     } else if (strcmp(mnemonic, "call") == 0) {
         if (op1.type == OP_LABEL) {
             buffer_write_byte(buf, 0xE8);
-            buffer_write_dword(buf, 0); // Placeholder
+            emit_reloc(buf, op1.data.label, (uint32_t)buf->size);
+            buffer_write_dword(buf, (uint32_t)-4); // Placeholder
         }
     } else if (strncmp(mnemonic, "set", 3) == 0) {
         // sete, setne, setl, setle, setg, setge
@@ -154,13 +184,15 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand src, Operand dest) 
             emit_rex(buf, is_64, s >= 8, 0, 0);
             buffer_write_byte(buf, 0x89);
             emit_modrm(buf, 0, s, 5);
-            buffer_write_dword(buf, 0);
+            emit_reloc(buf, dest.data.label, (uint32_t)buf->size);
+            buffer_write_dword(buf, (uint32_t)-4);
         } else if (src.type == OP_LABEL && dest.type == OP_REG) {
             int d = get_reg_id(dest.data.reg);
             emit_rex(buf, is_64, d >= 8, 0, 0);
             buffer_write_byte(buf, 0x8B);
             emit_modrm(buf, 0, d, 5);
-            buffer_write_dword(buf, 0);
+            emit_reloc(buf, src.data.label, (uint32_t)buf->size);
+            buffer_write_dword(buf, (uint32_t)-4);
         } else if (src.type == OP_REG && dest.type == OP_MEM) {
             int s = get_reg_id(src.data.reg);
             int d = get_reg_id(dest.data.mem.base);
@@ -298,7 +330,8 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand src, Operand dest) 
             emit_rex(buf, is_64, d >= 8, 0, 0);
             buffer_write_byte(buf, 0x8D);
             emit_modrm(buf, 0, d, 5); // RIP-relative
-            buffer_write_dword(buf, 0); // Placeholder
+            emit_reloc(buf, src.data.label, (uint32_t)buf->size);
+            buffer_write_dword(buf, (uint32_t)-4); // Placeholder
         }
     } else if (strcmp(mnemonic, "movzbq") == 0) {
         if (src.type == OP_MEM && dest.type == OP_REG) {
@@ -470,14 +503,16 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand src, Operand dest) 
             buffer_write_byte(buf, 0x0F);
             buffer_write_byte(buf, 0x10);
             emit_modrm(buf, 0, d, 5); // RIP-relative
-            buffer_write_dword(buf, 0); // Placeholder
+            emit_reloc(buf, src.data.label, (uint32_t)buf->size);
+            buffer_write_dword(buf, (uint32_t)-4); // Placeholder
         } else if (src.type == OP_REG && dest.type == OP_LABEL) {
             int s = get_reg_id(src.data.reg);
             emit_rex(buf, 0, s >= 8, 0, 0);
             buffer_write_byte(buf, 0x0F);
             buffer_write_byte(buf, 0x11);
             emit_modrm(buf, 0, s, 5); // RIP-relative
-            buffer_write_dword(buf, 0); // Placeholder
+            emit_reloc(buf, dest.data.label, (uint32_t)buf->size);
+            buffer_write_dword(buf, (uint32_t)-4); // Placeholder
         }
     } else if (strcmp(mnemonic, "addss") == 0 || strcmp(mnemonic, "addsd") == 0 ||
                strcmp(mnemonic, "subss") == 0 || strcmp(mnemonic, "subsd") == 0 ||

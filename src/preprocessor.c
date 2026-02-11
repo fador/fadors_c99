@@ -73,17 +73,24 @@ static char *read_file(const char *filename) {
 }
 
 char *preprocess(const char *source, const char *filename) {
+    printf("HB: preprocess start\n"); fflush(stdout);
+
     int is_first_call = 0;
     if (top_level) {
         if_ptr = -1;
         top_level = 0;
         is_first_call = 1;
-        
-        // Built-ins removed (handled by headers)
     }
 
-    size_t out_size = strlen(source) * 2; // Rough estimate
+    printf("HB: preprocess before strlen\n"); fflush(stdout);
+    size_t out_size = strlen(source) * 2 + 1024; // Rough estimate
+    printf("HB: preprocess before malloc, size=%zu\n", out_size); fflush(stdout);
     char *output = malloc(out_size);
+    if (!output) {
+        printf("ERROR: malloc failed in preprocess\n"); fflush(stdout);
+        exit(1);
+    }
+    // printf("HB: preprocess after malloc\n"); fflush(stdout);
     size_t out_pos = 0;
     
     const char *p = source;

@@ -57,6 +57,7 @@ uint32_t coff_writer_add_symbol(COFFWriter *w, const char *name, uint32_t value,
             w->symbols[existing].value = value;
             w->symbols[existing].section = section;
             w->symbols[existing].type = type;
+            w->symbols[existing].storage_class = storage_class;
         }
         return (uint32_t)existing;
     }

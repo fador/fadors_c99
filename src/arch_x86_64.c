@@ -45,6 +45,7 @@ static int string_literals_count = 0;
 
 void arch_x86_64_set_writer(COFFWriter *writer) {
     obj_writer = writer;
+    encoder_set_writer(writer);
 }
 
 static void emit_label_def(const char *name) {
@@ -317,11 +318,13 @@ static void gen_global_decl(ASTNode *node) {
 static void emit_push_xmm(const char *reg) {
     emit_inst2("sub", op_imm(8), op_reg("rsp"));
     emit_inst2("movsd", op_reg(reg), op_mem("rsp", 0));
+    stack_offset -= 8;
 }
 
 static void emit_pop_xmm(const char *reg) {
     emit_inst2("movsd", op_mem("rsp", 0), op_reg(reg));
     emit_inst2("add", op_imm(8), op_reg("rsp"));
+    stack_offset += 8;
 }
 
 
@@ -379,20 +382,6 @@ static void emit_inst0(const char *mnemonic) {
 
 static void emit_inst1(const char *mnemonic, Operand op1) {
     if (obj_writer) {
-        if (op1.type == OP_LABEL) {
-            uint8_t storage_class = (op1.data.label[0] == '.') ? IMAGE_SYM_CLASS_STATIC : IMAGE_SYM_CLASS_EXTERNAL;
-            uint16_t type = (strcmp(mnemonic, "call") == 0) ? 0x20 : 0;
-            uint32_t sym_idx = coff_writer_add_symbol(obj_writer, op1.data.label, 0, 0, type, storage_class);
-            
-            uint32_t offset = 1;
-            if (strcmp(mnemonic, "je") == 0 || strcmp(mnemonic, "jne") == 0 || 
-                strcmp(mnemonic, "jz") == 0 || strcmp(mnemonic, "jnz") == 0 ||
-                strcmp(mnemonic, "jb") == 0 || strcmp(mnemonic, "jbe") == 0 ||
-                strcmp(mnemonic, "ja") == 0 || strcmp(mnemonic, "jae") == 0) offset = 2;
-            else if (strcmp(mnemonic, "call") == 0 || strcmp(mnemonic, "jmp") == 0) offset = 1;
-            
-            coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + offset, sym_idx, IMAGE_REL_AMD64_REL32, 1);
-        }
         encode_inst1(&obj_writer->text_section, mnemonic, op1);
         return;
     }
@@ -421,27 +410,6 @@ static void emit_inst1(const char *mnemonic, Operand op1) {
 
 static void emit_inst2(const char *mnemonic, Operand op1, Operand op2) {
     if (obj_writer) {
-        int offset_in_inst = 3; // REX + Opcode + ModRM (general)
-        if (strcmp(mnemonic, "movss") == 0 || strcmp(mnemonic, "movsd") == 0) {
-            int reg_id = -1;
-            if (op1.type == OP_REG) reg_id = get_reg_id(op1.data.reg);
-            else if (op2.type == OP_REG) reg_id = get_reg_id(op2.data.reg);
-            
-            // F3/F2 (1) + REX (if reg >= 8) (1) + 0F 10/11 (2) + ModRM (1)
-            offset_in_inst = 4;
-            if (reg_id >= 8) offset_in_inst = 5;
-        }
-
-        if (op1.type == OP_LABEL) {
-            uint8_t storage_class = (op1.data.label[0] == '.') ? IMAGE_SYM_CLASS_STATIC : IMAGE_SYM_CLASS_EXTERNAL;
-            uint32_t sym_idx = coff_writer_add_symbol(obj_writer, op1.data.label, 0, 0, 0, storage_class);
-            coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + offset_in_inst, sym_idx, IMAGE_REL_AMD64_REL32, 1);
-        }
-        if (op2.type == OP_LABEL) {
-            uint8_t storage_class = (op2.data.label[0] == '.') ? IMAGE_SYM_CLASS_STATIC : IMAGE_SYM_CLASS_EXTERNAL;
-            uint32_t sym_idx = coff_writer_add_symbol(obj_writer, op2.data.label, 0, 0, 0, storage_class);
-            coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + offset_in_inst, sym_idx, IMAGE_REL_AMD64_REL32, 1);
-        }
         encode_inst2(&obj_writer->text_section, mnemonic, op1, op2);
         return;
     }
@@ -470,6 +438,42 @@ static void emit_inst2(const char *mnemonic, Operand op1, Operand op2) {
         print_operand(op1);
     }
     fprintf(out, "\n");
+}
+
+static const char *get_reg_32(const char *reg64) {
+    if (strcmp(reg64, "rax") == 0) return "eax";
+    if (strcmp(reg64, "rcx") == 0) return "ecx";
+    if (strcmp(reg64, "rdx") == 0) return "edx";
+    if (strcmp(reg64, "rbx") == 0) return "ebx";
+    if (strcmp(reg64, "rsi") == 0) return "esi";
+    if (strcmp(reg64, "rdi") == 0) return "di";
+    if (strcmp(reg64, "r8") == 0) return "r8d";
+    if (strcmp(reg64, "r9") == 0) return "r9d";
+    return reg64;
+}
+
+static const char *get_reg_16(const char *reg64) {
+    if (strcmp(reg64, "rax") == 0) return "ax";
+    if (strcmp(reg64, "rcx") == 0) return "cx";
+    if (strcmp(reg64, "rdx") == 0) return "dx";
+    if (strcmp(reg64, "rbx") == 0) return "bx";
+    if (strcmp(reg64, "rsi") == 0) return "si";
+    if (strcmp(reg64, "rdi") == 0) return "di";
+    if (strcmp(reg64, "r8") == 0) return "r8w";
+    if (strcmp(reg64, "r9") == 0) return "r9w";
+    return reg64;
+}
+
+static const char *get_reg_8(const char *reg64) {
+    if (strcmp(reg64, "rax") == 0) return "al";
+    if (strcmp(reg64, "rcx") == 0) return "cl";
+    if (strcmp(reg64, "rdx") == 0) return "dl";
+    if (strcmp(reg64, "rbx") == 0) return "bl";
+    if (strcmp(reg64, "rsi") == 0) return "sil";
+    if (strcmp(reg64, "rdi") == 0) return "dil";
+    if (strcmp(reg64, "r8") == 0) return "r8b";
+    if (strcmp(reg64, "r9") == 0) return "r9b";
+    return reg64;
 }
 
 
@@ -590,6 +594,8 @@ static void gen_addr(ASTNode *node) {
         if (!node->data.array_access.array || !node->data.array_access.index) { fprintf(stderr, "      Array: NULL child!\n"); return; }
         gen_expression(node->data.array_access.array);
         emit_inst1("pushq", op_reg("rax"));
+        stack_offset -= 8;
+        
         gen_expression(node->data.array_access.index);
         
         // Element size calculation
@@ -605,6 +611,7 @@ static void gen_addr(ASTNode *node) {
         
         emit_inst2("imul", op_imm(element_size), op_reg("rax"));
         emit_inst1("popq", op_reg("rcx"));
+        stack_offset += 8;
         emit_inst2("add", op_reg("rcx"), op_reg("rax"));
     }
 }
@@ -717,8 +724,10 @@ static void gen_binary_expr(ASTNode *node) {
     // Integer branch
     gen_expression(node->data.binary_expr.right);
     emit_inst1("pushq", op_reg("rax"));
+    stack_offset -= 8;
     gen_expression(node->data.binary_expr.left);
     emit_inst1("popq", op_reg("rcx"));
+    stack_offset += 8;
     
     Type *left_type = node->data.binary_expr.left->resolved_type;
     Type *right_type = node->data.binary_expr.right->resolved_type;
@@ -978,6 +987,7 @@ static void gen_expression(ASTNode *node) {
         
         if (!is_pre) {
             emit_inst1("pushq", op_reg("rcx")); // Save original value
+            stack_offset -= 8;
         }
         
         // Modify RCX
@@ -996,6 +1006,7 @@ static void gen_expression(ASTNode *node) {
         
         if (!is_pre) {
             emit_inst1("popq", op_reg("rax")); // Restore original value to result register
+            stack_offset += 8;
         } else {
             emit_inst2("mov", op_reg("rcx"), op_reg("rax")); // Result is new value
         }
@@ -1197,6 +1208,7 @@ static void gen_expression(ASTNode *node) {
                 emit_pop_xmm(xmm_arg_regs[i]);
             } else {
                 emit_inst1("popq", op_reg(arg_regs[i]));
+                stack_offset += 8;
             }
         }
         
@@ -1360,15 +1372,16 @@ static void gen_statement(ASTNode *node) {
             return;
         }
         int size = node->resolved_type ? node->resolved_type->size : 8;
+        int alloc_size = size;
+        if (alloc_size < 8 && node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
+            alloc_size = 8;
+        }
         
         if (node->data.var_decl.initializer && node->data.var_decl.initializer->type == AST_INIT_LIST) {
             // Initializer list: {expr, expr, ...}
             ASTNode *init_list = node->data.var_decl.initializer;
             
-            if (size < 8 && node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
-                size = 8;
-            }
-            stack_offset -= size;
+            stack_offset -= alloc_size;
             
             locals[locals_count].name = node->data.var_decl.name;
             locals[locals_count].offset = stack_offset;
@@ -1377,15 +1390,15 @@ static void gen_statement(ASTNode *node) {
             locals_count++;
             
             // Allocate space on stack
-            emit_inst2("sub", op_imm(size), op_reg("rsp"));
+            emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
             
             // Zero-initialize with qword stores
             {
                 int off;
-                for (off = 0; off + 8 <= size; off += 8) {
+                for (off = 0; off + 8 <= alloc_size; off += 8) {
                     emit_inst2("movq", op_imm(0), op_mem("rbp", stack_offset + off));
                 }
-                if (off + 4 <= size) {
+                if (off + 4 <= alloc_size) {
                     emit_inst2("movl", op_imm(0), op_mem("rbp", stack_offset + off));
                 }
             }
@@ -1444,10 +1457,7 @@ static void gen_statement(ASTNode *node) {
                 }
             }
             
-            if (size < 8 && node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
-                size = 8;
-            }
-            stack_offset -= size;
+            stack_offset -= alloc_size;
             fprintf(stderr, "    Var: %s offset=%d size=%d\n", node->data.var_decl.name ? node->data.var_decl.name : "NULL", stack_offset, size);
             
             if (locals_count >= 8192) { fprintf(stderr, "Error: Too many locals\n"); exit(1); }
@@ -1458,11 +1468,16 @@ static void gen_statement(ASTNode *node) {
             locals_count++;
             
             if (is_float_type(node->resolved_type)) {
-                emit_push_xmm("xmm0");
-            } else if (node->resolved_type && (node->resolved_type->kind == TYPE_STRUCT || node->resolved_type->kind == TYPE_ARRAY)) {
-                emit_inst2("sub", op_imm(size), op_reg("rsp"));
+                emit_push_xmm("xmm0"); 
             } else {
-                emit_inst1("pushq", op_reg("rax"));
+                emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
+                if (node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
+                    // Scalar store
+                    if (size == 1) emit_inst2("movb", op_reg("al"), op_mem("rsp", 0));
+                    else if (size == 2) emit_inst2("movw", op_reg("ax"), op_mem("rsp", 0));
+                    else if (size == 4) emit_inst2("movl", op_reg("eax"), op_mem("rsp", 0));
+                    else emit_inst2("mov", op_reg("rax"), op_mem("rsp", 0));
+                }
             }
         }
     } else if (node->type == AST_IF) {
@@ -1674,10 +1689,11 @@ static void gen_function(ASTNode *node) {
         ASTNode *param = node->children[i];
         if (param->type == AST_VAR_DECL) {
             int size = param->resolved_type ? param->resolved_type->size : 8;
-            if (size < 8 && param->resolved_type && param->resolved_type->kind != TYPE_STRUCT && param->resolved_type->kind != TYPE_ARRAY) {
-                size = 8;
+            int alloc_size = size;
+            if (alloc_size < 8 && param->resolved_type && param->resolved_type->kind != TYPE_STRUCT && param->resolved_type->kind != TYPE_ARRAY) {
+                alloc_size = 8;
             }
-            stack_offset -= size;
+            stack_offset -= alloc_size;
             
             if (locals_count >= 8192) { fprintf(stderr, "Error: Too many locals\n"); exit(1); }
             locals[locals_count].name = param->data.var_decl.name;
@@ -1690,7 +1706,11 @@ static void gen_function(ASTNode *node) {
                 if (is_float_type(param->resolved_type)) {
                     emit_push_xmm(xmm_arg_regs[i]);
                 } else {
-                    emit_inst1("pushq", op_reg(arg_regs[i]));
+                    emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
+                    if (size == 1) emit_inst2("movb", op_reg(get_reg_8(arg_regs[i])), op_mem("rsp", 0));
+                    else if (size == 2) emit_inst2("movw", op_reg(get_reg_16(arg_regs[i])), op_mem("rsp", 0));
+                    else if (size == 4) emit_inst2("movl", op_reg(get_reg_32(arg_regs[i])), op_mem("rsp", 0));
+                    else emit_inst2("mov", op_reg(arg_regs[i]), op_mem("rsp", 0));
                 }
             }
         }
