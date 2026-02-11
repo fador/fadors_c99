@@ -10,6 +10,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Manually declare needed Windows API to avoid header conflicts with coff.h
+typedef void *HANDLE;
+#define STD_OUTPUT_HANDLE ((unsigned long)-11)
+#define STD_ERROR_HANDLE ((unsigned long)-12)
+__declspec(dllimport) HANDLE __stdcall GetStdHandle(unsigned long nStdHandle);
+__declspec(dllimport) int __stdcall WriteFile(HANDLE hFile, const void *lpBuffer, unsigned long nNumberOfBytesToWrite, unsigned long *lpNumberOfBytesWritten, void *lpOverlapped);
+
+// Large state moved to heap to avoid segment/initialization issues
+static Parser *current_parser;
+static COFFWriter *current_writer;
+
 // Helper to execute a command
 static int run_command(const char *cmd) {
     printf("[CMD] %s\n", cmd);
@@ -64,6 +75,10 @@ static void compile_and_link(const char *asm_file, const char *exe_file, int use
 }
 
 int main(int argc, char **argv) {
+    const char *msg = "DEBUG: main entry point (raw)\n";
+    unsigned long written;
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), msg, (unsigned long)strlen(msg), &written, NULL);
+    fprintf(stderr, "DEBUG: main entry point\n"); fflush(stderr);
     if (argc < 2) {
         printf("Usage: %s <source.c> [--masm] [--obj] [-S]\n", argv[0]);
         return 1;
@@ -124,11 +139,12 @@ int main(int argc, char **argv) {
     lexer_init(&lexer, preprocessed);
     printf("DEBUG: Lexer initialized.\n"); fflush(stdout);
     
-    Parser parser;
-    parser_init(&parser, &lexer);
+    printf("DEBUG: Initializing parser...\n"); fflush(stdout);
+    current_parser = malloc(sizeof(Parser));
+    parser_init(current_parser, &lexer);
     
-    printf("Parsing...\n");
-    ASTNode *program = parser_parse(&parser);
+    printf("Parsing...\n"); fflush(stdout);
+    ASTNode *program = parser_parse(current_parser);
     printf("Parsing complete.\n");
     
     char out_base[256];
@@ -142,15 +158,16 @@ int main(int argc, char **argv) {
         // Normalize paths for Windows
         for (char *p = obj_filename; *p; p++) if (*p == '/') *p = '\\';
 
-        printf("Generating OBJ to %s...\n", obj_filename);
-        COFFWriter writer;
-        coff_writer_init(&writer);
-        codegen_set_writer(&writer);
+        printf("Generating OBJ to %s...\n", obj_filename); fflush(stdout);
+        current_writer = malloc(sizeof(COFFWriter));
+        coff_writer_init(current_writer);
+        codegen_set_writer(current_writer);
         codegen_init(NULL);
         codegen_generate(program);
-        printf("Writing OBJ...\n");
-        coff_writer_write(&writer, obj_filename);
-        coff_writer_free(&writer);
+        printf("Writing OBJ...\n"); fflush(stdout);
+        coff_writer_write(current_writer, obj_filename);
+        coff_writer_free(current_writer);
+        free(current_writer);
         printf("OBJ complete.\n");
         printf("Generated Object: %s\n", obj_filename);
 

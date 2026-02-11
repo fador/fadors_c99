@@ -148,6 +148,7 @@ static int get_local_offset(const char *name) {
     if (!name) return 0;
     for (int i = locals_count - 1; i >= 0; i--) {
         if (locals[i].name && strcmp(locals[i].name, name) == 0) {
+            if (locals[i].label) return 0; // It's static, no stack offset
             return locals[i].offset;
         }
     }
@@ -192,13 +193,13 @@ static Type *get_global_type(const char *name) {
 }
 
 static void gen_global_decl(ASTNode *node) {
-    if (node->data.var_decl.is_extern) {
-        if (globals_count >= 8192) { fprintf(stderr, "Error: Too many globals\n"); exit(1); }
-        globals[globals_count].name = node->data.var_decl.name;
-        globals[globals_count].type = node->resolved_type;
-        globals_count++;
-        return;
-    }
+    if (globals_count >= 8192) { fprintf(stderr, "Error: Too many globals\n"); exit(1); }
+    globals[globals_count].name = node->data.var_decl.name;
+    globals[globals_count].type = node->resolved_type;
+    globals_count++;
+
+    if (node->data.var_decl.is_extern) return;
+
     if (obj_writer) {
         // Switch to .data section
         Section old_section = current_section;
@@ -212,29 +213,21 @@ static void gen_global_decl(ASTNode *node) {
         coff_writer_add_symbol(obj_writer, node->data.var_decl.name, offset, section_num, 0, storage_class);
         
         // Write initial value
-        // For now, only support integer/char initialization
+        int size = node->resolved_type ? node->resolved_type->size : 4;
         if (node->data.var_decl.initializer && node->data.var_decl.initializer->type == AST_INTEGER) {
             int val = node->data.var_decl.initializer->data.integer.value;
-            int size = node->resolved_type ? node->resolved_type->size : 4;
-            if (size == 1) buffer_write_byte(&obj_writer->data_section, (uint8_t)val);
-            else if (size == 4) buffer_write_dword(&obj_writer->data_section, (uint32_t)val);
-            else if (size == 8) {
-                buffer_write_dword(&obj_writer->data_section, (uint32_t)val);
-                buffer_write_dword(&obj_writer->data_section, 0); // Upper 32 bits
-            }
+            buffer_write_bytes(&obj_writer->data_section, &val, size);
         } else if (node->data.var_decl.initializer && node->data.var_decl.initializer->type == AST_FLOAT) {
             double val = node->data.var_decl.initializer->data.float_val.value;
-            int size = node->resolved_type ? node->resolved_type->size : 4;
             if (size == 4) {
                 float f = (float)val;
-                buffer_write_bytes(&obj_writer->data_section, (const char*)&f, 4);
-            } else if (size == 8) {
-                buffer_write_bytes(&obj_writer->data_section, (const char*)&val, 8);
+                buffer_write_bytes(&obj_writer->data_section, &f, 4);
+            } else {
+                buffer_write_bytes(&obj_writer->data_section, &val, 8);
             }
         } else {
             // Uninitialized or zero-initialized
-            int size = node->resolved_type ? node->resolved_type->size : 4;
-            for (int i=0; i<size; i++) buffer_write_byte(&obj_writer->data_section, 0);
+            buffer_pad(&obj_writer->data_section, size);
         }
         
         current_section = old_section;
@@ -1008,6 +1001,16 @@ static void gen_expression(ASTNode *node) {
         Type *t = get_expr_type(node->data.assign.left);
         if (node->data.assign.left->type == AST_IDENTIFIER) {
             fprintf(stderr, "      Assign Ident: %s\n", node->data.assign.left->data.identifier.name ? node->data.assign.left->data.identifier.name : "NULL");
+            const char *label = get_local_label(node->data.assign.left->data.identifier.name);
+            if (label) {
+                if (is_float_type(t)) {
+                    if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm0"), op_label(label));
+                    else emit_inst2("movsd", op_reg("xmm0"), op_label(label));
+                } else {
+                    emit_inst2("mov", op_reg("rax"), op_label(label));
+                }
+                return;
+            }
             int offset = get_local_offset(node->data.assign.left->data.identifier.name);
             if (offset != 0) {
                 if (is_float_type(t)) {
@@ -1106,8 +1109,24 @@ static void gen_expression(ASTNode *node) {
         gen_addr(node);
         emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
     } else if (node->type == AST_CALL) {
+        // Save initial stack offset to restore later
+        int initial_stack_offset = stack_offset;
+        
         const char *arg_regs[] = {"rcx", "rdx", "r8", "r9"};
         const char *xmm_arg_regs[] = {"xmm0", "xmm1", "xmm2", "xmm3"};
+        
+        int num_args = (int)node->children_count;
+        int extra_args = num_args > 4 ? num_args - 4 : 0;
+        
+        // Calculate padding based on CURRENT stack depth (including any pushed args from outer calls)
+        int current_stack_depth = abs(stack_offset);
+        int padding = (16 - ((current_stack_depth + extra_args * 8 + 32) % 16)) % 16;
+        
+        if (padding > 0) {
+            emit_inst2("sub", op_imm(padding), op_reg("rsp"));
+            stack_offset -= padding;
+        }
+
         for (size_t i = 0; i < node->children_count; i++) {
             gen_expression(node->children[i]);
             if (is_float_type(node->children[i]->resolved_type)) {
@@ -1115,17 +1134,14 @@ static void gen_expression(ASTNode *node) {
             } else {
                 emit_inst1("pushq", op_reg("rax"));
             }
+            stack_offset -= 8; // Update stack offset for nested calls
         }
         
-        for (int i = (int)node->children_count - 1; i >= 0; i--) {
-            if (i < 4) {
-               if (is_float_type(node->children[i]->resolved_type)) {
-                    emit_pop_xmm(xmm_arg_regs[i]);
-                } else {
-                    emit_inst1("popq", op_reg(arg_regs[i]));
-                }
+        for (int i = 0; i < (int)num_args && i < 4; i++) {
+            if (is_float_type(node->children[i]->resolved_type)) {
+                emit_pop_xmm(xmm_arg_regs[i]);
             } else {
-                // For i >= 4, arguments are already on stack.
+                emit_inst1("popq", op_reg(arg_regs[i]));
             }
         }
         
@@ -1133,7 +1149,12 @@ static void gen_expression(ASTNode *node) {
         emit_inst2("sub", op_imm(32), op_reg("rsp"));
         emit_inst1("call", op_label(node->data.call.name));
         if (node->resolved_type == NULL) node->resolved_type = get_expr_type(node);
-        emit_inst2("add", op_imm(32), op_reg("rsp"));
+        
+        // Clean up shadow space + extra args + padding
+        emit_inst2("add", op_imm(32 + extra_args * 8 + padding), op_reg("rsp"));
+        
+        // Restore stack offset
+        stack_offset = initial_stack_offset;
     } else if (node->type == AST_STRING) {
         char label[32];
         sprintf(label, ".LC%d", label_count++);
@@ -1277,7 +1298,7 @@ static void gen_statement(ASTNode *node) {
             current_section = old_section;
             
             locals[locals_count].name = node->data.var_decl.name;
-            locals[locals_count].label = strdup(slabel);
+            locals[locals_count].label = _strdup(slabel);
             locals[locals_count].offset = 0;
             locals[locals_count].type = node->resolved_type;
             locals_count++;
@@ -1493,12 +1514,16 @@ static void gen_statement(ASTNode *node) {
             char l_break[32];
             sprintf(l_break, ".L%d", break_label_stack[break_label_ptr - 1]);
             emit_inst1("jmp", op_label(l_break));
+        } else {
+            fprintf(stderr, "Error: 'break' outside of loop or switch\n");
         }
     } else if (node->type == AST_CONTINUE) {
         if (continue_label_ptr > 0) {
             char l_cont[32];
             sprintf(l_cont, ".L%d", continue_label_stack[continue_label_ptr - 1]);
             emit_inst1("jmp", op_label(l_cont));
+        } else {
+            fprintf(stderr, "Error: 'continue' outside of loop\n");
         }
     } else if (node->type == AST_GOTO) {
         emit_inst1("jmp", op_label(node->data.goto_stmt.label));
@@ -1506,44 +1531,37 @@ static void gen_statement(ASTNode *node) {
         emit_label_def(node->data.label_stmt.name);
     } else if (node->type == AST_SWITCH) {
         gen_expression(node->data.switch_stmt.condition);
-        
+
         int label_end = label_count++;
         char l_end[32];
         sprintf(l_end, ".L%d", label_end);
-        
+
         ASTNode *cases[1024];
         int case_count = 0;
         ASTNode *default_node = NULL;
         collect_cases(node->data.switch_stmt.body, cases, &case_count, &default_node);
-        
-        for (int i = 0; i < case_count; i++) {
-            int l_num = label_count++;
-            cases[i]->data.case_stmt.value = cases[i]->data.case_stmt.value; 
-        }
-        
+
         char case_labels[1024][32];
         for (int i = 0; i < case_count; i++) {
             sprintf(case_labels[i], ".L%d", label_count++);
-            // Emit comparison
             emit_inst2("cmp", op_imm(cases[i]->data.case_stmt.value), op_reg("rax"));
             emit_inst1("je", op_label(case_labels[i]));
-            // Hack to pass label to gen_statement:
-            cases[i]->resolved_type = (Type *)_strdup(case_labels[i]); // WARNING: memory leak, but it works
+            cases[i]->resolved_type = (Type *)_strdup(case_labels[i]);
         }
-        
-        char default_label[32];
+
         if (default_node) {
+            char default_label[32];
             sprintf(default_label, ".L%d", label_count++);
             default_node->resolved_type = (Type *)_strdup(default_label);
             emit_inst1("jmp", op_label(default_label));
         } else {
             emit_inst1("jmp", op_label(l_end));
         }
-        
+
         break_label_stack[break_label_ptr++] = label_end;
         gen_statement(node->data.switch_stmt.body);
         break_label_ptr--;
-        
+
         emit_label_def(l_end);
     } else if (node->type == AST_CASE) {
         if (node->resolved_type) {
@@ -1552,12 +1570,6 @@ static void gen_statement(ASTNode *node) {
     } else if (node->type == AST_DEFAULT) {
         if (node->resolved_type) {
             emit_label_def((char *)node->resolved_type);
-        }
-    } else if (node->type == AST_BREAK) {
-        if (break_label_ptr > 0) {
-            char l_break[32];
-            sprintf(l_break, ".L%d", break_label_stack[break_label_ptr - 1]);
-            emit_inst1("jmp", op_label(l_break));
         }
     } else if (node->type == AST_BLOCK) {
         for (size_t i = 0; i < node->children_count; i++) {
