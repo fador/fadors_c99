@@ -1,4 +1,5 @@
 #include "preprocessor.h"
+static int top_level = 1;
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,7 +13,7 @@ typedef struct {
     int is_func;
 } Macro;
 
-static Macro macros[200];
+static Macro macros[4096];
 static int macros_count = 0;
 
 typedef struct {
@@ -38,11 +39,13 @@ static void add_macro(const char *name, const char *value, int is_func, char **p
         idx = macros_count++;
     } else {
         // Redefinition
+        // printf("DEBUG: Redefining macro %s\n", name);
         free(macros[idx].name);
         free(macros[idx].value);
         for (int i = 0; i < macros[idx].params_count; i++) free(macros[idx].params[i]);
         free(macros[idx].params);
     }
+    // printf("DEBUG: add_macro %s = %s\n", name, value ? value : "");
     macros[idx].name = strdup(name);
     macros[idx].value = value ? strdup(value) : strdup("");
     macros[idx].is_func = is_func;
@@ -70,12 +73,13 @@ static char *read_file(const char *filename) {
 }
 
 char *preprocess(const char *source, const char *filename) {
-    // Reset state for top-level call (poor man's reset)
-    // In a real compiler, we'd pass a context object.
-    static int top_level = 1;
+    int is_first_call = 0;
     if (top_level) {
         if_ptr = -1;
         top_level = 0;
+        is_first_call = 1;
+        
+        // Built-ins removed (handled by headers)
     }
 
     size_t out_size = strlen(source) * 2; // Rough estimate
@@ -83,8 +87,64 @@ char *preprocess(const char *source, const char *filename) {
     size_t out_pos = 0;
     
     const char *p = source;
+    int bol = 1;
     while (*p) {
-        if (*p == '#') {
+        if (*p == '/' && *(p+1) == '/') {
+            while (*p && *p != '\n') p++;
+            bol = 1; continue;
+        }
+        if (*p == '/' && *(p+1) == '*') {
+            p += 2;
+            while (*p && !(*p == '*' && *(p+1) == '/')) {
+                if (*p == '\n') bol = 1;
+                p++;
+            }
+            if (*p) p += 2;
+            continue;
+        }
+        if (*p == '"') {
+            bol = 0;
+            if (out_pos + 1 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
+            output[out_pos++] = *p++;
+            while (*p && *p != '"') {
+                if (*p == '\\' && *(p+1) != '\0') {
+                    if (out_pos + 2 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
+                    output[out_pos++] = *p++;
+                    output[out_pos++] = *p++;
+                } else {
+                    if (out_pos + 1 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
+                    output[out_pos++] = *p++;
+                }
+            }
+            if (*p == '"') {
+                if (out_pos + 1 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
+                output[out_pos++] = *p++;
+            }
+            continue;
+        }
+        if (*p == '\'') {
+            bol = 0;
+            if (out_pos + 1 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
+            output[out_pos++] = *p++;
+            while (*p && *p != '\'') {
+                if (*p == '\\' && *(p+1) != '\0') {
+                    if (out_pos + 2 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
+                    output[out_pos++] = *p++;
+                    output[out_pos++] = *p++;
+                } else {
+                    if (out_pos + 1 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
+                    output[out_pos++] = *p++;
+                }
+            }
+            if (*p == '\'') {
+                if (out_pos + 1 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
+                output[out_pos++] = *p++;
+            }
+            continue;
+        }
+
+        if (bol && *p == '#') {
+            bol = 0;
             p++;
             while (isspace(*p)) p++;
             
@@ -160,6 +220,7 @@ char *preprocess(const char *source, const char *filename) {
                         out_pos += inc_len;
                         free(preprocessed_inc);
                         free(inc_source);
+                        bol = 1; // Ensure BOL is reset after an included file
                     } else {
                         // printf("Warning: Could not find include file '%s'\n", inc_filename);
                     }
@@ -373,9 +434,13 @@ char *preprocess(const char *source, const char *filename) {
 
 skip_line:
             while (*p != '\n' && *p != '\0') p++;
+            if (*p == '\n') bol = 1;
         } else if (if_ptr >= 0 && !if_stack[if_ptr].active) {
+            if (*p == '\n') bol = 1;
+            else if (!isspace(*p)) bol = 0;
             p++;
         } else if (isalpha(*p) || *p == '_') {
+            bol = 0;
             const char *start = p;
             while (isalnum(*p) || *p == '_') p++;
             size_t len = p - start;
@@ -509,9 +574,12 @@ copy_normal:
                 out_size *= 2;
                 output = realloc(output, out_size);
             }
+            if (*p == '\n') bol = 1;
+            else if (!isspace(*p)) bol = 0;
             output[out_pos++] = *p++;
         }
     }
     output[out_pos] = '\0';
+    if (is_first_call) top_level = 1;
     return output;
 }

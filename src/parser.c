@@ -19,7 +19,7 @@ void parser_init(Parser *parser, Lexer *lexer) {
 }
 
 static void add_local(Parser *parser, const char *name, Type *type) {
-    if (name && parser->locals_count < 256) {
+    if (name && parser->locals_count < 4096) {
         parser->locals[parser->locals_count].name = strdup(name);
         parser->locals[parser->locals_count].type = type;
         parser->locals_count++;
@@ -27,7 +27,7 @@ static void add_local(Parser *parser, const char *name, Type *type) {
 }
 
 static void add_global(Parser *parser, const char *name, Type *type) {
-    if (name && parser->globals_count < 1024) {
+    if (name && parser->globals_count < 4096) {
         parser->globals[parser->globals_count].name = strdup(name);
         parser->globals[parser->globals_count].type = type;
         parser->globals_count++;
@@ -105,7 +105,7 @@ static ASTNode *parse_enum_body(Parser *parser, Type *type);
 static ASTNode *parse_statement(Parser *parser);
 static ASTNode *parse_block(Parser *parser);
 
-static Type *get_expr_type(Parser *parser, ASTNode *node) {
+static Type *parser_get_expr_type(Parser *parser, ASTNode *node) {
     if (!node) return NULL;
     if (node->type == AST_INTEGER) return type_int();
     if (node->type == AST_FLOAT) return node->resolved_type ? node->resolved_type : type_double();
@@ -114,16 +114,16 @@ static Type *get_expr_type(Parser *parser, ASTNode *node) {
         Type *t = find_variable_type(parser, node->data.identifier.name);
         return t ? t : type_int();
     } else if (node->type == AST_DEREF) {
-        Type *t = get_expr_type(parser, node->data.unary.expression);
+        Type *t = parser_get_expr_type(parser, node->data.unary.expression);
         return t ? t->data.ptr_to : NULL;
     } else if (node->type == AST_ADDR_OF) {
-        Type *t = get_expr_type(parser, node->data.unary.expression);
+        Type *t = parser_get_expr_type(parser, node->data.unary.expression);
         return type_ptr(t);
     } else if (node->type == AST_CALL) {
         Type *t = find_variable_type(parser, node->data.call.name);
         return t ? t : type_int();
     } else if (node->type == AST_MEMBER_ACCESS) {
-        Type *st = get_expr_type(parser, node->data.member_access.struct_expr);
+        Type *st = parser_get_expr_type(parser, node->data.member_access.struct_expr);
         if (node->data.member_access.is_arrow && st && st->kind == TYPE_PTR) {
             st = st->data.ptr_to;
         }
@@ -143,8 +143,8 @@ static Type *get_expr_type(Parser *parser, ASTNode *node) {
             op == TOKEN_AMPERSAND_AMPERSAND || op == TOKEN_PIPE_PIPE) {
             return type_int();
         }
-        Type *lt = get_expr_type(parser, node->data.binary_expr.left);
-        Type *rt = get_expr_type(parser, node->data.binary_expr.right);
+        Type *lt = parser_get_expr_type(parser, node->data.binary_expr.left);
+        Type *rt = parser_get_expr_type(parser, node->data.binary_expr.right);
         if (!lt) return rt;
         if (!rt) return lt;
         
@@ -159,7 +159,7 @@ static Type *get_expr_type(Parser *parser, ASTNode *node) {
         return lt;
     } else if (node->type == AST_NEG || node->type == AST_PRE_INC || node->type == AST_PRE_DEC || 
                node->type == AST_POST_INC || node->type == AST_POST_DEC) {
-        return get_expr_type(parser, node->data.unary.expression);
+        return parser_get_expr_type(parser, node->data.unary.expression);
     } else if (node->type == AST_NOT) {
         return type_int();
     } else if (node->type == AST_CAST) {
@@ -528,12 +528,12 @@ static ASTNode *parse_unary(Parser *parser) {
                 size = type->size;
             } else {
                 ASTNode *expr = parse_unary(parser);
-                Type *t = get_expr_type(parser, expr);
+                Type *t = parser_get_expr_type(parser, expr);
                 size = t ? t->size : 1; 
             }
         } else {
             ASTNode *expr = parse_unary(parser);
-            Type *t = get_expr_type(parser, expr);
+            Type *t = parser_get_expr_type(parser, expr);
             size = t ? t->size : 1;
         }
         
@@ -1014,7 +1014,7 @@ static ASTNode *parse_statement(Parser *parser) {
             name[parser->current_token.length] = '\0';
             parser_advance(parser);
 
-            if (parser->typedefs_count < 1024) {
+            if (parser->typedefs_count < 4096) {
                 parser->typedefs[parser->typedefs_count].name = name;
                 parser->typedefs[parser->typedefs_count].type = type;
                 parser->typedefs_count++;
@@ -1102,11 +1102,49 @@ static ASTNode *parse_statement(Parser *parser) {
                     parser_advance(parser);
                     add_local(parser, node->data.var_decl.name, node->resolved_type);
                     
+                    // Handle array: struct Foo arr[10];
+                    if (parser->current_token.type == TOKEN_LBRACKET) {
+                        parser_advance(parser);
+                        if (parser->current_token.type != TOKEN_RBRACKET) {
+                            ASTNode *size_expr = parse_expression(parser);
+                            int sz = eval_constant_expression(size_expr);
+                            node->resolved_type = type_array(node->resolved_type, sz);
+                        }
+                        parser_expect(parser, TOKEN_RBRACKET);
+                    }
+                    
                     if (parser->current_token.type == TOKEN_EQUAL) {
                         parser_advance(parser);
                         node->data.var_decl.initializer = parse_initializer(parser);
                     } else {
                         node->data.var_decl.initializer = NULL;
+                    }
+                    
+                    // Handle multi-variable: struct Foo a, b;
+                    while (parser->current_token.type == TOKEN_COMMA) {
+                        parser_advance(parser);
+                        Type *vt = type;
+                        while (parser->current_token.type == TOKEN_STAR) {
+                            vt = type_ptr(vt);
+                            parser_advance(parser);
+                        }
+                        if (parser->current_token.type == TOKEN_IDENTIFIER) {
+                            char *n2 = malloc(parser->current_token.length + 1);
+                            strncpy(n2, parser->current_token.start, parser->current_token.length);
+                            n2[parser->current_token.length] = '\0';
+                            parser_advance(parser);
+                            Type *t2 = vt;
+                            if (parser->current_token.type == TOKEN_LBRACKET) {
+                                parser_advance(parser);
+                                if (parser->current_token.type != TOKEN_RBRACKET) {
+                                    ASTNode *sz2 = parse_expression(parser);
+                                    t2 = type_array(t2, eval_constant_expression(sz2));
+                                }
+                                parser_expect(parser, TOKEN_RBRACKET);
+                            }
+                            add_local(parser, n2, t2);
+                            free(n2);
+                        }
                     }
                     parser_expect(parser, TOKEN_SEMICOLON);
                     return node;
@@ -1157,7 +1195,7 @@ static ASTNode *parse_statement(Parser *parser) {
             memcpy(node->data.var_decl.name, parser->current_token.start, parser->current_token.length);
             node->data.var_decl.name[parser->current_token.length] = '\0';
             parser_advance(parser);
-            if (parser->current_token.type == TOKEN_LBRACKET) {
+            while (parser->current_token.type == TOKEN_LBRACKET) {
                 parser_advance(parser);
                 if (parser->current_token.type != TOKEN_RBRACKET) {
                     ASTNode *size_expr = parse_expression(parser);
@@ -1165,7 +1203,8 @@ static ASTNode *parse_statement(Parser *parser) {
                     node->resolved_type = type_array(node->resolved_type, size);
                 }
                 parser_expect(parser, TOKEN_RBRACKET);
-            } else if (parser->current_token.type == TOKEN_LPAREN) {
+            }
+            if (parser->current_token.type == TOKEN_LPAREN) {
                 int depth = 0;
                 // Initial check and advance
                 if (parser->current_token.type == TOKEN_LPAREN) depth++;
@@ -1188,6 +1227,49 @@ static ASTNode *parse_statement(Parser *parser) {
                 node->data.var_decl.initializer = parse_initializer(parser);
             } else {
                 node->data.var_decl.initializer = NULL;
+            }
+            
+            // Handle multi-variable declarations: int a, b, c;
+            if (parser->current_token.type == TOKEN_COMMA) {
+                ASTNode *block = ast_create_node(AST_BLOCK);
+                ast_add_child(block, node);
+                while (parser->current_token.type == TOKEN_COMMA) {
+                    parser_advance(parser); // consume ','
+                    Type *var_type = type; // reuse base type
+                    while (parser->current_token.type == TOKEN_STAR) {
+                        var_type = type_ptr(var_type);
+                        parser_advance(parser);
+                    }
+                    ASTNode *extra = ast_create_node(AST_VAR_DECL);
+                    extra->resolved_type = var_type;
+                    extra->data.var_decl.is_static = is_static;
+                    extra->data.var_decl.is_extern = is_extern;
+                    if (parser->current_token.type == TOKEN_IDENTIFIER) {
+                        extra->data.var_decl.name = malloc(parser->current_token.length + 1);
+                        memcpy(extra->data.var_decl.name, parser->current_token.start, parser->current_token.length);
+                        extra->data.var_decl.name[parser->current_token.length] = '\0';
+                        parser_advance(parser);
+                        if (parser->current_token.type == TOKEN_LBRACKET) {
+                            parser_advance(parser);
+                            if (parser->current_token.type != TOKEN_RBRACKET) {
+                                ASTNode *sz = parse_expression(parser);
+                                int arr_size = eval_constant_expression(sz);
+                                extra->resolved_type = type_array(extra->resolved_type, arr_size);
+                            }
+                            parser_expect(parser, TOKEN_RBRACKET);
+                        }
+                        add_local(parser, extra->data.var_decl.name, extra->resolved_type);
+                        if (parser->current_token.type == TOKEN_EQUAL) {
+                            parser_advance(parser);
+                            extra->data.var_decl.initializer = parse_initializer(parser);
+                        } else {
+                            extra->data.var_decl.initializer = NULL;
+                        }
+                    }
+                    ast_add_child(block, extra);
+                }
+                parser_expect(parser, TOKEN_SEMICOLON);
+                return block;
             }
             parser_expect(parser, TOKEN_SEMICOLON);
             return node;
@@ -1461,6 +1543,29 @@ static ASTNode *parse_external_declaration(Parser *parser) {
             } else {
                 node->data.var_decl.initializer = NULL;
             }
+            
+            // Handle multi-variable declarations: int a, b;
+            while (parser->current_token.type == TOKEN_COMMA) {
+                parser_advance(parser); // consume ','
+                Type *var_type = type;
+                while (parser->current_token.type == TOKEN_STAR) {
+                    var_type = type_ptr(var_type);
+                    parser_advance(parser);
+                }
+                if (parser->current_token.type == TOKEN_IDENTIFIER) {
+                    char *extra_name = malloc(parser->current_token.length + 1);
+                    strncpy(extra_name, parser->current_token.start, parser->current_token.length);
+                    extra_name[parser->current_token.length] = '\0';
+                    parser_advance(parser);
+                    add_global(parser, extra_name, var_type);
+                    // skip initializer for additional decls in global scope for now
+                    if (parser->current_token.type == TOKEN_EQUAL) {
+                        parser_advance(parser);
+                        parse_initializer(parser); // consume but discard
+                    }
+                    free(extra_name);
+                }
+            }
             parser_expect(parser, TOKEN_SEMICOLON);
             return node;
         }
@@ -1549,7 +1654,7 @@ static ASTNode *parse_tag_body(Parser *parser, Type *type) {
 
     type->size = (type->kind == TYPE_UNION) ? max_size : current_offset;
     
-    if (type->data.struct_data.name && parser->structs_count < 1024) {
+    if (type->data.struct_data.name && parser->structs_count < 4096) {
         parser->structs[parser->structs_count++] = type;
     }
     
@@ -1578,7 +1683,7 @@ static ASTNode *parse_enum_body(Parser *parser, Type *type) {
                 }
             }
             
-            if (parser->enum_constants_count < 1024) {
+            if (parser->enum_constants_count < 4096) {
                 parser->enum_constants[parser->enum_constants_count].name = name;
                 parser->enum_constants[parser->enum_constants_count].value = current_value;
                 parser->enum_constants_count++;

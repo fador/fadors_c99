@@ -31,3 +31,7 @@ add_executable(fadors99 ${SOURCES})
 
 # Output directory for binaries
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+if(MSVC)
+    set_target_properties(fadors99 PROPERTIES LINK_FLAGS "/STACK:8000000")
+endif()

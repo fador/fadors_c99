@@ -42,7 +42,7 @@ static void compile_and_link(const char *asm_file, const char *exe_file, int use
         char linker_cmd[1024];
         sprintf(linker_cmd, linker_fmt, linker);
 
-        sprintf(cmd, "%s /nologo /entry:main /subsystem:console /out:\"%s\" \"%s\" kernel32.lib", linker_cmd, exe_file, obj_file);
+        sprintf(cmd, "%s /nologo /STACK:8000000 /entry:main /subsystem:console /out:\"%s\" \"%s\" kernel32.lib", linker_cmd, exe_file, obj_file);
         if (run_command(cmd) != 0) {
             printf("Error: Linking failed.\n");
             exit(1);
@@ -105,8 +105,11 @@ int main(int argc, char **argv) {
     fread(source, 1, size, f);
     source[size] = '\0';
     fclose(f);
+    printf("DEBUG: File read successfully, size=%ld\n", size); fflush(stdout);
     
+    printf("DEBUG: Starting preprocessing...\n"); fflush(stdout);
     char *preprocessed = preprocess(source, source_filename);
+    printf("DEBUG: Preprocessing complete, length=%zu\n", strlen(preprocessed)); fflush(stdout);
     free(source);
     
     // Debug: dump preprocessed source
@@ -116,8 +119,10 @@ int main(int argc, char **argv) {
         fclose(pf);
     }
     
+    printf("DEBUG: Initializing lexer...\n"); fflush(stdout);
     Lexer lexer;
     lexer_init(&lexer, preprocessed);
+    printf("DEBUG: Lexer initialized.\n"); fflush(stdout);
     
     Parser parser;
     parser_init(&parser, &lexer);
@@ -163,7 +168,7 @@ int main(int argc, char **argv) {
             char linker_cmd[1024];
             sprintf(linker_cmd, linker_fmt, linker);
 
-            sprintf(cmd, "%s /nologo /subsystem:console /out:\"%s\" \"%s\" kernel32.lib libcmt.lib legacy_stdio_definitions.lib", linker_cmd, exe_filename, obj_filename);
+            sprintf(cmd, "%s /nologo /STACK:8000000 /subsystem:console /out:\"%s\" \"%s\" kernel32.lib libcmt.lib legacy_stdio_definitions.lib", linker_cmd, exe_filename, obj_filename);
             
             if (run_command(cmd) != 0) {
                 printf("Error: Linking failed.\n");

@@ -1,9 +1,7 @@
 #ifndef _STRING_H
 #define _STRING_H
 
-#ifndef _STDDEF_H
-typedef unsigned int size_t;
-#endif
+#include <stddef.h>
 
 void *memcpy(void *dest, const void *src, size_t n);
 void *memset(void *s, int c, size_t n);
@@ -14,7 +12,7 @@ char *strcpy(char *dest, const char *src);
 char *strncpy(char *dest, const char *src, size_t n);
 char *strchr(const char *s, int c);
 char *strcat(char *dest, const char *src);
-char *strdup(const char *s);
 char *_strdup(const char *s);
+#define strdup _strdup
 
 #endif

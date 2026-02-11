@@ -40,7 +40,7 @@ typedef struct {
     int length;
 } StringLiteral;
 
-static StringLiteral string_literals[100];
+static StringLiteral string_literals[8192];
 static int string_literals_count = 0;
 
 void arch_x86_64_set_writer(COFFWriter *writer) {
@@ -95,8 +95,10 @@ void arch_x86_64_generate(ASTNode *program) {
     for (size_t i = 0; i < program->children_count; i++) {
         ASTNode *child = program->children[i];
         if (child->type == AST_FUNCTION) {
+            if (child->data.function.name) printf("Codegen: Function %s\n", child->data.function.name);
             gen_function(child);
         } else if (child->type == AST_VAR_DECL) {
+            if (child->data.var_decl.name) printf("Codegen: Global %s\n", child->data.var_decl.name);
             gen_global_decl(child);
         }
     }
@@ -138,13 +140,14 @@ typedef struct {
     Type *type;
 } LocalVar;
 
-static LocalVar locals[100];
+static LocalVar locals[8192];
 static int locals_count = 0;
 static int stack_offset = 0;
 
 static int get_local_offset(const char *name) {
-    for (int i = 0; i < locals_count; i++) {
-        if (strcmp(locals[i].name, name) == 0) {
+    if (!name) return 0;
+    for (int i = locals_count - 1; i >= 0; i--) {
+        if (locals[i].name && strcmp(locals[i].name, name) == 0) {
             return locals[i].offset;
         }
     }
@@ -152,8 +155,9 @@ static int get_local_offset(const char *name) {
 }
 
 static const char *get_local_label(const char *name) {
-    for (int i = 0; i < locals_count; i++) {
-        if (strcmp(locals[i].name, name) == 0) {
+    if (!name) return NULL;
+    for (int i = locals_count - 1; i >= 0; i--) {
+        if (locals[i].name && strcmp(locals[i].name, name) == 0) {
             return locals[i].label;
         }
     }
@@ -161,8 +165,9 @@ static const char *get_local_label(const char *name) {
 }
 
 static Type *get_local_type(const char *name) {
-    for (int i = 0; i < locals_count; i++) {
-        if (strcmp(locals[i].name, name) == 0) {
+    if (!name) return NULL;
+    for (int i = locals_count - 1; i >= 0; i--) {
+        if (locals[i].name && strcmp(locals[i].name, name) == 0) {
             return locals[i].type;
         }
     }
@@ -174,12 +179,12 @@ typedef struct {
     Type *type;
 } GlobalVar;
 
-static GlobalVar globals[100];
+static GlobalVar globals[8192];
 static int globals_count = 0;
 
 static Type *get_global_type(const char *name) {
     for (int i = 0; i < globals_count; i++) {
-        if (strcmp(globals[i].name, name) == 0) {
+        if (globals[i].name && name && strcmp(globals[i].name, name) == 0) {
             return globals[i].type;
         }
     }
@@ -188,6 +193,7 @@ static Type *get_global_type(const char *name) {
 
 static void gen_global_decl(ASTNode *node) {
     if (node->data.var_decl.is_extern) {
+        if (globals_count >= 8192) { fprintf(stderr, "Error: Too many globals\n"); exit(1); }
         globals[globals_count].name = node->data.var_decl.name;
         globals[globals_count].type = node->resolved_type;
         globals_count++;
@@ -201,8 +207,7 @@ static void gen_global_decl(ASTNode *node) {
         // Define symbol
         uint32_t offset = (uint32_t)obj_writer->data_section.size;
         int16_t section_num = 2; // .data
-        uint8_t storage_class = IMAGE_SYM_CLASS_EXTERNAL;
-        // If static, use IMAGE_SYM_CLASS_STATIC... but let's assume all globals are extern for now unless 'static' keyword is supported
+        uint8_t storage_class = node->data.var_decl.is_static ? IMAGE_SYM_CLASS_STATIC : IMAGE_SYM_CLASS_EXTERNAL;
         
         coff_writer_add_symbol(obj_writer, node->data.var_decl.name, offset, section_num, 0, storage_class);
         
@@ -276,6 +281,7 @@ static void gen_global_decl(ASTNode *node) {
         }
     }
     
+    if (globals_count >= 8192) { fprintf(stderr, "Error: Too many globals\n"); exit(1); }
     globals[globals_count].name = node->data.var_decl.name;
     globals[globals_count].type = node->resolved_type;
     globals_count++;
@@ -324,8 +330,9 @@ static void print_operand(Operand op) {
             fprintf(out, "]");
         }
     } else if (op.type == OP_LABEL) {
-        if (current_syntax == SYNTAX_ATT) fprintf(out, "%s(%%rip)", op.data.label);
-        else fprintf(out, "[%s]", op.data.label);
+        const char *lbl = op.data.label ? op.data.label : "null_label";
+        if (current_syntax == SYNTAX_ATT) fprintf(out, "%s(%%rip)", lbl);
+        else fprintf(out, "[%s]", lbl);
     }
 }
 
@@ -461,7 +468,8 @@ static Type *get_expr_type(ASTNode *node) {
         if (current_program) {
             for (size_t i = 0; i < current_program->children_count; i++) {
                 ASTNode *child = current_program->children[i];
-                if (child->type == AST_FUNCTION && strcmp(child->data.function.name, node->data.call.name) == 0) {
+                if (child->type == AST_FUNCTION && child->data.function.name && node->data.call.name && 
+                    strcmp(child->data.function.name, node->data.call.name) == 0) {
                     return child->resolved_type;
                 }
             }
@@ -474,7 +482,8 @@ static Type *get_expr_type(ASTNode *node) {
         }
         if (st && (st->kind == TYPE_STRUCT || st->kind == TYPE_UNION)) {
             for (int i = 0; i < st->data.struct_data.members_count; i++) {
-                if (strcmp(st->data.struct_data.members[i].name, node->data.member_access.member_name) == 0) {
+                if (st->data.struct_data.members[i].name && node->data.member_access.member_name &&
+                    strcmp(st->data.struct_data.members[i].name, node->data.member_access.member_name) == 0) {
                     return st->data.struct_data.members[i].type;
                 }
             }
@@ -529,31 +538,36 @@ static void gen_addr(ASTNode *node) {
     } else if (node->type == AST_DEREF) {
         gen_expression(node->data.unary.expression);
     } else if (node->type == AST_MEMBER_ACCESS) {
+        if (!node->data.member_access.struct_expr) { fprintf(stderr, "      Member: NULL struct_expr!\n"); return; }
         Type *st = get_expr_type(node->data.member_access.struct_expr);
         if (node->data.member_access.is_arrow) {
             gen_expression(node->data.member_access.struct_expr);
-            st = st->data.ptr_to;
+            if (st && st->kind == TYPE_PTR) st = st->data.ptr_to;
+            else { fprintf(stderr, "      Member: arrow on non-ptr!\n"); return; }
         } else {
             gen_addr(node->data.member_access.struct_expr);
         }
         
         if (st && (st->kind == TYPE_STRUCT || st->kind == TYPE_UNION)) {
             for (int i = 0; i < st->data.struct_data.members_count; i++) {
-                if (strcmp(st->data.struct_data.members[i].name, node->data.member_access.member_name) == 0) {
+                if (st->data.struct_data.members[i].name && node->data.member_access.member_name &&
+                    strcmp(st->data.struct_data.members[i].name, node->data.member_access.member_name) == 0) {
                     emit_inst2("add", op_imm(st->data.struct_data.members[i].offset), op_reg("rax"));
                     break;
                 }
             }
+        } else {
+            fprintf(stderr, "      Member: incomplete struct type!\n");
         }
     } else if (node->type == AST_ARRAY_ACCESS) {
+        if (!node->data.array_access.array || !node->data.array_access.index) { fprintf(stderr, "      Array: NULL child!\n"); return; }
         gen_expression(node->data.array_access.array);
         emit_inst1("pushq", op_reg("rax"));
         gen_expression(node->data.array_access.index);
         
         // Element size calculation
-        Type *array_type = node->data.array_access.array->resolved_type;
-        // Construct pointer type if needed or trust resolved_type
-        if (!array_type) array_type = get_expr_type(node->data.array_access.array);
+        Type *array_type = (node->data.array_access.array) ? node->data.array_access.array->resolved_type : NULL;
+        if (!array_type && node->data.array_access.array) array_type = get_expr_type(node->data.array_access.array);
 
         int element_size = 8;
         if (array_type) {
@@ -794,6 +808,10 @@ static void gen_binary_expr(ASTNode *node) {
 
 static void gen_expression(ASTNode *node) {
     if (!node) return;
+    // fprintf(stderr, "      GenExpr type=%d\n", node->type);
+    if (node->resolved_type == NULL) {
+        node->resolved_type = get_expr_type(node);
+    }
     if (node->type == AST_INTEGER) {
         emit_inst2("mov", op_imm(node->data.integer.value), op_reg("rax"));
         node->resolved_type = type_int();
@@ -840,8 +858,11 @@ static void gen_expression(ASTNode *node) {
             emit_inst2("movsd", op_label(label), op_reg("xmm0"));
         }
     } else if (node->type == AST_IDENTIFIER) {
+        if (!node->data.identifier.name) { fprintf(stderr, "      Ident: NULL NAME!\n"); return; }
+        fprintf(stderr, "      Ident: %s\n", node->data.identifier.name);
         const char *label = get_local_label(node->data.identifier.name);
         if (label) {
+            fprintf(stderr, "      Ident: local label %s\n", label);
             Type *t = get_local_type(node->data.identifier.name);
             if (t && t->kind == TYPE_ARRAY) {
                 emit_inst2("lea", op_label(label), op_reg("rax"));
@@ -856,11 +877,14 @@ static void gen_expression(ASTNode *node) {
         }
         int offset = get_local_offset(node->data.identifier.name);
         if (offset != 0) {
+            fprintf(stderr, "      Ident: local offset %d\n", offset);
             Type *t = get_local_type(node->data.identifier.name);
+            fprintf(stderr, "      Ident: type %p\n", (void*)t);
             if (t && t->kind == TYPE_ARRAY) {
                 // Array decays to pointer
                 emit_inst2("lea", op_mem("rbp", offset), op_reg("rax"));
             } else if (is_float_type(t)) {
+                fprintf(stderr, "      Ident: float type kind=%d\n", t->kind);
                 if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_mem("rbp", offset), op_reg("xmm0"));
                 else emit_inst2("movsd", op_mem("rbp", offset), op_reg("xmm0"));
             } else {
@@ -869,7 +893,9 @@ static void gen_expression(ASTNode *node) {
             node->resolved_type = t;
         } else {
             // Global
+            fprintf(stderr, "      Ident: global %s\n", node->data.identifier.name);
             Type *t = get_global_type(node->data.identifier.name);
+            fprintf(stderr, "      Ident: global type %p\n", (void*)t);
             if (t && t->kind == TYPE_ARRAY) {
                 emit_inst2("lea", op_label(node->data.identifier.name), op_reg("rax"));
             } else if (is_float_type(t)) {
@@ -977,42 +1003,44 @@ static void gen_expression(ASTNode *node) {
         }
         node->resolved_type = dst;
     } else if (node->type == AST_ASSIGN) {
+        if (!node->data.assign.left || !node->data.assign.value) { fprintf(stderr, "      Assign: NULL child!\n"); return; }
         gen_expression(node->data.assign.value);
         Type *t = get_expr_type(node->data.assign.left);
         if (node->data.assign.left->type == AST_IDENTIFIER) {
+            fprintf(stderr, "      Assign Ident: %s\n", node->data.assign.left->data.identifier.name ? node->data.assign.left->data.identifier.name : "NULL");
             int offset = get_local_offset(node->data.assign.left->data.identifier.name);
             if (offset != 0) {
                 if (is_float_type(t)) {
-                    if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm0"), op_mem("rbp", offset));
+                    if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm0"), op_mem("rbp", offset));
                     else emit_inst2("movsd", op_reg("xmm0"), op_mem("rbp", offset));
                 } else {
                     emit_inst2("mov", op_reg("rax"), op_mem("rbp", offset));
                 }
-            } else {
+            } else if (node->data.assign.left->data.identifier.name) {
                 // Global
                 if (is_float_type(t)) {
-                    if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm0"), op_label(node->data.assign.left->data.identifier.name));
+                    if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm0"), op_label(node->data.assign.left->data.identifier.name));
                     else emit_inst2("movsd", op_reg("xmm0"), op_label(node->data.assign.left->data.identifier.name));
                 } else {
                     emit_inst2("mov", op_reg("rax"), op_label(node->data.assign.left->data.identifier.name));
                 }
             }
         } else {
+            fprintf(stderr, "      Assign complex L-value\n");
             if (is_float_type(t)) {
                 emit_push_xmm("xmm0");
                 gen_addr(node->data.assign.left);
                 emit_pop_xmm("xmm1");
-                if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm1"), op_mem("rax", 0));
+                if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm1"), op_mem("rax", 0));
                 else emit_inst2("movsd", op_reg("xmm1"), op_mem("rax", 0));
-                // Result of assignment in xmm0
-                if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm1"), op_reg("xmm0"));
+                if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm1"), op_reg("xmm0"));
                 else emit_inst2("movsd", op_reg("xmm1"), op_reg("xmm0"));
             } else {
                 emit_inst1("pushq", op_reg("rax"));
                 gen_addr(node->data.assign.left);
                 emit_inst1("popq", op_reg("rcx"));
                 emit_inst2("mov", op_reg("rcx"), op_mem("rax", 0));
-                emit_inst2("mov", op_reg("rcx"), op_reg("rax")); // Result is the value
+                emit_inst2("mov", op_reg("rcx"), op_reg("rax"));
             }
         }
         node->resolved_type = t;
@@ -1104,6 +1132,7 @@ static void gen_expression(ASTNode *node) {
         // Win64 requires 32 bytes of shadow space
         emit_inst2("sub", op_imm(32), op_reg("rsp"));
         emit_inst1("call", op_label(node->data.call.name));
+        if (node->resolved_type == NULL) node->resolved_type = get_expr_type(node);
         emit_inst2("add", op_imm(32), op_reg("rsp"));
     } else if (node->type == AST_STRING) {
         char label[32];
@@ -1118,6 +1147,7 @@ static void gen_expression(ASTNode *node) {
             buffer_write_bytes(&obj_writer->data_section, node->data.string.value, len + 1);
             current_section = old_section;
         } else {
+            if (string_literals_count >= 8192) { fprintf(stderr, "Error: Too many string literals\n"); exit(1); }
             string_literals[string_literals_count].label = _strdup(label);
             string_literals[string_literals_count].value = malloc(len + 1);
             memcpy(string_literals[string_literals_count].value, node->data.string.value, len + 1);
@@ -1342,7 +1372,9 @@ static void gen_statement(ASTNode *node) {
                 size = 8;
             }
             stack_offset -= size;
+            fprintf(stderr, "    Var: %s offset=%d size=%d\n", node->data.var_decl.name ? node->data.var_decl.name : "NULL", stack_offset, size);
             
+            if (locals_count >= 8192) { fprintf(stderr, "Error: Too many locals\n"); exit(1); }
             locals[locals_count].name = node->data.var_decl.name;
             locals[locals_count].offset = stack_offset;
             locals[locals_count].label = NULL;
@@ -1479,18 +1511,17 @@ static void gen_statement(ASTNode *node) {
         char l_end[32];
         sprintf(l_end, ".L%d", label_end);
         
-        ASTNode *cases[50];
+        ASTNode *cases[1024];
         int case_count = 0;
         ASTNode *default_node = NULL;
         collect_cases(node->data.switch_stmt.body, cases, &case_count, &default_node);
         
         for (int i = 0; i < case_count; i++) {
             int l_num = label_count++;
-            cases[i]->data.case_stmt.value = cases[i]->data.case_stmt.value; // value is the constant
+            cases[i]->data.case_stmt.value = cases[i]->data.case_stmt.value; 
         }
         
-        // Let's restart: assign labels to cases first.
-        char case_labels[50][32];
+        char case_labels[1024][32];
         for (int i = 0; i < case_count; i++) {
             sprintf(case_labels[i], ".L%d", label_count++);
             // Emit comparison
@@ -1581,6 +1612,7 @@ static void gen_function(ASTNode *node) {
             }
             stack_offset -= size;
             
+            if (locals_count >= 8192) { fprintf(stderr, "Error: Too many locals\n"); exit(1); }
             locals[locals_count].name = param->data.var_decl.name;
             locals[locals_count].offset = stack_offset;
             locals[locals_count].label = NULL;

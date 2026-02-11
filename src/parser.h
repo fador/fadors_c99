@@ -17,23 +17,23 @@ typedef struct {
 typedef struct {
     Lexer *lexer;
     Token current_token;
-    TypedefEntry typedefs[1024];
+    TypedefEntry typedefs[4096];
     int typedefs_count;
-    EnumConstant enum_constants[1024];
+    EnumConstant enum_constants[4096];
     int enum_constants_count;
-    Type *structs[1024];
+    Type *structs[4096];
     int structs_count;
     
     struct {
         char *name;
         struct Type *type;
-    } locals[256];
+    } locals[4096];
     int locals_count;
 
     struct {
         char *name;
         struct Type *type;
-    } globals[1024];
+    } globals[4096];
     int globals_count;
 
     int packing_stack[16];

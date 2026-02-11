@@ -1,15 +1,14 @@
 #ifndef _STDIO_H
 #define _STDIO_H
 
-#ifndef _STDDEF_H
-typedef unsigned int size_t;
-#endif
+#include <stddef.h>
 
 typedef void FILE;
 
-extern FILE *stdin;
-extern FILE *stdout;
-extern FILE *stderr;
+extern FILE *__acrt_iob_func(int);
+#define stdin  (__acrt_iob_func(0))
+#define stdout (__acrt_iob_func(1))
+#define stderr (__acrt_iob_func(2))
 
 int printf(const char *format, ...);
 int sprintf(char *str, const char *format, ...);
