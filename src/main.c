@@ -11,6 +11,10 @@
 #include <string.h>
 
 // Manually declare needed Windows API to avoid header conflicts with coff.h
+#ifndef _MSC_VER
+#define __declspec(x)
+#define __stdcall
+#endif
 typedef void *HANDLE;
 #define STD_OUTPUT_HANDLE ((unsigned long)-11)
 #define STD_ERROR_HANDLE ((unsigned long)-12)
@@ -79,6 +83,7 @@ int main(int argc, char **argv) {
     unsigned long written;
     WriteFile(GetStdHandle(STD_ERROR_HANDLE), msg, (unsigned long)strlen(msg), &written, NULL);
     fprintf(stderr, "DEBUG: main entry point\n"); fflush(stderr);
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), "HB: Before argc check\n", 21, &written, NULL);
     if (argc < 2) {
         printf("Usage: %s <source.c> [--masm] [--obj] [-S]\n", argv[0]);
         return 1;
@@ -89,6 +94,7 @@ int main(int argc, char **argv) {
     int stop_at_asm = 0;
     int use_obj = 0;
     
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), "HB: Entering arg loop\n", 21, &written, NULL);
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--masm") == 0) {
             use_masm = 1;
@@ -106,17 +112,22 @@ int main(int argc, char **argv) {
         return 1;
     }
     
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), "HB: Before fopen\n", 17, &written, NULL);
     FILE *f = fopen(source_filename, "rb");
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), "HB: After fopen\n", 16, &written, NULL);
     if (!f) {
         printf("Could not open file %s\n", source_filename);
         return 1;
     }
     
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), "HB: Before fseek END\n", 21, &written, NULL);
     fseek(f, 0, SEEK_END);
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), "HB: After fseek END\n", 20, &written, NULL);
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
-    
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), "HB: Before malloc\n", 18, &written, NULL);
     char *source = malloc(size + 1);
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), "HB: After malloc\n", 17, &written, NULL);
     fread(source, 1, size, f);
     source[size] = '\0';
     fclose(f);

@@ -5,6 +5,9 @@
 
 typedef enum {
     TYPE_INT,
+    TYPE_SHORT,
+    TYPE_LONG,
+    TYPE_LONG_LONG,
     TYPE_CHAR,
     TYPE_PTR,
     TYPE_STRUCT,
@@ -39,6 +42,9 @@ typedef struct Type {
 } Type;
 
 Type *type_int();
+Type *type_short();
+Type *type_long();
+Type *type_long_long();
 Type *type_char();
 Type *type_float();
 Type *type_double();

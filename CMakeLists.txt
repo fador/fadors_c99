@@ -3,7 +3,7 @@ project(FadorsC99 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_C_EXTENSIONS OFF) # Ensure strict C99 compliance
+set(CMAKE_C_EXTENSIONS ON) # Enable extensions for anon structs/unions
 
 # Compiler warnings
 if(MSVC)

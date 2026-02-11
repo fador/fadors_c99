@@ -215,26 +215,38 @@ static Type *parse_type(Parser *parser) {
     
     if (parser->current_token.type == TOKEN_KEYWORD_UNSIGNED) {
         parser_advance(parser);
-        // unsigned int, unsigned char, unsigned long, or just unsigned (= unsigned int)
-        if (parser->current_token.type == TOKEN_KEYWORD_INT) {
-            parser_advance(parser);
-        } else if (parser->current_token.type == TOKEN_KEYWORD_CHAR) {
-            type = type_char();
-            parser_advance(parser);
-            goto done_base;
+        if (parser->current_token.type == TOKEN_KEYWORD_CHAR) {
+            parser_advance(parser); type = type_char(); goto done_base;
+        } else if (parser->current_token.type == TOKEN_KEYWORD_SHORT) {
+            parser_advance(parser); if (parser->current_token.type == TOKEN_KEYWORD_INT) parser_advance(parser);
+            type = type_short(); goto done_base;
         } else if (parser->current_token.type == TOKEN_KEYWORD_LONG) {
-            parser_advance(parser); // consume 'long'
-            if (parser->current_token.type == TOKEN_KEYWORD_LONG) parser_advance(parser); // unsigned long long
-            if (parser->current_token.type == TOKEN_KEYWORD_INT) parser_advance(parser); // unsigned long int
+            parser_advance(parser);
+            if (parser->current_token.type == TOKEN_KEYWORD_LONG) {
+                parser_advance(parser); if (parser->current_token.type == TOKEN_KEYWORD_INT) parser_advance(parser);
+                type = type_long_long(); goto done_base;
+            }
+            if (parser->current_token.type == TOKEN_KEYWORD_INT) parser_advance(parser);
+            type = type_long(); goto done_base;
+        } else if (parser->current_token.type == TOKEN_KEYWORD_INT) {
+            parser_advance(parser); type = type_int(); goto done_base;
         }
-        type = type_int(); // unsigned int -> int for now
+        type = type_int(); goto done_base;
+    } else if (parser->current_token.type == TOKEN_KEYWORD_SHORT) {
+        parser_advance(parser);
+        if (parser->current_token.type == TOKEN_KEYWORD_INT) parser_advance(parser);
+        type = type_short();
         goto done_base;
     } else if (parser->current_token.type == TOKEN_KEYWORD_LONG) {
         parser_advance(parser);
-        // long, long int, long long, long long int
-        if (parser->current_token.type == TOKEN_KEYWORD_LONG) parser_advance(parser); // long long
-        if (parser->current_token.type == TOKEN_KEYWORD_INT) parser_advance(parser); // long int
-        type = type_int(); // long -> int (both 8 bytes)
+        if (parser->current_token.type == TOKEN_KEYWORD_LONG) {
+            parser_advance(parser);
+            if (parser->current_token.type == TOKEN_KEYWORD_INT) parser_advance(parser);
+            type = type_long_long();
+        } else {
+            if (parser->current_token.type == TOKEN_KEYWORD_INT) parser_advance(parser);
+            type = type_long();
+        }
         goto done_base;
     } else if (parser->current_token.type == TOKEN_KEYWORD_INT) {
         type = type_int();
@@ -583,6 +595,7 @@ static ASTNode *parse_unary(Parser *parser) {
 static int is_token_type_start(Parser *parser, Token t) {
     TokenType type = t.type;
     return (type == TOKEN_KEYWORD_INT || 
+            type == TOKEN_KEYWORD_SHORT ||
             type == TOKEN_KEYWORD_CHAR || 
             type == TOKEN_KEYWORD_FLOAT || 
             type == TOKEN_KEYWORD_DOUBLE || 
@@ -594,6 +607,7 @@ static int is_token_type_start(Parser *parser, Token t) {
             type == TOKEN_KEYWORD_STATIC ||
             type == TOKEN_KEYWORD_UNSIGNED ||
             type == TOKEN_KEYWORD_LONG ||
+            type == TOKEN_KEYWORD_VOLATILE ||
             is_typedef_name(parser, t));
 }
 
@@ -1588,49 +1602,63 @@ static ASTNode *parse_tag_body(Parser *parser, Type *type) {
     type->data.struct_data.members_count = 0;
     
     while (parser->current_token.type != TOKEN_RBRACE && parser->current_token.type != TOKEN_EOF) {
-        Type *member_type = parse_type(parser);
-        if (parser->current_token.type == TOKEN_IDENTIFIER) {
-            ASTNode *member = ast_create_node(AST_VAR_DECL);
-            member->data.var_decl.name = malloc(parser->current_token.length + 1);
-            strncpy(member->data.var_decl.name, parser->current_token.start, parser->current_token.length);
-            member->data.var_decl.name[parser->current_token.length] = '\0';
-            parser_advance(parser);
-            
-            // Array support: int a[10];
-            if (parser->current_token.type == TOKEN_LBRACKET) {
+        Type *base_type = parse_type(parser);
+        
+        while (1) {
+            Type *member_type = base_type;
+            while (parser->current_token.type == TOKEN_STAR) {
+                member_type = type_ptr(member_type);
                 parser_advance(parser);
-                if (parser->current_token.type != TOKEN_RBRACKET) {
-                    ASTNode *size_expr = parse_expression(parser);
-                    int size = eval_constant_expression(size_expr);
-                    member_type = type_array(member_type, size);
-                }
-                parser_expect(parser, TOKEN_RBRACKET);
             }
-            
-            member->resolved_type = member_type;
-            ast_add_child(node, member);
-            
-            // Add to type members
-            type->data.struct_data.members[type->data.struct_data.members_count].name = strdup(member->data.var_decl.name);
-            type->data.struct_data.members[type->data.struct_data.members_count].type = member_type;
-            
-            if (type->kind == TYPE_UNION) {
-                type->data.struct_data.members[type->data.struct_data.members_count].offset = 0;
-                if (member_type->size > max_size) max_size = member_type->size;
-            } else {
-                int pack = parser->packing_stack[parser->packing_ptr];
-                int align = member_type->size;
-                if (align > pack) align = pack;
-                if (align > 0) {
-                    current_offset = (current_offset + align - 1) & ~(align - 1);
+
+            if (parser->current_token.type == TOKEN_IDENTIFIER) {
+                ASTNode *member = ast_create_node(AST_VAR_DECL);
+                member->data.var_decl.name = malloc(parser->current_token.length + 1);
+                strncpy(member->data.var_decl.name, parser->current_token.start, parser->current_token.length);
+                member->data.var_decl.name[parser->current_token.length] = '\0';
+                parser_advance(parser);
+                
+                // Array support: int a[10];
+                if (parser->current_token.type == TOKEN_LBRACKET) {
+                    parser_advance(parser);
+                    if (parser->current_token.type != TOKEN_RBRACKET) {
+                        ASTNode *size_expr = parse_expression(parser);
+                        int size = eval_constant_expression(size_expr);
+                        member_type = type_array(member_type, size);
+                    }
+                    parser_expect(parser, TOKEN_RBRACKET);
                 }
-                type->data.struct_data.members[type->data.struct_data.members_count].offset = current_offset;
-                current_offset += member_type->size;
+                
+                member->resolved_type = member_type;
+                ast_add_child(node, member);
+                
+                // Add to type members
+                type->data.struct_data.members[type->data.struct_data.members_count].name = strdup(member->data.var_decl.name);
+                type->data.struct_data.members[type->data.struct_data.members_count].type = member_type;
+                
+                if (type->kind == TYPE_UNION) {
+                    type->data.struct_data.members[type->data.struct_data.members_count].offset = 0;
+                    if (member_type->size > max_size) max_size = member_type->size;
+                } else {
+                    int pack = parser->packing_stack[parser->packing_ptr];
+                    int align = member_type->size;
+                    if (align > pack) align = pack;
+                    if (align > 0) {
+                        current_offset = (current_offset + align - 1) & ~(align - 1);
+                    }
+                    type->data.struct_data.members[type->data.struct_data.members_count].offset = current_offset;
+                    current_offset += member_type->size;
+                }
+                type->data.struct_data.members_count++;
+                
+                if (parser->current_token.type == TOKEN_COMMA) {
+                    parser_advance(parser);
+                    continue;
+                }
             }
-            type->data.struct_data.members_count++;
-            
-            parser_expect(parser, TOKEN_SEMICOLON);
+            break;
         }
+        parser_expect(parser, TOKEN_SEMICOLON);
     }
     parser_expect(parser, TOKEN_RBRACE);
     

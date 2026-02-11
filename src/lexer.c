@@ -83,6 +83,7 @@ static TokenType identifier_type(const char *start, size_t length) {
     if (check_keyword(start, length, "long", TOKEN_KEYWORD_LONG) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_LONG;
     if (check_keyword(start, length, "auto", TOKEN_KEYWORD_AUTO) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_AUTO;
     if (check_keyword(start, length, "register", TOKEN_KEYWORD_REGISTER) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_REGISTER;
+    if (check_keyword(start, length, "short", TOKEN_KEYWORD_SHORT) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_SHORT;
     if (check_keyword(start, length, "goto", TOKEN_KEYWORD_GOTO) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_GOTO;
     if (check_keyword(start, length, "do", TOKEN_KEYWORD_DO) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_DO;
     if (check_keyword(start, length, "continue", TOKEN_KEYWORD_CONTINUE) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_CONTINUE;

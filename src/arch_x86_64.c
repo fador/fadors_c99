@@ -102,7 +102,24 @@ void arch_x86_64_generate(ASTNode *program) {
             gen_global_decl(child);
         }
     }
-    if (!obj_writer) {
+    if (obj_writer) {
+         // Emit string literals for COFF
+         Section old_section = current_section;
+         current_section = SECTION_DATA;
+         
+         for (int i = 0; i < string_literals_count; i++) {
+             // Define symbol for the label
+             // Labels like .Lstr0 are static
+             uint32_t offset = (uint32_t)obj_writer->data_section.size;
+             coff_writer_add_symbol(obj_writer, string_literals[i].label, offset, 2 /* .data */, 0, IMAGE_SYM_CLASS_STATIC);
+             
+             // Write string data
+             buffer_write_bytes(&obj_writer->data_section, string_literals[i].value, string_literals[i].length);
+             uint8_t zero = 0;
+             buffer_write_bytes(&obj_writer->data_section, &zero, 1);
+         }
+         current_section = old_section;
+    } else {
         if (string_literals_count > 0) {
             if (current_syntax == SYNTAX_INTEL) {
                 fprintf(out, "_TEXT ENDS\n_DATA SEGMENT\n");
@@ -226,8 +243,25 @@ static void gen_global_decl(ASTNode *node) {
                 buffer_write_bytes(&obj_writer->data_section, &val, 8);
             }
         } else {
-            // Uninitialized or zero-initialized
-            buffer_pad(&obj_writer->data_section, size);
+            ASTNode *init = node->data.var_decl.initializer;
+            int handled = 0;
+            if (init && init->type == AST_ADDR_OF) {
+                 ASTNode *target = init->data.unary.expression;
+                 if (target && target->type == AST_IDENTIFIER) {
+                     char *target_name = target->data.identifier.name;
+                     int16_t target_section_num = 0;
+                     uint8_t target_storage_class = IMAGE_SYM_CLASS_EXTERNAL;
+                     uint32_t sym_idx = coff_writer_add_symbol(obj_writer, target_name, 0, target_section_num, 0, target_storage_class);
+                     uint32_t reloc_offset = (uint32_t)obj_writer->data_section.size;
+                     coff_writer_add_reloc(obj_writer, reloc_offset, sym_idx, 1, 2);
+                     uint64_t zero = 0;
+                     buffer_write_bytes(&obj_writer->data_section, &zero, 8);
+                     handled = 1;
+                 }
+            }
+            if (!handled) {
+                buffer_pad(&obj_writer->data_section, size);
+            }
         }
         
         current_section = old_section;
@@ -357,7 +391,7 @@ static void emit_inst1(const char *mnemonic, Operand op1) {
                 strcmp(mnemonic, "ja") == 0 || strcmp(mnemonic, "jae") == 0) offset = 2;
             else if (strcmp(mnemonic, "call") == 0 || strcmp(mnemonic, "jmp") == 0) offset = 1;
             
-            coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + offset, sym_idx, IMAGE_REL_AMD64_REL32);
+            coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + offset, sym_idx, IMAGE_REL_AMD64_REL32, 1);
         }
         encode_inst1(&obj_writer->text_section, mnemonic, op1);
         return;
@@ -401,12 +435,12 @@ static void emit_inst2(const char *mnemonic, Operand op1, Operand op2) {
         if (op1.type == OP_LABEL) {
             uint8_t storage_class = (op1.data.label[0] == '.') ? IMAGE_SYM_CLASS_STATIC : IMAGE_SYM_CLASS_EXTERNAL;
             uint32_t sym_idx = coff_writer_add_symbol(obj_writer, op1.data.label, 0, 0, 0, storage_class);
-            coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + offset_in_inst, sym_idx, IMAGE_REL_AMD64_REL32);
+            coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + offset_in_inst, sym_idx, IMAGE_REL_AMD64_REL32, 1);
         }
         if (op2.type == OP_LABEL) {
             uint8_t storage_class = (op2.data.label[0] == '.') ? IMAGE_SYM_CLASS_STATIC : IMAGE_SYM_CLASS_EXTERNAL;
             uint32_t sym_idx = coff_writer_add_symbol(obj_writer, op2.data.label, 0, 0, 0, storage_class);
-            coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + offset_in_inst, sym_idx, IMAGE_REL_AMD64_REL32);
+            coff_writer_add_reloc(obj_writer, (uint32_t)obj_writer->text_section.size + offset_in_inst, sym_idx, IMAGE_REL_AMD64_REL32, 1);
         }
         encode_inst2(&obj_writer->text_section, mnemonic, op1, op2);
         return;
@@ -710,13 +744,14 @@ static void gen_binary_expr(ASTNode *node) {
             } else {
                 node->resolved_type = left_type ? left_type : right_type;
             }
-            emit_inst2("add", op_reg("rcx"), op_reg("rax")); 
+            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("addl", op_reg("rcx"), op_reg("rax"));
+            else emit_inst2("add", op_reg("rcx"), op_reg("rax"));
             break;
         case TOKEN_MINUS: 
             if ((left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY)) && 
                 (right_type && (right_type->kind == TYPE_INT || right_type->kind == TYPE_CHAR))) {
                 if (size > 1) emit_inst2("imul", op_imm(size), op_reg("rcx"));
-                emit_inst2("sub", op_reg("rcx"), op_reg("rax"));
+                emit_inst2("sub", op_reg("rcx"), op_reg("rax")); // Pointers are 64-bit
                 node->resolved_type = left_type;
             } else if ((left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY)) && 
                        (right_type && (right_type->kind == TYPE_PTR || right_type->kind == TYPE_ARRAY))) {
@@ -728,12 +763,14 @@ static void gen_binary_expr(ASTNode *node) {
                 }
                 node->resolved_type = type_int();
             } else {
-                emit_inst2("sub", op_reg("rcx"), op_reg("rax"));
+                if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("subl", op_reg("rcx"), op_reg("rax"));
+                else emit_inst2("sub", op_reg("rcx"), op_reg("rax"));
                 node->resolved_type = left_type;
             }
             break;
         case TOKEN_STAR:  
-            emit_inst2("imul", op_reg("rcx"), op_reg("rax")); 
+            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("imull", op_reg("rcx"), op_reg("rax"));
+            else emit_inst2("imul", op_reg("rcx"), op_reg("rax")); 
             node->resolved_type = left_type;
             break;
         case TOKEN_SLASH:
@@ -746,15 +783,18 @@ static void gen_binary_expr(ASTNode *node) {
             node->resolved_type = left_type;
             break;
         case TOKEN_AMPERSAND:
-            emit_inst2("and", op_reg("rcx"), op_reg("rax"));
+            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("andl", op_reg("rcx"), op_reg("rax"));
+            else emit_inst2("and", op_reg("rcx"), op_reg("rax"));
             node->resolved_type = left_type;
             break;
         case TOKEN_PIPE:
-            emit_inst2("or", op_reg("rcx"), op_reg("rax"));
+            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("orl", op_reg("rcx"), op_reg("rax"));
+            else emit_inst2("or", op_reg("rcx"), op_reg("rax"));
             node->resolved_type = left_type;
             break;
         case TOKEN_CARET:
-            emit_inst2("xor", op_reg("rcx"), op_reg("rax"));
+            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("xorl", op_reg("rcx"), op_reg("rax"));
+            else emit_inst2("xor", op_reg("rcx"), op_reg("rax"));
             node->resolved_type = left_type;
             break;
         case TOKEN_LESS_LESS:
@@ -766,35 +806,25 @@ static void gen_binary_expr(ASTNode *node) {
             node->resolved_type = left_type;
             break;
         case TOKEN_EQUAL_EQUAL:
-            emit_inst2("cmp", op_reg("rcx"), op_reg("rax"));
-            emit_inst1("sete", op_reg("al"));
-            emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
-            break;
         case TOKEN_BANG_EQUAL:
-            emit_inst2("cmp", op_reg("rcx"), op_reg("rax"));
-            emit_inst1("setne", op_reg("al"));
-            emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
-            break;
         case TOKEN_LESS:
-            emit_inst2("cmp", op_reg("rcx"), op_reg("rax"));
-            emit_inst1("setl", op_reg("al"));
-            emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
-            break;
         case TOKEN_GREATER:
-            emit_inst2("cmp", op_reg("rcx"), op_reg("rax"));
-            emit_inst1("setg", op_reg("al"));
-            emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
-            break;
         case TOKEN_LESS_EQUAL:
-            emit_inst2("cmp", op_reg("rcx"), op_reg("rax"));
-            emit_inst1("setle", op_reg("al"));
+        case TOKEN_GREATER_EQUAL: {
+            Type *cmp_type = left_type ? left_type : right_type;
+            if (cmp_type && cmp_type->size == 4) emit_inst2("cmpl", op_reg("rcx"), op_reg("rax"));
+            else emit_inst2("cmp", op_reg("rcx"), op_reg("rax"));
+            
+            if (node->data.binary_expr.op == TOKEN_EQUAL_EQUAL) emit_inst1("sete", op_reg("al"));
+            else if (node->data.binary_expr.op == TOKEN_BANG_EQUAL) emit_inst1("setne", op_reg("al"));
+            else if (node->data.binary_expr.op == TOKEN_LESS) emit_inst1("setl", op_reg("al"));
+            else if (node->data.binary_expr.op == TOKEN_GREATER) emit_inst1("setg", op_reg("al"));
+            else if (node->data.binary_expr.op == TOKEN_LESS_EQUAL) emit_inst1("setle", op_reg("al"));
+            else if (node->data.binary_expr.op == TOKEN_GREATER_EQUAL) emit_inst1("setge", op_reg("al"));
+            
             emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
             break;
-        case TOKEN_GREATER_EQUAL:
-            emit_inst2("cmp", op_reg("rcx"), op_reg("rax"));
-            emit_inst1("setge", op_reg("al"));
-            emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
-            break;
+        }
         default: break;
     }
 }
@@ -863,7 +893,10 @@ static void gen_expression(ASTNode *node) {
                 if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_label(label), op_reg("xmm0"));
                 else emit_inst2("movsd", op_label(label), op_reg("xmm0"));
             } else {
-                emit_inst2("mov", op_label(label), op_reg("rax"));
+                if (t && t->size == 1) emit_inst2("movzbq", op_label(label), op_reg("rax"));
+                else if (t && t->size == 2) emit_inst2("movzwq", op_label(label), op_reg("rax"));
+                else if (t && t->size == 4) emit_inst2("movl", op_label(label), op_reg("rax"));
+                else emit_inst2("mov", op_label(label), op_reg("rax"));
             }
             node->resolved_type = t;
             return;
@@ -881,7 +914,10 @@ static void gen_expression(ASTNode *node) {
                 if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_mem("rbp", offset), op_reg("xmm0"));
                 else emit_inst2("movsd", op_mem("rbp", offset), op_reg("xmm0"));
             } else {
-                emit_inst2("mov", op_mem("rbp", offset), op_reg("rax"));
+                if (t && t->size == 1) emit_inst2("movzbq", op_mem("rbp", offset), op_reg("rax"));
+                else if (t && t->size == 2) emit_inst2("movzwq", op_mem("rbp", offset), op_reg("rax"));
+                else if (t && t->size == 4) emit_inst2("movl", op_mem("rbp", offset), op_reg("rax"));
+                else emit_inst2("mov", op_mem("rbp", offset), op_reg("rax"));
             }
             node->resolved_type = t;
         } else {
@@ -895,7 +931,10 @@ static void gen_expression(ASTNode *node) {
                 if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_label(node->data.identifier.name), op_reg("xmm0"));
                 else emit_inst2("movsd", op_label(node->data.identifier.name), op_reg("xmm0"));
             } else {
-                emit_inst2("mov", op_label(node->data.identifier.name), op_reg("rax"));
+                if (t && t->size == 1) emit_inst2("movzbq", op_label(node->data.identifier.name), op_reg("rax"));
+                else if (t && t->size == 2) emit_inst2("movzwq", op_label(node->data.identifier.name), op_reg("rax"));
+                else if (t && t->size == 4) emit_inst2("movl", op_label(node->data.identifier.name), op_reg("rax"));
+                else emit_inst2("mov", op_label(node->data.identifier.name), op_reg("rax"));
             }
             node->resolved_type = t;
         }
@@ -907,6 +946,10 @@ static void gen_expression(ASTNode *node) {
             else emit_inst2("movsd", op_mem("rax", 0), op_reg("xmm0"));
         } else if (t && t->size == 1) {
             emit_inst2("movzbq", op_mem("rax", 0), op_reg("rax"));
+        } else if (t && t->size == 2) {
+            emit_inst2("movzwq", op_mem("rax", 0), op_reg("rax"));
+        } else if (t && t->size == 4) {
+            emit_inst2("movl", op_mem("rax", 0), op_reg("rax"));
         } else {
             emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
         }
@@ -1007,7 +1050,10 @@ static void gen_expression(ASTNode *node) {
                     if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm0"), op_label(label));
                     else emit_inst2("movsd", op_reg("xmm0"), op_label(label));
                 } else {
-                    emit_inst2("mov", op_reg("rax"), op_label(label));
+                    if (t && t->size == 1) emit_inst2("movb", op_reg("al"), op_label(label));
+                    else if (t && t->size == 2) emit_inst2("movw", op_reg("ax"), op_label(label));
+                    else if (t && t->size == 4) emit_inst2("movl", op_reg("eax"), op_label(label));
+                    else emit_inst2("mov", op_reg("rax"), op_label(label));
                 }
                 return;
             }
@@ -1017,7 +1063,10 @@ static void gen_expression(ASTNode *node) {
                     if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm0"), op_mem("rbp", offset));
                     else emit_inst2("movsd", op_reg("xmm0"), op_mem("rbp", offset));
                 } else {
-                    emit_inst2("mov", op_reg("rax"), op_mem("rbp", offset));
+                    if (t && t->size == 1) emit_inst2("movb", op_reg("al"), op_mem("rbp", offset));
+                    else if (t && t->size == 2) emit_inst2("movw", op_reg("ax"), op_mem("rbp", offset));
+                    else if (t && t->size == 4) emit_inst2("movl", op_reg("eax"), op_mem("rbp", offset));
+                    else emit_inst2("mov", op_reg("rax"), op_mem("rbp", offset));
                 }
             } else if (node->data.assign.left->data.identifier.name) {
                 // Global
@@ -1025,7 +1074,10 @@ static void gen_expression(ASTNode *node) {
                     if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm0"), op_label(node->data.assign.left->data.identifier.name));
                     else emit_inst2("movsd", op_reg("xmm0"), op_label(node->data.assign.left->data.identifier.name));
                 } else {
-                    emit_inst2("mov", op_reg("rax"), op_label(node->data.assign.left->data.identifier.name));
+                    if (t && t->size == 1) emit_inst2("movb", op_reg("al"), op_label(node->data.assign.left->data.identifier.name));
+                    else if (t && t->size == 2) emit_inst2("movw", op_reg("ax"), op_label(node->data.assign.left->data.identifier.name));
+                    else if (t && t->size == 4) emit_inst2("movl", op_reg("eax"), op_label(node->data.assign.left->data.identifier.name));
+                    else emit_inst2("mov", op_reg("rax"), op_label(node->data.assign.left->data.identifier.name));
                 }
             }
         } else {
@@ -1042,7 +1094,10 @@ static void gen_expression(ASTNode *node) {
                 emit_inst1("pushq", op_reg("rax"));
                 gen_addr(node->data.assign.left);
                 emit_inst1("popq", op_reg("rcx"));
-                emit_inst2("mov", op_reg("rcx"), op_mem("rax", 0));
+                if (t && t->size == 1) emit_inst2("movb", op_reg("cl"), op_mem("rax", 0));
+                else if (t && t->size == 2) emit_inst2("movw", op_reg("cx"), op_mem("rax", 0));
+                else if (t && t->size == 4) emit_inst2("movl", op_reg("ecx"), op_mem("rax", 0));
+                else emit_inst2("mov", op_reg("rcx"), op_mem("rax", 0));
                 emit_inst2("mov", op_reg("rcx"), op_reg("rax"));
             }
         }
@@ -1127,7 +1182,7 @@ static void gen_expression(ASTNode *node) {
             stack_offset -= padding;
         }
 
-        for (size_t i = 0; i < node->children_count; i++) {
+        for (int i = (int)node->children_count - 1; i >= 0; i--) {
             gen_expression(node->children[i]);
             if (is_float_type(node->children[i]->resolved_type)) {
                 emit_push_xmm("xmm0");

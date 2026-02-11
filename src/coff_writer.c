@@ -16,9 +16,13 @@ void coff_writer_init(COFFWriter *w) {
     w->symbols_capacity = 16;
     w->symbols = malloc(w->symbols_capacity * sizeof(SymbolEntry));
     
-    w->relocs_count = 0;
-    w->relocs_capacity = 16;
-    w->relocs = malloc(w->relocs_capacity * sizeof(RelocEntry));
+    w->text_relocs_count = 0;
+    w->text_relocs_capacity = 16;
+    w->text_relocs = malloc(w->text_relocs_capacity * sizeof(RelocEntry));
+    
+    w->data_relocs_count = 0;
+    w->data_relocs_capacity = 16;
+    w->data_relocs = malloc(w->data_relocs_capacity * sizeof(RelocEntry));
 }
 
 void coff_writer_free(COFFWriter *w) {
@@ -32,9 +36,8 @@ void coff_writer_free(COFFWriter *w) {
         }
         free(w->symbols);
     }
-    if (w->relocs) {
-        free(w->relocs);
-    }
+    free(w->text_relocs);
+    free(w->data_relocs);
 }
 
 int32_t coff_writer_find_symbol(COFFWriter *w, const char *name) {
@@ -73,16 +76,26 @@ uint32_t coff_writer_add_symbol(COFFWriter *w, const char *name, uint32_t value,
     return index;
 }
 
-void coff_writer_add_reloc(COFFWriter *w, uint32_t virtual_address, uint32_t symbol_index, uint16_t type) {
-    if (w->relocs_count >= w->relocs_capacity) {
-        w->relocs_capacity *= 2;
-        w->relocs = realloc(w->relocs, w->relocs_capacity * sizeof(RelocEntry));
+void coff_writer_add_reloc(COFFWriter *w, uint32_t virtual_address, uint32_t symbol_index, uint16_t type, int section) {
+    if (section == 1) {
+        if (w->text_relocs_count >= w->text_relocs_capacity) {
+            w->text_relocs_capacity *= 2;
+            w->text_relocs = realloc(w->text_relocs, w->text_relocs_capacity * sizeof(RelocEntry));
+        }
+        w->text_relocs[w->text_relocs_count].virtual_address = virtual_address;
+        w->text_relocs[w->text_relocs_count].symbol_index = symbol_index;
+        w->text_relocs[w->text_relocs_count].type = type;
+        w->text_relocs_count++;
+    } else {
+        if (w->data_relocs_count >= w->data_relocs_capacity) {
+            w->data_relocs_capacity *= 2;
+            w->data_relocs = realloc(w->data_relocs, w->data_relocs_capacity * sizeof(RelocEntry));
+        }
+        w->data_relocs[w->data_relocs_count].virtual_address = virtual_address;
+        w->data_relocs[w->data_relocs_count].symbol_index = symbol_index;
+        w->data_relocs[w->data_relocs_count].type = type;
+        w->data_relocs_count++;
     }
-    
-    w->relocs[w->relocs_count].virtual_address = virtual_address;
-    w->relocs[w->relocs_count].symbol_index = symbol_index;
-    w->relocs[w->relocs_count].type = type;
-    w->relocs_count++;
 }
 
 void coff_writer_write(COFFWriter *w, const char *filename) {
@@ -109,13 +122,20 @@ void coff_writer_write(COFFWriter *w, const char *filename) {
     if (w->text_section.size > 0) {
         text_data_pos = current_data_pos;
         current_data_pos += (uint32_t)w->text_section.size;
-        text_relocs_pos = current_data_pos;
-        current_data_pos += (uint32_t)w->relocs_count * sizeof(COFFRelocation);
+        if (w->text_relocs_count > 0) {
+            text_relocs_pos = current_data_pos;
+            current_data_pos += (uint32_t)w->text_relocs_count * sizeof(COFFRelocation);
+        }
     }
     
+    uint32_t data_relocs_pos = 0;
     if (w->data_section.size > 0) {
         data_data_pos = current_data_pos;
         current_data_pos += (uint32_t)w->data_section.size;
+        if (w->data_relocs_count > 0) {
+            data_relocs_pos = current_data_pos;
+            current_data_pos += (uint32_t)w->data_relocs_count * sizeof(COFFRelocation);
+        }
     }
     
     header.PointerToSymbolTable = current_data_pos;
@@ -130,7 +150,7 @@ void coff_writer_write(COFFWriter *w, const char *filename) {
         text_sh.SizeOfRawData = (uint32_t)w->text_section.size;
         text_sh.PointerToRawData = text_data_pos;
         text_sh.PointerToRelocations = text_relocs_pos;
-        text_sh.NumberOfRelocations = (uint16_t)w->relocs_count;
+        text_sh.NumberOfRelocations = (uint16_t)w->text_relocs_count;
         text_sh.Characteristics = IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE | IMAGE_SCN_MEM_READ | IMAGE_SCN_ALIGN_16BYTES;
         fwrite(&text_sh, sizeof(text_sh), 1, f);
         section_idx++;
@@ -141,6 +161,8 @@ void coff_writer_write(COFFWriter *w, const char *filename) {
         memcpy(data_sh.Name, ".data\0\0\0", 8);
         data_sh.SizeOfRawData = (uint32_t)w->data_section.size;
         data_sh.PointerToRawData = data_data_pos;
+        data_sh.PointerToRelocations = data_relocs_pos;
+        data_sh.NumberOfRelocations = (uint16_t)w->data_relocs_count;
         data_sh.Characteristics = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE | IMAGE_SCN_ALIGN_4BYTES;
         fwrite(&data_sh, sizeof(data_sh), 1, f);
     }
@@ -148,17 +170,24 @@ void coff_writer_write(COFFWriter *w, const char *filename) {
     // Write Section Data
     if (w->text_section.size > 0) {
         fwrite(w->text_section.data, 1, w->text_section.size, f);
-        for (size_t i = 0; i < w->relocs_count; i++) {
+        for (size_t i = 0; i < w->text_relocs_count; i++) {
             COFFRelocation r;
-            r.VirtualAddress = w->relocs[i].virtual_address;
-            r.SymbolTableIndex = w->relocs[i].symbol_index;
-            r.Type = w->relocs[i].type;
+            r.VirtualAddress = w->text_relocs[i].virtual_address;
+            r.SymbolTableIndex = w->text_relocs[i].symbol_index;
+            r.Type = w->text_relocs[i].type;
             fwrite(&r, sizeof(r), 1, f);
         }
     }
     
     if (w->data_section.size > 0) {
         fwrite(w->data_section.data, 1, w->data_section.size, f);
+        for (size_t i = 0; i < w->data_relocs_count; i++) {
+            COFFRelocation r;
+            r.VirtualAddress = w->data_relocs[i].virtual_address;
+            r.SymbolTableIndex = w->data_relocs[i].symbol_index;
+            r.Type = w->data_relocs[i].type;
+            fwrite(&r, sizeof(r), 1, f);
+        }
     }
     
     // Symbol Table

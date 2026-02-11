@@ -5,7 +5,31 @@
 Type *type_int() {
     Type *t = malloc(sizeof(Type));
     t->kind = TYPE_INT;
-    t->size = 8; // simplified
+    t->size = 4;
+    t->array_len = 0;
+    return t;
+}
+
+Type *type_short() {
+    Type *t = malloc(sizeof(Type));
+    t->kind = TYPE_SHORT;
+    t->size = 2;
+    t->array_len = 0;
+    return t;
+}
+
+Type *type_long() {
+    Type *t = malloc(sizeof(Type));
+    t->kind = TYPE_LONG;
+    t->size = 4;
+    t->array_len = 0;
+    return t;
+}
+
+Type *type_long_long() {
+    Type *t = malloc(sizeof(Type));
+    t->kind = TYPE_LONG_LONG;
+    t->size = 8;
     t->array_len = 0;
     return t;
 }

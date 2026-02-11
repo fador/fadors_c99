@@ -39,6 +39,7 @@ typedef enum {
     TOKEN_KEYWORD_LONG,
     TOKEN_KEYWORD_AUTO,
     TOKEN_KEYWORD_REGISTER,
+    TOKEN_KEYWORD_SHORT,
     
     // Operators
     TOKEN_LPAREN,       // (
