@@ -153,6 +153,7 @@ int main(int argc, char **argv) {
     printf("DEBUG: Initializing parser...\n"); fflush(stdout);
     current_parser = malloc(sizeof(Parser));
     parser_init(current_parser, &lexer);
+    printf("DEBUG: parser_init done\n"); fflush(stdout);
     
     printf("Parsing...\n"); fflush(stdout);
     ASTNode *program = parser_parse(current_parser);
@@ -171,9 +172,13 @@ int main(int argc, char **argv) {
 
         printf("Generating OBJ to %s...\n", obj_filename); fflush(stdout);
         current_writer = malloc(sizeof(COFFWriter));
+        printf("DEBUG: malloc COFFWriter %p\n", (void*)current_writer); fflush(stdout);
         coff_writer_init(current_writer);
+        printf("DEBUG: coff_writer_init done\n"); fflush(stdout);
         codegen_set_writer(current_writer);
+        printf("DEBUG: codegen_set_writer done\n"); fflush(stdout);
         codegen_init(NULL);
+        printf("DEBUG: codegen_init done\n"); fflush(stdout);
         codegen_generate(program);
         printf("Writing OBJ...\n"); fflush(stdout);
         coff_writer_write(current_writer, obj_filename);

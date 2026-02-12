@@ -110,8 +110,8 @@ typedef struct {
 } Lexer;
 
 void lexer_init(Lexer *lexer, const char *source);
-Token lexer_next_token(Lexer *lexer);
-Token lexer_peek_token(Lexer *lexer);
+void lexer_next_token(Lexer *lexer, Token *out);
+void lexer_peek_token(Lexer *lexer, Token *out);
 
 #endif // LEXER_H
 // touch

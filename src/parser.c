@@ -6,7 +6,7 @@
 
 void parser_init(Parser *parser, Lexer *lexer) {
     parser->lexer = lexer;
-    parser->current_token = lexer_next_token(lexer);
+    lexer_next_token(lexer, &parser->current_token);
     parser->typedefs_count = 0;
     parser->enum_constants_count = 0;
     parser->structs_count = 0;
@@ -59,8 +59,8 @@ static Type *find_variable_type(Parser *parser, const char *name) {
 }
 
 static void parser_advance(Parser *parser) {
-    parser->current_token = lexer_next_token(parser->lexer);
-    // printf("Token: %d '%.*s' at line %d\n", parser->current_token.type, (int)parser->current_token.length, parser->current_token.start, parser->current_token.line);
+    lexer_next_token(parser->lexer, &parser->current_token);
+    printf("ADV: type=%d len=%d '%.*s' line=%d\n", parser->current_token.type, (int)parser->current_token.length, (int)parser->current_token.length, parser->current_token.start, parser->current_token.line);
     fflush(stdout);
 }
 
@@ -75,18 +75,18 @@ static void parser_expect(Parser *parser, TokenType type) {
     }
 }
 
-static int is_typedef_name(Parser *parser, Token token) {
-    if (token.type != TOKEN_IDENTIFIER) return 0;
+static int is_typedef_name(Parser *parser, Token *token) {
+    if (token->type != TOKEN_IDENTIFIER) return 0;
     for (int i = 0; i < parser->typedefs_count; i++) {
-        if (strlen(parser->typedefs[i].name) == token.length &&
-            strncmp(parser->typedefs[i].name, token.start, token.length) == 0) {
+        if (strlen(parser->typedefs[i].name) == token->length &&
+            strncmp(parser->typedefs[i].name, token->start, token->length) == 0) {
             return 1;
         }
     }
     return 0;
 }
 
-static int is_token_type_start(Parser *parser, Token t); // Forward declaration
+static int is_token_type_start(Parser *parser, Token *t); // Forward declaration
 
 static ASTNode *parse_expression(Parser *parser);
 static ASTNode *parse_logical_or(Parser *parser);
@@ -333,8 +333,17 @@ static ASTNode *parse_primary(Parser *parser) {
     if (parser->current_token.type == TOKEN_NUMBER) {
         ASTNode *node = ast_create_node(AST_INTEGER);
         char buffer[64];
-        size_t len = parser->current_token.length < 63 ? parser->current_token.length : 63;
-        strncpy(buffer, parser->current_token.start, len);
+        size_t tok_len = parser->current_token.length;
+        const char *tok_start = parser->current_token.start;
+        if (tok_start && tok_len > 0) {
+        }
+        size_t len;
+        if (tok_len < 63) {
+            len = tok_len;
+        } else {
+            len = 63;
+        }
+        strncpy(buffer, tok_start, len);
         buffer[len] = '\0';
         
         if (buffer[0] == '\'') {
@@ -532,8 +541,9 @@ static ASTNode *parse_unary(Parser *parser) {
         parser_advance(parser);
         int size = 0;
         if (parser->current_token.type == TOKEN_LPAREN) {
-            Token next = lexer_peek_token(parser->lexer);
-            if (is_token_type_start(parser, next)) {
+            Token next;
+            lexer_peek_token(parser->lexer, &next);
+            if (is_token_type_start(parser, &next)) {
                 parser_advance(parser); // (
                 Type *type = parse_type(parser);
                 parser_expect(parser, TOKEN_RPAREN);
@@ -592,8 +602,8 @@ static ASTNode *parse_unary(Parser *parser) {
     return parse_postfix(parser);
 }
 
-static int is_token_type_start(Parser *parser, Token t) {
-    TokenType type = t.type;
+static int is_token_type_start(Parser *parser, Token *t) {
+    TokenType type = t->type;
     return (type == TOKEN_KEYWORD_INT || 
             type == TOKEN_KEYWORD_SHORT ||
             type == TOKEN_KEYWORD_CHAR || 
@@ -613,8 +623,9 @@ static int is_token_type_start(Parser *parser, Token t) {
 
 static ASTNode *parse_cast(Parser *parser) {
     if (parser->current_token.type == TOKEN_LPAREN) {
-        Token next = lexer_peek_token(parser->lexer);
-        if (is_token_type_start(parser, next)) {
+        Token next;
+        lexer_peek_token(parser->lexer, &next);
+        if (is_token_type_start(parser, &next)) {
             parser_advance(parser); // (
             Type *type = parse_type(parser);
             parser_expect(parser, TOKEN_RPAREN);
@@ -851,7 +862,6 @@ static ASTNode *parse_initializer(Parser *parser) {
 
 static ASTNode *parse_statement(Parser *parser) {
     if (parser->current_token.type == TOKEN_KEYWORD_EXTERN) {
-        fprintf(stderr, "DEBUG_STMT: extern at line %d\n", parser->current_token.line); fflush(stderr);
     }
     if (parser->current_token.type == TOKEN_KEYWORD_RETURN) {
         parser_advance(parser);
@@ -939,7 +949,7 @@ static ASTNode *parse_statement(Parser *parser) {
         parser_expect(parser, TOKEN_LPAREN);
         ASTNode *init = NULL;
         if (parser->current_token.type != TOKEN_SEMICOLON) {
-            if (is_typedef_name(parser, parser->current_token) || 
+            if (is_typedef_name(parser, &parser->current_token) || 
                 parser->current_token.type == TOKEN_KEYWORD_INT || 
                 parser->current_token.type == TOKEN_KEYWORD_CHAR /* ... others ... */) {
                 // Declaration in for loop? Not standard C90 but C99.
@@ -1053,11 +1063,12 @@ static ASTNode *parse_statement(Parser *parser) {
                parser->current_token.type == TOKEN_KEYWORD_UNSIGNED ||
                parser->current_token.type == TOKEN_KEYWORD_LONG ||
                parser->current_token.type == TOKEN_KEYWORD_SHORT ||
-               is_typedef_name(parser, parser->current_token)) {
+               is_typedef_name(parser, &parser->current_token)) {
         // Variable or struct/union/enum declaration/definition
         if (parser->current_token.type == TOKEN_KEYWORD_STRUCT || parser->current_token.type == TOKEN_KEYWORD_UNION || parser->current_token.type == TOKEN_KEYWORD_ENUM) {
             TokenType tag_kind = parser->current_token.type;
-            Token next = lexer_peek_token(parser->lexer);
+            Token next;
+            lexer_peek_token(parser->lexer, &next);
             
             if (next.type == TOKEN_LBRACE) {
                 // Anonymous definition: struct { ... }
@@ -1077,7 +1088,8 @@ static ASTNode *parse_statement(Parser *parser) {
                 strncpy(name, parser->current_token.start, parser->current_token.length);
                 name[parser->current_token.length] = '\0';
                 
-                Token check = lexer_peek_token(parser->lexer);
+                Token check;
+                lexer_peek_token(parser->lexer, &check);
                 if (check.type == TOKEN_LBRACE) {
                     parser_advance(parser); // Consume Name
                     Type *type;
@@ -1314,7 +1326,7 @@ static ASTNode *parse_statement(Parser *parser) {
             node->data.for_stmt.init = NULL;
             parser_advance(parser);
         } else {
-            if (is_token_type_start(parser, parser->current_token)) {
+            if (is_token_type_start(parser, &parser->current_token)) {
                 node->data.for_stmt.init = parse_statement(parser);
             } else {
                 node->data.for_stmt.init = parse_expression(parser);
@@ -1403,7 +1415,8 @@ static ASTNode *parse_statement(Parser *parser) {
     
     // Label check
     if (parser->current_token.type == TOKEN_IDENTIFIER) {
-        Token next = lexer_peek_token(parser->lexer);
+        Token next;
+        lexer_peek_token(parser->lexer, &next);
         if (next.type == TOKEN_COLON) {
             char *name = malloc(parser->current_token.length + 1);
             strncpy(name, parser->current_token.start, parser->current_token.length);
@@ -1449,6 +1462,9 @@ static ASTNode *parse_external_declaration(Parser *parser) {
     }
     
     printf("TRACE: parse_external_declaration start line %d\n", parser->current_token.line); fflush(stdout);
+    printf("TRACE: ped token type=%d\n", parser->current_token.type); fflush(stdout);
+    printf("TRACE: ped token start=%p\n", (void*)parser->current_token.start); fflush(stdout);
+    printf("TRACE: ped token length=%d\n", (int)parser->current_token.length); fflush(stdout);
     printf("TRACE: ped token=%d '%.*s'\n", parser->current_token.type, (int)parser->current_token.length, parser->current_token.start); fflush(stdout);
 
     Type *type = parse_type(parser);
@@ -1462,10 +1478,14 @@ static ASTNode *parse_external_declaration(Parser *parser) {
     ASTNode *node;
     
     if (parser->current_token.type == TOKEN_IDENTIFIER) {
+        printf("TRACE: ped identifier '%.*s'\n", (int)parser->current_token.length, parser->current_token.start); fflush(stdout);
         char *name = malloc(parser->current_token.length + 1);
+        printf("TRACE: ped malloc name=%p\n", (void*)name); fflush(stdout);
         strncpy(name, parser->current_token.start, parser->current_token.length);
         name[parser->current_token.length] = '\0';
+        printf("TRACE: ped name='%s'\n", name); fflush(stdout);
         parser_advance(parser);
+        printf("TRACE: ped after advance, token type=%d\n", parser->current_token.type); fflush(stdout);
 
         // Check for function or variable
         if (parser->current_token.type == TOKEN_LPAREN) {

@@ -3,6 +3,13 @@
 #include <string.h>
 #include <stdio.h>
 
+static void token_copy(Token *dst, Token *src) {
+    dst->type = src->type;
+    dst->start = src->start;
+    dst->length = src->length;
+    dst->line = src->line;
+}
+
 void lexer_init(Lexer *lexer, const char *source) {
     lexer->source = source;
     lexer->position = 0;
@@ -104,7 +111,7 @@ static int match(Lexer *lexer, char expected) {
     return 0;
 }
 
-Token lexer_next_token(Lexer *lexer) {
+void lexer_next_token(Lexer *lexer, Token *out) {
     skip_whitespace(lexer);
 
     Token token;
@@ -116,7 +123,7 @@ Token lexer_next_token(Lexer *lexer) {
     if (c == '\0') {
         token.type = TOKEN_EOF;
         token.length = 0;
-        return token;
+        token_copy(out, &token); return;
     }
 
     if (isalpha(c) || c == '_') {
@@ -125,7 +132,7 @@ Token lexer_next_token(Lexer *lexer) {
         }
         token.length = &lexer->source[lexer->position] - token.start;
         token.type = identifier_type(token.start, token.length);
-        return token;
+        token_copy(out, &token); return;
     }
 
     if (isdigit(c) != 0) {
@@ -146,7 +153,7 @@ Token lexer_next_token(Lexer *lexer) {
                 }
                 token.type = TOKEN_NUMBER;
                 token.length = &lexer->source[lexer->position] - token.start;
-                return token;
+                token_copy(out, &token); return;
             }
             // Just '0' followed by more digits (octal) or nothing
         }
@@ -188,9 +195,13 @@ Token lexer_next_token(Lexer *lexer) {
             advance(lexer);
         }
 
-        token.type = is_float ? TOKEN_FLOAT : TOKEN_NUMBER;
+        if (is_float) {
+            token.type = TOKEN_FLOAT;
+        } else {
+            token.type = TOKEN_NUMBER;
+        }
         token.length = &lexer->source[lexer->position] - token.start;
-        return token;
+        token_copy(out, &token); return;
     }
     
     // Character literal: 'a', '\n', '\0', '\\', etc.
@@ -207,7 +218,7 @@ Token lexer_next_token(Lexer *lexer) {
         }
         token.type = TOKEN_NUMBER; // char literals are integers
         token.length = &lexer->source[lexer->position] - token.start;
-        return token;
+        token_copy(out, &token); return;
     }
     
     if (c == '"') {
@@ -227,7 +238,7 @@ Token lexer_next_token(Lexer *lexer) {
             // token.start points to opening quote, position is after closing quote
             token.length = &lexer->source[lexer->position] - token.start - 2;
             token.start++; // skip opening quote
-            return token;
+            token_copy(out, &token); return;
         }
     }
 
@@ -388,14 +399,15 @@ Token lexer_next_token(Lexer *lexer) {
         default: token.type = TOKEN_UNKNOWN; break;
     }
 
-    return token;
+    token_copy(out, &token); return;
 }
 
-Token lexer_peek_token(Lexer *lexer) {
+void lexer_peek_token(Lexer *lexer, Token *out) {
     size_t pos = lexer->position;
     int line = lexer->line;
-    Token token = lexer_next_token(lexer);
+    Token token;
+    lexer_next_token(lexer, &token);
     lexer->position = pos;
     lexer->line = line;
-    return token;
+    token_copy(out, &token); return;
 }

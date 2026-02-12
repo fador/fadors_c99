@@ -52,7 +52,6 @@ int32_t coff_writer_find_symbol(COFFWriter *w, const char *name) {
 uint32_t coff_writer_add_symbol(COFFWriter *w, const char *name, uint32_t value, int16_t section, uint16_t type, uint8_t storage_class) {
     int32_t existing = coff_writer_find_symbol(w, name);
     if (existing >= 0) {
-        // Update existing symbol if it was undefined or we are providing a definition
         if (w->symbols[existing].section == 0 && section != 0) {
             w->symbols[existing].value = value;
             w->symbols[existing].section = section;
