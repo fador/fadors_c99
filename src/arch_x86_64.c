@@ -1608,6 +1608,7 @@ static void gen_statement(ASTNode *node) {
         continue_label_ptr = clp_idx + 1;
         gen_statement(node->data.while_stmt.body);
         break_label_ptr--;
+        continue_label_ptr--;
         loop_saved_stack_ptr--;
         
         // Restore RSP to loop entry value using rbp-relative addressing

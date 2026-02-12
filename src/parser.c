@@ -60,8 +60,6 @@ static Type *find_variable_type(Parser *parser, const char *name) {
 
 static void parser_advance(Parser *parser) {
     lexer_next_token(parser->lexer, &parser->current_token);
-    printf("ADV: type=%d len=%d '%.*s' line=%d\n", parser->current_token.type, (int)parser->current_token.length, (int)parser->current_token.length, parser->current_token.start, parser->current_token.line);
-    fflush(stdout);
 }
 
 static void parser_expect(Parser *parser, TokenType type) {
@@ -367,8 +365,8 @@ static ASTNode *parse_primary(Parser *parser) {
                 node->data.integer.value = (unsigned char)buffer[1];
             }
         } else {
-            // Decimal or hex integer (strtol handles 0x prefix)
-            node->data.integer.value = (int)strtol(buffer, NULL, 0);
+            // Decimal or hex integer (strtoul handles 0x prefix and large unsigned values)
+            node->data.integer.value = (int)strtoul(buffer, NULL, 0);
         }
         parser_advance(parser);
         return node;
@@ -432,21 +430,21 @@ static ASTNode *parse_primary(Parser *parser) {
             if (parser->current_token.start[i] == '\\' && i + 1 < parser->current_token.length) {
                 i++;
                 switch (parser->current_token.start[i]) {
-                    case 'n': cooked[j++] = '\n'; break;
-                    case 't': cooked[j++] = '\t'; break;
-                    case 'r': cooked[j++] = '\r'; break;
-                    case '0': cooked[j++] = '\0'; break;
-                    case '\\': cooked[j++] = '\\'; break;
-                    case '"': cooked[j++] = '"'; break;
-                    case '\'': cooked[j++] = '\''; break;
-                    case 'a': cooked[j++] = '\a'; break;
-                    case 'b': cooked[j++] = '\b'; break;
-                    case 'f': cooked[j++] = '\f'; break;
-                    case 'v': cooked[j++] = '\v'; break;
-                    default: cooked[j++] = parser->current_token.start[i]; break;
+                    case 'n': { cooked[j] = '\n'; j++; } break;
+                    case 't': { cooked[j] = '\t'; j++; } break;
+                    case 'r': { cooked[j] = '\r'; j++; } break;
+                    case '0': { cooked[j] = '\0'; j++; } break;
+                    case '\\': { cooked[j] = '\\'; j++; } break;
+                    case '"': { cooked[j] = '"'; j++; } break;
+                    case '\'': { cooked[j] = '\''; j++; } break;
+                    case 'a': { cooked[j] = '\a'; j++; } break;
+                    case 'b': { cooked[j] = '\b'; j++; } break;
+                    case 'f': { cooked[j] = '\f'; j++; } break;
+                    case 'v': { cooked[j] = '\v'; j++; } break;
+                    default: { cooked[j] = parser->current_token.start[i]; j++; } break;
                 }
             } else {
-                cooked[j++] = parser->current_token.start[i];
+                { cooked[j] = parser->current_token.start[i]; j++; }
             }
         }
         cooked[j] = '\0';
@@ -1461,14 +1459,7 @@ static ASTNode *parse_external_declaration(Parser *parser) {
         parser_advance(parser);
     }
     
-    printf("TRACE: parse_external_declaration start line %d\n", parser->current_token.line); fflush(stdout);
-    printf("TRACE: ped token type=%d\n", parser->current_token.type); fflush(stdout);
-    printf("TRACE: ped token start=%p\n", (void*)parser->current_token.start); fflush(stdout);
-    printf("TRACE: ped token length=%d\n", (int)parser->current_token.length); fflush(stdout);
-    printf("TRACE: ped token=%d '%.*s'\n", parser->current_token.type, (int)parser->current_token.length, parser->current_token.start); fflush(stdout);
-
     Type *type = parse_type(parser);
-    printf("TRACE: ped parse_type returned %p\n", (void*)type); fflush(stdout);
     if (!type) {
         printf("Syntax Error: Expected return type or variable type at line %d (token_type=%d '%.*s')\n", parser->current_token.line, parser->current_token.type, (int)parser->current_token.length, parser->current_token.start);
         fflush(stdout);
@@ -1478,14 +1469,10 @@ static ASTNode *parse_external_declaration(Parser *parser) {
     ASTNode *node;
     
     if (parser->current_token.type == TOKEN_IDENTIFIER) {
-        printf("TRACE: ped identifier '%.*s'\n", (int)parser->current_token.length, parser->current_token.start); fflush(stdout);
         char *name = malloc(parser->current_token.length + 1);
-        printf("TRACE: ped malloc name=%p\n", (void*)name); fflush(stdout);
         strncpy(name, parser->current_token.start, parser->current_token.length);
         name[parser->current_token.length] = '\0';
-        printf("TRACE: ped name='%s'\n", name); fflush(stdout);
         parser_advance(parser);
-        printf("TRACE: ped after advance, token type=%d\n", parser->current_token.type); fflush(stdout);
 
         // Check for function or variable
         if (parser->current_token.type == TOKEN_LPAREN) {
@@ -1754,7 +1741,6 @@ static ASTNode *parse_enum_body(Parser *parser, Type *type) {
 ASTNode *parser_parse(Parser *parser) {
     ASTNode *program = ast_create_node(AST_PROGRAM);
     while (parser->current_token.type != TOKEN_EOF) {
-        printf("TRACE: parser loop line %d type %d\n", parser->current_token.line, parser->current_token.type);
         if (parser->current_token.type == TOKEN_SEMICOLON) {
             parser_advance(parser);
             continue;

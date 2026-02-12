@@ -79,11 +79,6 @@ static void compile_and_link(const char *asm_file, const char *exe_file, int use
 }
 
 int main(int argc, char **argv) {
-    const char *msg = "DEBUG: main entry point (raw)\n";
-    unsigned long written;
-    WriteFile(GetStdHandle(STD_ERROR_HANDLE), msg, (unsigned long)strlen(msg), &written, NULL);
-    fprintf(stderr, "DEBUG: main entry point\n"); fflush(stderr);
-    WriteFile(GetStdHandle(STD_ERROR_HANDLE), "HB: Before argc check\n", 21, &written, NULL);
     if (argc < 2) {
         printf("Usage: %s <source.c> [--masm] [--obj] [-S]\n", argv[0]);
         return 1;
@@ -94,7 +89,6 @@ int main(int argc, char **argv) {
     int stop_at_asm = 0;
     int use_obj = 0;
     
-    WriteFile(GetStdHandle(STD_ERROR_HANDLE), "HB: Entering arg loop\n", 21, &written, NULL);
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--masm") == 0) {
             use_masm = 1;
@@ -112,30 +106,20 @@ int main(int argc, char **argv) {
         return 1;
     }
     
-    WriteFile(GetStdHandle(STD_ERROR_HANDLE), "HB: Before fopen\n", 17, &written, NULL);
     FILE *f = fopen(source_filename, "rb");
-    WriteFile(GetStdHandle(STD_ERROR_HANDLE), "HB: After fopen\n", 16, &written, NULL);
     if (!f) {
         printf("Could not open file %s\n", source_filename);
         return 1;
     }
     
-    WriteFile(GetStdHandle(STD_ERROR_HANDLE), "HB: Before fseek END\n", 21, &written, NULL);
     fseek(f, 0, SEEK_END);
-    WriteFile(GetStdHandle(STD_ERROR_HANDLE), "HB: After fseek END\n", 20, &written, NULL);
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
-    WriteFile(GetStdHandle(STD_ERROR_HANDLE), "HB: Before malloc\n", 18, &written, NULL);
     char *source = malloc(size + 1);
-    WriteFile(GetStdHandle(STD_ERROR_HANDLE), "HB: After malloc\n", 17, &written, NULL);
     fread(source, 1, size, f);
     source[size] = '\0';
     fclose(f);
-    printf("DEBUG: File read successfully, size=%ld\n", size); fflush(stdout);
-    
-    printf("DEBUG: Starting preprocessing...\n"); fflush(stdout);
     char *preprocessed = preprocess(source, source_filename);
-    printf("DEBUG: Preprocessing complete, length=%zu\n", strlen(preprocessed)); fflush(stdout);
     free(source);
     
     // Debug: dump preprocessed source
@@ -145,15 +129,11 @@ int main(int argc, char **argv) {
         fclose(pf);
     }
     
-    printf("DEBUG: Initializing lexer...\n"); fflush(stdout);
     Lexer lexer;
     lexer_init(&lexer, preprocessed);
-    printf("DEBUG: Lexer initialized.\n"); fflush(stdout);
     
-    printf("DEBUG: Initializing parser...\n"); fflush(stdout);
     current_parser = malloc(sizeof(Parser));
     parser_init(current_parser, &lexer);
-    printf("DEBUG: parser_init done\n"); fflush(stdout);
     
     printf("Parsing...\n"); fflush(stdout);
     ASTNode *program = parser_parse(current_parser);
@@ -172,13 +152,9 @@ int main(int argc, char **argv) {
 
         printf("Generating OBJ to %s...\n", obj_filename); fflush(stdout);
         current_writer = malloc(sizeof(COFFWriter));
-        printf("DEBUG: malloc COFFWriter %p\n", (void*)current_writer); fflush(stdout);
         coff_writer_init(current_writer);
-        printf("DEBUG: coff_writer_init done\n"); fflush(stdout);
         codegen_set_writer(current_writer);
-        printf("DEBUG: codegen_set_writer done\n"); fflush(stdout);
         codegen_init(NULL);
-        printf("DEBUG: codegen_init done\n"); fflush(stdout);
         codegen_generate(program);
         printf("Writing OBJ...\n"); fflush(stdout);
         coff_writer_write(current_writer, obj_filename);

@@ -73,7 +73,6 @@ static char *read_file(const char *filename) {
 }
 
 char *preprocess(const char *source, const char *filename) {
-    printf("PP_ENTER\n"); fflush(stdout);
     int is_first_call = 0;
     if (top_level) {
         if_ptr = -1;
@@ -81,29 +80,20 @@ char *preprocess(const char *source, const char *filename) {
         is_first_call = 1;
     }
 
-    printf("PP_STRLEN\n"); fflush(stdout);
     size_t out_size = strlen(source) * 2 + 1024; // Rough estimate
-    printf("PP_MALLOC\n"); fflush(stdout);
     char *output = malloc(out_size);
     if (!output) {
-        printf("PP_MALLOC_FAIL\n"); fflush(stdout);
         exit(1);
     }
-    printf("PP_INIT\n"); fflush(stdout);
     size_t out_pos = 0;
     
     const char *p = source;
     int bol = 1;
-    printf("PP_LOOP\n"); fflush(stdout);
     while (*p) {
-        printf("PP_ITER\n"); fflush(stdout);
         if (*p == '/' && *(p+1) == '/') {
-            printf("PP_LINE_CMT\n"); fflush(stdout);
-            while (*p && *p != '\n') p++;
+            while (*p && *p != '\n') { p++; }
             bol = 1; continue;
         }
-        printf("PP_A\n"); fflush(stdout);
-        printf("PP_B\n"); fflush(stdout);
         if (*p == '/' && *(p+1) == '*') {
             p += 2;
             while (*p && !(*p == '*' && *(p+1) == '/')) {
@@ -113,49 +103,46 @@ char *preprocess(const char *source, const char *filename) {
             if (*p) p += 2;
             continue;
         }
-        printf("PP_C\n"); fflush(stdout);
         if (*p == '"') {
             bol = 0;
             if (out_pos + 1 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
-            output[out_pos++] = *p++;
+            { output[out_pos] = *p; out_pos++; p++; }
             while (*p && *p != '"') {
                 if (*p == '\\' && *(p+1) != '\0') {
                     if (out_pos + 2 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
-                    output[out_pos++] = *p++;
-                    output[out_pos++] = *p++;
+                    { output[out_pos] = *p; out_pos++; p++; }
+                    { output[out_pos] = *p; out_pos++; p++; }
                 } else {
                     if (out_pos + 1 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
-                    output[out_pos++] = *p++;
+                    { output[out_pos] = *p; out_pos++; p++; }
                 }
             }
             if (*p == '"') {
                 if (out_pos + 1 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
-                output[out_pos++] = *p++;
+                { output[out_pos] = *p; out_pos++; p++; }
             }
             continue;
         }
-        printf("PP_D\n"); fflush(stdout);
         if (*p == '\'') {
             bol = 0;
             if (out_pos + 1 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
-            output[out_pos++] = *p++;
+            { output[out_pos] = *p; out_pos++; p++; }
             while (*p && *p != '\'') {
                 if (*p == '\\' && *(p+1) != '\0') {
                     if (out_pos + 2 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
-                    output[out_pos++] = *p++;
-                    output[out_pos++] = *p++;
+                    { output[out_pos] = *p; out_pos++; p++; }
+                    { output[out_pos] = *p; out_pos++; p++; }
                 } else {
                     if (out_pos + 1 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
-                    output[out_pos++] = *p++;
+                    { output[out_pos] = *p; out_pos++; p++; }
                 }
             }
             if (*p == '\'') {
                 if (out_pos + 1 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
-                output[out_pos++] = *p++;
+                { output[out_pos] = *p; out_pos++; p++; }
             }
             continue;
         }
-        printf("PP_E\n"); fflush(stdout);
 
         if (bol && *p == '#') {
             bol = 0;
@@ -290,11 +277,11 @@ char *preprocess(const char *source, const char *filename) {
                         if (*p == '\n') p++; // skip \n
                         // Add a space as separator
                         if (val_len + 1 >= val_cap) { val_cap *= 2; val = realloc(val, val_cap); }
-                        val[val_len++] = ' ';
+                        { val[val_len] = ' '; val_len++; }
                         continue;
                     }
                     if (val_len + 1 >= val_cap) { val_cap *= 2; val = realloc(val, val_cap); }
-                    val[val_len++] = *p++;
+                    { val[val_len] = *p; val_len++; p++; }
                 }
                 val[val_len] = '\0';
                 
@@ -568,10 +555,10 @@ skip_line:
                     out_size = out_pos + f_len + 1024;
                     output = realloc(output, out_size);
                 }
-                output[out_pos++] = '"';
+                { output[out_pos] = '"'; out_pos++; }
                 strcpy(output + out_pos, filename);
                 out_pos += f_len;
-                output[out_pos++] = '"';
+                { output[out_pos] = '"'; out_pos++; }
             } else {
 copy_normal:
                 if (out_pos + len >= out_size) {
@@ -590,7 +577,7 @@ copy_normal:
             }
             if (*p == '\n') bol = 1;
             else if (!isspace(*p)) bol = 0;
-            output[out_pos++] = *p++;
+            { output[out_pos] = *p; out_pos++; p++; }
         }
     }
     output[out_pos] = '\0';
