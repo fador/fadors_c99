@@ -446,7 +446,7 @@ static const char *get_reg_32(const char *reg64) {
     if (strcmp(reg64, "rdx") == 0) return "edx";
     if (strcmp(reg64, "rbx") == 0) return "ebx";
     if (strcmp(reg64, "rsi") == 0) return "esi";
-    if (strcmp(reg64, "rdi") == 0) return "di";
+    if (strcmp(reg64, "rdi") == 0) return "edi";
     if (strcmp(reg64, "r8") == 0) return "r8d";
     if (strcmp(reg64, "r9") == 0) return "r9d";
     return reg64;
@@ -1254,6 +1254,8 @@ static int break_label_stack[32];
 static int break_label_ptr = 0;
 static int continue_label_stack[32];
 static int continue_label_ptr = 0;
+static int loop_saved_stack_offset[32];
+static int loop_saved_stack_ptr = 0;
 
 static void collect_cases(ASTNode *node, ASTNode **cases, int *case_count, ASTNode **default_node) {
     if (!node) return;
@@ -1491,15 +1493,33 @@ static void gen_statement(ASTNode *node) {
         emit_inst2("cmp", op_imm(0), op_reg("rax"));
         emit_inst1("je", op_label(l_else));
         
+        // Save stack state before then-branch
+        int saved_stack_offset = stack_offset;
+        int saved_locals_count = locals_count;
+        
         // Generate then branch
         if (node->data.if_stmt.then_branch) {
             gen_statement(node->data.if_stmt.then_branch);
         }
+        
+        // Restore RSP to pre-branch value (variables go out of scope)
+        if (stack_offset != saved_stack_offset) {
+            emit_inst2("lea", op_mem("rbp", saved_stack_offset), op_reg("rsp"));
+        }
+        stack_offset = saved_stack_offset;
+        locals_count = saved_locals_count;
+        
         emit_inst1("jmp", op_label(l_end));
         
         emit_label_def(l_else);
         if (node->data.if_stmt.else_branch) {
             gen_statement(node->data.if_stmt.else_branch);
+            // Restore RSP after else-branch too
+            if (stack_offset != saved_stack_offset) {
+                emit_inst2("lea", op_mem("rbp", saved_stack_offset), op_reg("rsp"));
+            }
+            stack_offset = saved_stack_offset;
+            locals_count = saved_locals_count;
         }
         emit_label_def(l_end);
     } else if (node->type == AST_WHILE) {
@@ -1514,11 +1534,24 @@ static void gen_statement(ASTNode *node) {
         emit_inst2("cmp", op_imm(0), op_reg("rax"));
         emit_inst1("je", op_label(l_end));
         
+        int saved_stack_offset = stack_offset;
+        int saved_locals_count = locals_count;
+        
+        loop_saved_stack_offset[loop_saved_stack_ptr++] = saved_stack_offset;
         break_label_stack[break_label_ptr++] = label_end;
         continue_label_stack[continue_label_ptr++] = label_start;
         gen_statement(node->data.while_stmt.body);
         continue_label_ptr--;
         break_label_ptr--;
+        loop_saved_stack_ptr--;
+        
+        // Restore RSP to loop entry value using rbp-relative addressing
+        // This correctly handles all runtime paths (if/else branches with different var decls)
+        if (saved_stack_offset != stack_offset) {
+            emit_inst2("lea", op_mem("rbp", saved_stack_offset), op_reg("rsp"));
+        }
+        stack_offset = saved_stack_offset;
+        locals_count = saved_locals_count;
         
         emit_inst1("jmp", op_label(l_start));
         
@@ -1534,11 +1567,23 @@ static void gen_statement(ASTNode *node) {
         
         emit_label_def(l_start);
         
+        int saved_stack_offset_dw = stack_offset;
+        int saved_locals_count_dw = locals_count;
+        
+        loop_saved_stack_offset[loop_saved_stack_ptr++] = saved_stack_offset_dw;
         break_label_stack[break_label_ptr++] = label_end;
         continue_label_stack[continue_label_ptr++] = label_continue;
         gen_statement(node->data.while_stmt.body);
         continue_label_ptr--;
         break_label_ptr--;
+        loop_saved_stack_ptr--;
+
+        // Restore RSP to loop entry value
+        if (saved_stack_offset_dw != stack_offset) {
+            emit_inst2("lea", op_mem("rbp", saved_stack_offset_dw), op_reg("rsp"));
+        }
+        stack_offset = saved_stack_offset_dw;
+        locals_count = saved_locals_count_dw;
 
         emit_label_def(l_cont);
         gen_expression(node->data.while_stmt.condition);
@@ -1566,11 +1611,23 @@ static void gen_statement(ASTNode *node) {
             emit_inst1("je", op_label(l_end));
         }
         
+        int saved_stack_offset_for = stack_offset;
+        int saved_locals_count_for = locals_count;
+        
+        loop_saved_stack_offset[loop_saved_stack_ptr++] = saved_stack_offset_for;
         break_label_stack[break_label_ptr++] = label_end;
         continue_label_stack[continue_label_ptr++] = label_continue;
         gen_statement(node->data.for_stmt.body);
         continue_label_ptr--;
         break_label_ptr--;
+        loop_saved_stack_ptr--;
+        
+        // Restore RSP to loop entry value
+        if (saved_stack_offset_for != stack_offset) {
+            emit_inst2("lea", op_mem("rbp", saved_stack_offset_for), op_reg("rsp"));
+        }
+        stack_offset = saved_stack_offset_for;
+        locals_count = saved_locals_count_for;
         
         emit_label_def(l_cont);
         if (node->data.for_stmt.increment) {
@@ -1581,6 +1638,13 @@ static void gen_statement(ASTNode *node) {
         emit_label_def(l_end);
     } else if (node->type == AST_BREAK) {
         if (break_label_ptr > 0) {
+            // Restore RSP to loop entry value before breaking
+            if (loop_saved_stack_ptr > 0) {
+                int saved = loop_saved_stack_offset[loop_saved_stack_ptr - 1];
+                if (saved != stack_offset) {
+                    emit_inst2("lea", op_mem("rbp", saved), op_reg("rsp"));
+                }
+            }
             char l_break[32];
             sprintf(l_break, ".L%d", break_label_stack[break_label_ptr - 1]);
             emit_inst1("jmp", op_label(l_break));
@@ -1589,6 +1653,13 @@ static void gen_statement(ASTNode *node) {
         }
     } else if (node->type == AST_CONTINUE) {
         if (continue_label_ptr > 0) {
+            // Restore RSP to loop entry value before continuing
+            if (loop_saved_stack_ptr > 0) {
+                int saved = loop_saved_stack_offset[loop_saved_stack_ptr - 1];
+                if (saved != stack_offset) {
+                    emit_inst2("lea", op_mem("rbp", saved), op_reg("rsp"));
+                }
+            }
             char l_cont[32];
             sprintf(l_cont, ".L%d", continue_label_stack[continue_label_ptr - 1]);
             emit_inst1("jmp", op_label(l_cont));
@@ -1629,8 +1700,10 @@ static void gen_statement(ASTNode *node) {
         }
 
         break_label_stack[break_label_ptr++] = label_end;
+        loop_saved_stack_offset[loop_saved_stack_ptr++] = stack_offset;
         gen_statement(node->data.switch_stmt.body);
         break_label_ptr--;
+        loop_saved_stack_ptr--;
 
         emit_label_def(l_end);
     } else if (node->type == AST_CASE) {

@@ -1052,6 +1052,7 @@ static ASTNode *parse_statement(Parser *parser) {
                parser->current_token.type == TOKEN_KEYWORD_STATIC ||
                parser->current_token.type == TOKEN_KEYWORD_UNSIGNED ||
                parser->current_token.type == TOKEN_KEYWORD_LONG ||
+               parser->current_token.type == TOKEN_KEYWORD_SHORT ||
                is_typedef_name(parser, parser->current_token)) {
         // Variable or struct/union/enum declaration/definition
         if (parser->current_token.type == TOKEN_KEYWORD_STRUCT || parser->current_token.type == TOKEN_KEYWORD_UNION || parser->current_token.type == TOKEN_KEYWORD_ENUM) {

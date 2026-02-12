@@ -104,7 +104,7 @@ Type *type_union(const char *name) {
 Type *type_enum(const char *name) {
     Type *t = malloc(sizeof(Type));
     t->kind = TYPE_ENUM;
-    t->size = 8; // Enum is effectively int
+    t->size = 4; // Enum is effectively int (4 bytes on LLP64)
     t->array_len = 0;
     t->data.struct_data.name = name ? strdup(name) : NULL;
     t->data.struct_data.members = NULL;

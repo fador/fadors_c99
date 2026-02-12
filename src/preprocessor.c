@@ -73,8 +73,7 @@ static char *read_file(const char *filename) {
 }
 
 char *preprocess(const char *source, const char *filename) {
-    printf("HB: preprocess start\n"); fflush(stdout);
-
+    printf("PP_ENTER\n"); fflush(stdout);
     int is_first_call = 0;
     if (top_level) {
         if_ptr = -1;
@@ -82,24 +81,29 @@ char *preprocess(const char *source, const char *filename) {
         is_first_call = 1;
     }
 
-    printf("HB: preprocess before strlen\n"); fflush(stdout);
+    printf("PP_STRLEN\n"); fflush(stdout);
     size_t out_size = strlen(source) * 2 + 1024; // Rough estimate
-    printf("HB: preprocess before malloc, size=%zu\n", out_size); fflush(stdout);
+    printf("PP_MALLOC\n"); fflush(stdout);
     char *output = malloc(out_size);
     if (!output) {
-        printf("ERROR: malloc failed in preprocess\n"); fflush(stdout);
+        printf("PP_MALLOC_FAIL\n"); fflush(stdout);
         exit(1);
     }
-    // printf("HB: preprocess after malloc\n"); fflush(stdout);
+    printf("PP_INIT\n"); fflush(stdout);
     size_t out_pos = 0;
     
     const char *p = source;
     int bol = 1;
+    printf("PP_LOOP\n"); fflush(stdout);
     while (*p) {
+        printf("PP_ITER\n"); fflush(stdout);
         if (*p == '/' && *(p+1) == '/') {
+            printf("PP_LINE_CMT\n"); fflush(stdout);
             while (*p && *p != '\n') p++;
             bol = 1; continue;
         }
+        printf("PP_A\n"); fflush(stdout);
+        printf("PP_B\n"); fflush(stdout);
         if (*p == '/' && *(p+1) == '*') {
             p += 2;
             while (*p && !(*p == '*' && *(p+1) == '/')) {
@@ -109,6 +113,7 @@ char *preprocess(const char *source, const char *filename) {
             if (*p) p += 2;
             continue;
         }
+        printf("PP_C\n"); fflush(stdout);
         if (*p == '"') {
             bol = 0;
             if (out_pos + 1 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
@@ -129,6 +134,7 @@ char *preprocess(const char *source, const char *filename) {
             }
             continue;
         }
+        printf("PP_D\n"); fflush(stdout);
         if (*p == '\'') {
             bol = 0;
             if (out_pos + 1 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
@@ -149,6 +155,7 @@ char *preprocess(const char *source, const char *filename) {
             }
             continue;
         }
+        printf("PP_E\n"); fflush(stdout);
 
         if (bol && *p == '#') {
             bol = 0;
