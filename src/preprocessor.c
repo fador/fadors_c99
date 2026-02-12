@@ -103,6 +103,17 @@ char *preprocess(const char *source, const char *filename) {
             if (*p) p += 2;
             continue;
         }
+        // If inside a false #ifdef/#ifndef block, skip non-directive content
+        if (if_ptr >= 0 && !if_stack[if_ptr].active) {
+            if (bol && *p == '#') {
+                // Fall through to directive handling below
+            } else {
+                if (*p == '\n') bol = 1;
+                else if (!isspace(*p)) bol = 0;
+                p++;
+                continue;
+            }
+        }
         if (*p == '"') {
             bol = 0;
             if (out_pos + 1 >= out_size) { out_size *= 2; output = realloc(output, out_size); }
@@ -436,10 +447,6 @@ char *preprocess(const char *source, const char *filename) {
 skip_line:
             while (*p != '\n' && *p != '\0') p++;
             if (*p == '\n') bol = 1;
-        } else if (if_ptr >= 0 && !if_stack[if_ptr].active) {
-            if (*p == '\n') bol = 1;
-            else if (!isspace(*p)) bol = 0;
-            p++;
         } else if (isalpha(*p) || *p == '_') {
             bol = 0;
             const char *start = p;

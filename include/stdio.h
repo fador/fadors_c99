@@ -5,10 +5,16 @@
 
 typedef void FILE;
 
+#ifdef _WIN32
 extern FILE *__acrt_iob_func(int);
 #define stdin  (__acrt_iob_func(0))
 #define stdout (__acrt_iob_func(1))
 #define stderr (__acrt_iob_func(2))
+#else
+extern FILE *stdin;
+extern FILE *stdout;
+extern FILE *stderr;
+#endif
 
 int printf(const char *format, ...);
 int sprintf(char *str, const char *format, ...);
@@ -22,6 +28,11 @@ int ftell(FILE *stream);
 int fflush(FILE *stream);
 int feof(FILE *stream);
 int puts(const char *s);
+int fputs(const char *s, FILE *stream);
+int fgetc(FILE *stream);
+char *fgets(char *s, int n, FILE *stream);
+int snprintf(char *str, size_t size, const char *format, ...);
+int sscanf(const char *str, const char *format, ...);
 
 #define SEEK_SET 0
 #define SEEK_CUR 1

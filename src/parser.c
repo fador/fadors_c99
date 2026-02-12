@@ -1603,6 +1603,19 @@ static ASTNode *parse_tag_body(Parser *parser, Type *type) {
     ASTNode *node = ast_create_node(type->kind == TYPE_UNION ? AST_UNION_DEF : AST_STRUCT_DEF);
     node->data.struct_def.name = type->data.struct_data.name;
     
+    // Register the struct BEFORE parsing the body so self-referential types work
+    // (e.g. struct Node { struct Node *next; })
+    if (type->data.struct_data.name && parser->structs_count < 4096) {
+        // Check if already registered (e.g. forward declaration)
+        int found = 0;
+        for (int i = 0; i < parser->structs_count; i++) {
+            if (parser->structs[i] == type) { found = 1; break; }
+        }
+        if (!found) {
+            parser->structs[parser->structs_count++] = type;
+        }
+    }
+    
     int current_offset = 0;
     int max_size = 0;
     
@@ -1689,10 +1702,6 @@ static ASTNode *parse_tag_body(Parser *parser, Type *type) {
     }
 
     type->size = (type->kind == TYPE_UNION) ? max_size : current_offset;
-    
-    if (type->data.struct_data.name && parser->structs_count < 4096) {
-        parser->structs[parser->structs_count++] = type;
-    }
     
     return node;
 }

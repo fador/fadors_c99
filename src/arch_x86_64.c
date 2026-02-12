@@ -1311,6 +1311,15 @@ static void gen_expression(ASTNode *node) {
         if (shadow > 0) {
             emit_inst2("sub", op_imm(shadow), op_reg("rsp"));
         }
+        // System V ABI: set al to number of vector (XMM) args for variadic functions
+        if (!g_use_shadow_space) {
+            int xmm_count = 0;
+            for (int i = 0; i < num_args && i < max_reg; i++) {
+                Type *at = get_expr_type(node->children[i]);
+                if (is_float_type(at)) xmm_count++;
+            }
+            emit_inst2("mov", op_imm(xmm_count), op_reg("eax"));
+        }
         emit_inst1("call", op_label(node->data.call.name));
         if (node->resolved_type == NULL) node->resolved_type = get_expr_type(node);
         
