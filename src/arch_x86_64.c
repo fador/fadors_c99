@@ -4,6 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef _MSC_VER
+#define _strdup strdup
+#endif
+
 #include "encoder.h"
 
 typedef enum {
@@ -21,9 +25,11 @@ static Type *current_func_return_type = NULL;
 static char *current_func_name = NULL;
 static int static_label_count = 0;
 
-// Win64 ABI register parameter arrays (global to avoid local array init issues)
-static const char *g_arg_regs[4];
-static const char *g_xmm_arg_regs[4];
+// ABI register parameter arrays
+static const char *g_arg_regs[6];
+static const char *g_xmm_arg_regs[8];
+static int g_max_reg_args = 4;       // 4 for Win64, 6 for SysV
+static int g_use_shadow_space = 1;   // 1 for Win64, 0 for SysV
 
 static void gen_function(ASTNode *node);
 static void gen_statement(ASTNode *node);
@@ -101,6 +107,8 @@ static void emit_label_def(const char *name) {
 
 void arch_x86_64_init(FILE *output) {
     out = output;
+#ifdef _WIN32
+    // Win64 ABI
     g_arg_regs[0] = "rcx";
     g_arg_regs[1] = "rdx";
     g_arg_regs[2] = "r8";
@@ -109,6 +117,27 @@ void arch_x86_64_init(FILE *output) {
     g_xmm_arg_regs[1] = "xmm1";
     g_xmm_arg_regs[2] = "xmm2";
     g_xmm_arg_regs[3] = "xmm3";
+    g_max_reg_args = 4;
+    g_use_shadow_space = 1;
+#else
+    // System V AMD64 ABI (Linux/macOS)
+    g_arg_regs[0] = "rdi";
+    g_arg_regs[1] = "rsi";
+    g_arg_regs[2] = "rdx";
+    g_arg_regs[3] = "rcx";
+    g_arg_regs[4] = "r8";
+    g_arg_regs[5] = "r9";
+    g_xmm_arg_regs[0] = "xmm0";
+    g_xmm_arg_regs[1] = "xmm1";
+    g_xmm_arg_regs[2] = "xmm2";
+    g_xmm_arg_regs[3] = "xmm3";
+    g_xmm_arg_regs[4] = "xmm4";
+    g_xmm_arg_regs[5] = "xmm5";
+    g_xmm_arg_regs[6] = "xmm6";
+    g_xmm_arg_regs[7] = "xmm7";
+    g_max_reg_args = 6;
+    g_use_shadow_space = 0;
+#endif
     if (out && !obj_writer && current_syntax == SYNTAX_INTEL) {
         fprintf(out, "_TEXT SEGMENT\n");
     }
@@ -172,6 +201,10 @@ void arch_x86_64_generate(ASTNode *program) {
             }
         } else if (current_syntax == SYNTAX_INTEL) {
             fprintf(out, "_TEXT ENDS\nEND\n");
+        }
+        // Emit GNU-stack note to prevent executable stack warning on Linux
+        if (out && current_syntax == SYNTAX_ATT) {
+            fprintf(out, ".section .note.GNU-stack,\"\",@progbits\n");
         }
     }
 }
@@ -337,6 +370,7 @@ static void gen_global_decl(ASTNode *node) {
                  int size = node->resolved_type ? node->resolved_type->size : 4;
                  fprintf(out, "    .zero %d\n", size);
              }
+            fprintf(out, ".text\n");
         }
     }
     
@@ -387,6 +421,18 @@ static void print_operand(Operand *op) {
     }
 }
 
+// Print operand for jump/call targets (no RIP-relative for ATT)
+static void print_operand_jmp(Operand *op) {
+    if (!out) return;
+    if (op->type == OP_LABEL) {
+        const char *lbl = op->data.label ? op->data.label : "null_label";
+        if (current_syntax == SYNTAX_ATT) fprintf(out, "%s", lbl);
+        else fprintf(out, "%s", lbl);
+    } else {
+        print_operand(op);
+    }
+}
+
 static void emit_inst0(const char *mnemonic) {
     if (obj_writer) {
         encode_inst0(&obj_writer->text_section, mnemonic);
@@ -425,7 +471,13 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
     }
 
     fprintf(out, "    %s ", m);
-    print_operand(op1);
+    // Use jump-style label printing for jmp/jcc/call (no RIP-relative)
+    if (op1->type == OP_LABEL &&
+        (m[0] == 'j' || strcmp(m, "call") == 0)) {
+        print_operand_jmp(op1);
+    } else {
+        print_operand(op1);
+    }
     fprintf(out, "\n");
 }
 
@@ -778,7 +830,7 @@ static void gen_binary_expr(ASTNode *node) {
             } else {
                 node->resolved_type = left_type ? left_type : right_type;
             }
-            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("addl", op_reg("rcx"), op_reg("rax"));
+            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("addl", op_reg("ecx"), op_reg("eax"));
             else emit_inst2("add", op_reg("rcx"), op_reg("rax"));
             break;
         case TOKEN_MINUS: 
@@ -797,13 +849,13 @@ static void gen_binary_expr(ASTNode *node) {
                 }
                 node->resolved_type = type_int();
             } else {
-                if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("subl", op_reg("rcx"), op_reg("rax"));
+                if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("subl", op_reg("ecx"), op_reg("eax"));
                 else emit_inst2("sub", op_reg("rcx"), op_reg("rax"));
                 node->resolved_type = left_type;
             }
             break;
         case TOKEN_STAR:  
-            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("imull", op_reg("rcx"), op_reg("rax"));
+            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("imull", op_reg("ecx"), op_reg("eax"));
             else emit_inst2("imul", op_reg("rcx"), op_reg("rax")); 
             node->resolved_type = left_type;
             break;
@@ -817,17 +869,17 @@ static void gen_binary_expr(ASTNode *node) {
             node->resolved_type = left_type;
             break;
         case TOKEN_AMPERSAND:
-            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("andl", op_reg("rcx"), op_reg("rax"));
+            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("andl", op_reg("ecx"), op_reg("eax"));
             else emit_inst2("and", op_reg("rcx"), op_reg("rax"));
             node->resolved_type = left_type;
             break;
         case TOKEN_PIPE:
-            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("orl", op_reg("rcx"), op_reg("rax"));
+            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("orl", op_reg("ecx"), op_reg("eax"));
             else emit_inst2("or", op_reg("rcx"), op_reg("rax"));
             node->resolved_type = left_type;
             break;
         case TOKEN_CARET:
-            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("xorl", op_reg("rcx"), op_reg("rax"));
+            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("xorl", op_reg("ecx"), op_reg("eax"));
             else emit_inst2("xor", op_reg("rcx"), op_reg("rax"));
             node->resolved_type = left_type;
             break;
@@ -846,7 +898,7 @@ static void gen_binary_expr(ASTNode *node) {
         case TOKEN_LESS_EQUAL:
         case TOKEN_GREATER_EQUAL: {
             Type *cmp_type = left_type ? left_type : right_type;
-            if (cmp_type && cmp_type->size == 4) emit_inst2("cmpl", op_reg("rcx"), op_reg("rax"));
+            if (cmp_type && cmp_type->size == 4) emit_inst2("cmpl", op_reg("ecx"), op_reg("eax"));
             else emit_inst2("cmp", op_reg("rcx"), op_reg("rax"));
             
             if (node->data.binary_expr.op == TOKEN_EQUAL_EQUAL) emit_inst1("sete", op_reg("al"));
@@ -926,7 +978,7 @@ static void gen_expression(ASTNode *node) {
             } else {
                 if (t && t->size == 1) emit_inst2("movzbq", op_label(label), op_reg("rax"));
                 else if (t && t->size == 2) emit_inst2("movzwq", op_label(label), op_reg("rax"));
-                else if (t && t->size == 4) emit_inst2("movl", op_label(label), op_reg("rax"));
+                else if (t && t->size == 4) emit_inst2("movl", op_label(label), op_reg("eax"));
                 else emit_inst2("mov", op_label(label), op_reg("rax"));
             }
             node->resolved_type = t;
@@ -944,7 +996,7 @@ static void gen_expression(ASTNode *node) {
             } else {
                 if (t && t->size == 1) emit_inst2("movzbq", op_mem("rbp", offset), op_reg("rax"));
                 else if (t && t->size == 2) emit_inst2("movzwq", op_mem("rbp", offset), op_reg("rax"));
-                else if (t && t->size == 4) emit_inst2("movl", op_mem("rbp", offset), op_reg("rax"));
+                else if (t && t->size == 4) emit_inst2("movl", op_mem("rbp", offset), op_reg("eax"));
                 else emit_inst2("mov", op_mem("rbp", offset), op_reg("rax"));
             }
             node->resolved_type = t;
@@ -959,7 +1011,7 @@ static void gen_expression(ASTNode *node) {
             } else {
                 if (t && t->size == 1) emit_inst2("movzbq", op_label(node->data.identifier.name), op_reg("rax"));
                 else if (t && t->size == 2) emit_inst2("movzwq", op_label(node->data.identifier.name), op_reg("rax"));
-                else if (t && t->size == 4) emit_inst2("movl", op_label(node->data.identifier.name), op_reg("rax"));
+                else if (t && t->size == 4) emit_inst2("movl", op_label(node->data.identifier.name), op_reg("eax"));
                 else emit_inst2("mov", op_label(node->data.identifier.name), op_reg("rax"));
             }
             node->resolved_type = t;
@@ -975,7 +1027,7 @@ static void gen_expression(ASTNode *node) {
         } else if (t && t->size == 2) {
             emit_inst2("movzwq", op_mem("rax", 0), op_reg("rax"));
         } else if (t && t->size == 4) {
-            emit_inst2("movl", op_mem("rax", 0), op_reg("rax"));
+            emit_inst2("movl", op_mem("rax", 0), op_reg("eax"));
         } else {
             emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
         }
@@ -998,6 +1050,8 @@ static void gen_expression(ASTNode *node) {
         // Load value to RCX
         if (t && t->size == 1) {
             emit_inst2("movzbq", op_mem("rax", 0), op_reg("rcx"));
+        } else if (t && t->size <= 4) {
+            emit_inst2("movslq", op_mem("rax", 0), op_reg("rcx"));
         } else {
             emit_inst2("mov", op_mem("rax", 0), op_reg("rcx"));
         }
@@ -1017,6 +1071,8 @@ static void gen_expression(ASTNode *node) {
         // Store back
         if (t && t->size == 1) {
             emit_inst2("mov", op_reg("cl"), op_mem("rax", 0));
+        } else if (t && t->size <= 4) {
+            emit_inst2("movl", op_reg("ecx"), op_mem("rax", 0));
         } else {
             emit_inst2("mov", op_reg("rcx"), op_mem("rax", 0));
         }
@@ -1203,7 +1259,7 @@ static void gen_expression(ASTNode *node) {
         } else if (mt && mt->size == 2) {
             emit_inst2("movzwq", op_mem("rax", 0), op_reg("rax"));
         } else if (mt && mt->size == 4) {
-            emit_inst2("movl", op_mem("rax", 0), op_reg("rax"));
+            emit_inst2("movl", op_mem("rax", 0), op_reg("eax"));
         } else {
             emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
         }
@@ -1213,13 +1269,15 @@ static void gen_expression(ASTNode *node) {
         
         const char **arg_regs = g_arg_regs;
         const char **xmm_arg_regs = g_xmm_arg_regs;
+        int max_reg = g_max_reg_args;
+        int shadow = g_use_shadow_space ? 32 : 0;
         
         int num_args = (int)node->children_count;
-        int extra_args = num_args > 4 ? num_args - 4 : 0;
+        int extra_args = num_args > max_reg ? num_args - max_reg : 0;
         
         // Calculate padding based on CURRENT stack depth (including any pushed args from outer calls)
         int current_stack_depth = abs(stack_offset);
-        int padding = (16 - ((current_stack_depth + extra_args * 8 + 32) % 16)) % 16;
+        int padding = (16 - ((current_stack_depth + extra_args * 8 + shadow) % 16)) % 16;
         
         if (padding > 0) {
             emit_inst2("sub", op_imm(padding), op_reg("rsp"));
@@ -1238,7 +1296,7 @@ static void gen_expression(ASTNode *node) {
             stack_offset -= 8; // Update stack offset for nested calls
         }
         
-        for (int i = 0; i < (int)num_args && i < 4; i++) {
+        for (int i = 0; i < (int)num_args && i < max_reg; i++) {
             ASTNode *pop_child = node->children[i];
             Type *pop_type = get_expr_type(pop_child);
             if (is_float_type(pop_type)) {
@@ -1249,13 +1307,18 @@ static void gen_expression(ASTNode *node) {
             }
         }
         
-        // Win64 requires 32 bytes of shadow space
-        emit_inst2("sub", op_imm(32), op_reg("rsp"));
+        // Shadow space (Win64 only)
+        if (shadow > 0) {
+            emit_inst2("sub", op_imm(shadow), op_reg("rsp"));
+        }
         emit_inst1("call", op_label(node->data.call.name));
         if (node->resolved_type == NULL) node->resolved_type = get_expr_type(node);
         
         // Clean up shadow space + extra args + padding
-        emit_inst2("add", op_imm(32 + extra_args * 8 + padding), op_reg("rsp"));
+        int cleanup = shadow + extra_args * 8 + padding;
+        if (cleanup > 0) {
+            emit_inst2("add", op_imm(cleanup), op_reg("rsp"));
+        }
         
         // Restore stack offset
         stack_offset = initial_stack_offset;
@@ -1820,9 +1883,10 @@ static void gen_function(ASTNode *node) {
     current_func_name = node->data.function.name;
     stack_offset = 0;
     
-    // Handle parameters (Win64 ABI)
+    // Handle parameters (platform ABI)
     const char **arg_regs = g_arg_regs;
     const char **xmm_arg_regs = g_xmm_arg_regs;
+    int max_reg = g_max_reg_args;
     for (size_t i = 0; i < node->children_count; i++) {
         ASTNode *param = node->children[i];
         if (param->type == AST_VAR_DECL) {
@@ -1837,7 +1901,7 @@ static void gen_function(ASTNode *node) {
             locals[locals_count].label = NULL;
             locals[locals_count].type = param->resolved_type;
             
-            if (i < 4U) {
+            if ((int)i < max_reg) {
                 // Register params: allocate on local stack
                 stack_offset -= alloc_size;
                 locals[locals_count].offset = stack_offset;
@@ -1852,9 +1916,15 @@ static void gen_function(ASTNode *node) {
                     else emit_inst2("mov", op_reg(arg_regs[i]), op_mem("rsp", 0));
                 }
             } else {
-                // Stack params (5th+): already on caller's stack at positive rbp offset
-                // Win64: [rbp+16] = shadow[0], [rbp+48] = param5, [rbp+56] = param6, etc.
-                int param_offset = 48 + ((int)i - 4) * 8;
+                // Stack params: already on caller's stack at positive rbp offset
+                // Win64: [rbp+16] = shadow[0], [rbp+48] = param5, ...
+                // SysV:  [rbp+16] = param7, [rbp+24] = param8, ...
+                int param_offset;
+                if (g_use_shadow_space) {
+                    param_offset = 48 + ((int)i - max_reg) * 8; // Win64
+                } else {
+                    param_offset = 16 + ((int)i - max_reg) * 8; // SysV
+                }
                 locals[locals_count].offset = param_offset;
                 locals_count++;
             }

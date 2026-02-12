@@ -1,5 +1,6 @@
 #include "encoder.h"
 #include <string.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include "coff_writer.h"
 

@@ -11,6 +11,7 @@
 #include <string.h>
 
 // Manually declare needed Windows API to avoid header conflicts with coff.h
+#ifdef _WIN32
 #ifndef _MSC_VER
 #define __declspec(x)
 #define __stdcall
@@ -20,6 +21,7 @@ typedef void *HANDLE;
 #define STD_ERROR_HANDLE ((unsigned long)-12)
 __declspec(dllimport) HANDLE __stdcall GetStdHandle(unsigned long nStdHandle);
 __declspec(dllimport) int __stdcall WriteFile(HANDLE hFile, const void *lpBuffer, unsigned long nNumberOfBytesToWrite, unsigned long *lpNumberOfBytesWritten, void *lpOverlapped);
+#endif
 
 // Large state moved to heap to avoid segment/initialization issues
 static Parser *current_parser;
@@ -147,8 +149,10 @@ int main(int argc, char **argv) {
     if (use_obj) {
         char obj_filename[260];
         sprintf(obj_filename, "%s.obj", out_base);
+#ifdef _WIN32
         // Normalize paths for Windows
         for (char *p = obj_filename; *p; p++) if (*p == '/') *p = '\\';
+#endif
 
         printf("Generating OBJ to %s...\n", obj_filename); fflush(stdout);
         current_writer = malloc(sizeof(COFFWriter));
@@ -165,10 +169,15 @@ int main(int argc, char **argv) {
 
         if (!stop_at_asm) {
             char exe_filename[260];
+#ifdef _WIN32
             sprintf(exe_filename, "%s.exe", out_base);
             for (char *p = exe_filename; *p; p++) if (*p == '/') *p = '\\';
+#else
+            sprintf(exe_filename, "%s", out_base);
+#endif
             
-            char cmd[1024];
+            char cmd[2048];
+#ifdef _WIN32
             const char *linker = getenv("FADORS_LINKER");
             if (!linker) linker = "link";
             
@@ -178,7 +187,9 @@ int main(int argc, char **argv) {
             sprintf(linker_cmd, linker_fmt, linker);
 
             sprintf(cmd, "%s /nologo /STACK:8000000 /subsystem:console /out:\"%s\" \"%s\" kernel32.lib libcmt.lib legacy_stdio_definitions.lib", linker_cmd, exe_filename, obj_filename);
-            
+#else
+            sprintf(cmd, "gcc -o \"%s\" \"%s\" -lc", exe_filename, obj_filename);
+#endif
             if (run_command(cmd) != 0) {
                 printf("Error: Linking failed.\n");
                 return 1;
@@ -196,8 +207,10 @@ int main(int argc, char **argv) {
             strcat(asm_filename, ".s");
         }
         
+#ifdef _WIN32
         // Normalize paths for Windows
         for (char *p = asm_filename; *p; p++) if (*p == '/') *p = '\\';
+#endif
         
         FILE *asm_out = fopen(asm_filename, "w");
         if (!asm_out) {
@@ -214,7 +227,9 @@ int main(int argc, char **argv) {
         if (!stop_at_asm) {
             char exe_filename[260];
             strcpy(exe_filename, out_base);
+#ifdef _WIN32
             strcat(exe_filename, ".exe");
+#endif
             compile_and_link(asm_filename, exe_filename, use_masm);
             printf("Compiled to: %s\n", exe_filename);
         }

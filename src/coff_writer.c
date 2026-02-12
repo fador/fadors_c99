@@ -4,6 +4,10 @@
 #include <stdio.h>
 #include <time.h>
 
+#ifndef _MSC_VER
+#define _strdup strdup
+#endif
+
 void coff_writer_init(COFFWriter *w) {
     buffer_init(&w->text_section);
     buffer_init(&w->data_section);

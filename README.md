@@ -147,6 +147,6 @@ Discovered by attempting to compile `types.c`, `buffer.c`, `lexer.c` with the co
 - [x] **Multi-line `#define` with `\` continuation**: Backslash-newline joining in preprocessor.
 
 #### Phase 5: Self-Hosting Verification
-- [ ] Module-by-module: Compile `buffer.c` → `types.c` → `lexer.c` → etc.
-- [ ] Full self-compilation: Compile entire compiler with itself.
-- [ ] Triple test: Self-compiled compiler compiles itself, output matches.
+- [x] Module-by-module: Compile `buffer.c` → `types.c` → `lexer.c` → etc.
+- [x] Full self-compilation: Compile entire compiler with itself.
+- [x] Triple test: Self-compiled compiler compiles itself, output matches.
