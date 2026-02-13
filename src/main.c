@@ -153,8 +153,9 @@ static int do_cc(int input_count, const char **input_files,
     /*
      * Binary encoder path: .c -> .obj (no external assembler).
      * Supports multiple input files.
+     * Always used for STOP_OBJ and STOP_FULL.
      */
-    if (!use_masm && (stop == STOP_OBJ || stop == STOP_FULL)) {
+    if (stop == STOP_OBJ || stop == STOP_FULL) {
         char *obj_paths[64];
         int obj_count = 0;
 
@@ -211,26 +212,17 @@ static int do_cc(int input_count, const char **input_files,
             rc = linker_link(lnk, exe_filename);
             linker_free(lnk);
             if (rc != 0) printf("Error: ELF linking failed.\n");
-        } else if (lib_count > 0) {
-            /* Windows with external libraries: use system link.exe */
-            char cmd[4096];
-            int pos = 0;
-            pos += sprintf(cmd + pos,
-                "link /nologo /STACK:8000000 /entry:mainCRTStartup"
-                " /subsystem:console /out:\"%s\"", exe_filename);
-            for (i = 0; i < libpath_count; i++)
-                pos += sprintf(cmd + pos, " /LIBPATH:\"%s\"", libpaths[i]);
-            for (i = 0; i < obj_count; i++)
-                pos += sprintf(cmd + pos, " \"%s\"", obj_paths[i]);
-            for (i = 0; i < lib_count; i++)
-                pos += sprintf(cmd + pos, " %s", libraries[i]);
-            rc = run_command(cmd);
-            if (rc != 0) printf("Error: Linking failed.\n");
         } else {
-            /* Windows without libraries: use custom PE linker */
+            /* Windows: use custom PE linker (handles libraries too) */
             PELinker *plnk = pe_linker_new();
             for (i = 0; i < obj_count; i++)
                 pe_linker_add_object_file(plnk, obj_paths[i]);
+            for (i = 0; i < libpath_count; i++)
+                pe_linker_add_lib_path(plnk, libpaths[i]);
+            for (i = 0; i < lib_count; i++)
+                pe_linker_add_library(plnk, libraries[i]);
+            if (lib_count > 0)
+                pe_linker_set_entry(plnk, "mainCRTStartup");
             rc = pe_linker_link(plnk, exe_filename);
             pe_linker_free(plnk);
             if (rc != 0) printf("Error: PE linking failed.\n");
@@ -331,42 +323,14 @@ static int do_cc(int input_count, const char **input_files,
     if (stop == STOP_ASM)
         return 0;
 
-    // Full pipeline: assemble + link (MASM or external as+gcc)
-    char obj_filename[260];
-    char exe_filename[260];
-    char cmd[2048];
-
-    if (output_name) {
-        strncpy(exe_filename, output_name, 259);
-    } else {
-        strcpy(exe_filename, out_base);
-        if (target == TARGET_WINDOWS) strcat(exe_filename, ".exe");
-    }
-
-    if (use_masm) {
-        strncpy(obj_filename, out_base, 255);
-        strcat(obj_filename, ".obj");
-        sprintf(cmd, "ml64 /c /nologo /Fo\"%s\" \"%s\"", obj_filename, asm_filename);
-        if (run_command(cmd) != 0) { printf("Error: Assembly failed.\n"); return 1; }
-
-        const char *linker = getenv("FADORS_LINKER");
-        if (!linker) linker = "link";
-        const char *lfmt = strchr(linker, ' ') ? "\"%s\"" : "%s";
-        char lcmd[1024]; sprintf(lcmd, lfmt, linker);
-        sprintf(cmd, "%s /nologo /STACK:8000000 /entry:main /subsystem:console /out:\"%s\" \"%s\" kernel32.lib",
-                lcmd, exe_filename, obj_filename);
-        if (run_command(cmd) != 0) { printf("Error: Linking failed.\n"); return 1; }
-    } else {
-        strncpy(obj_filename, out_base, 255);
-        strcat(obj_filename, ".o");
-        sprintf(cmd, "as -o \"%s\" \"%s\"", obj_filename, asm_filename);
-        if (run_command(cmd) != 0) { printf("Error: Assembly failed (as).\n"); return 1; }
-        sprintf(cmd, "gcc -no-pie -o \"%s\" \"%s\"", exe_filename, obj_filename);
-        if (run_command(cmd) != 0) { printf("Error: Linking failed (gcc).\n"); return 1; }
-    }
-
-    printf("Compiled to: %s\n", exe_filename);
-    return 0;
+    /* -S was not specified but we ended up here: redirect through binary
+     * encoder path (re-invoke do_cc without use_masm so the binary path
+     * is taken).  This removes the need for external assemblers. */
+    printf("Note: full pipeline now uses built-in binary encoder.\n");
+    return do_cc(input_count, input_files, output_name, STOP_FULL, target,
+                 0 /* use_masm=0 forces binary path */,
+                 lib_count, libraries, libpath_count, libpaths,
+                 define_count, define_names, define_values);
 }
 
 // ---------- AS mode: assemble .s/.asm to object ----------
@@ -442,6 +406,12 @@ static int do_link(int obj_count, const char **obj_files, const char *output_nam
         int i;
         for (i = 0; i < obj_count; i++)
             pe_linker_add_object_file(plnk, obj_files[i]);
+        for (i = 0; i < libpath_count; i++)
+            pe_linker_add_lib_path(plnk, libpaths[i]);
+        for (i = 0; i < lib_count; i++)
+            pe_linker_add_library(plnk, libraries[i]);
+        if (lib_count > 0)
+            pe_linker_set_entry(plnk, "mainCRTStartup");
         int rc = pe_linker_link(plnk, exe_filename);
         pe_linker_free(plnk);
         return rc;

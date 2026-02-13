@@ -13,7 +13,11 @@ char *strncpy(char *dest, const char *src, size_t n);
 char *strchr(const char *s, int c);
 char *strcat(char *dest, const char *src);
 char *strrchr(const char *s, int c);
-char *strdup(const char *s);
 char *_strdup(const char *s);
+#ifdef _WIN32
+#define strdup _strdup
+#else
+char *strdup(const char *s);
+#endif
 
 #endif

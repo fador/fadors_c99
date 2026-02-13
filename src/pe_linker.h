@@ -20,6 +20,7 @@
 #define PE_LINK_SEC_DATA   2
 #define PE_LINK_SEC_BSS    3
 #define PE_LINK_SEC_RDATA  4
+#define PE_LINK_SEC_ABS    5   /* absolute/linker-generated (no RVA fixup) */
 
 /* Symbol storage class (COFF) */
 #define PE_SYM_CLASS_EXTERNAL  2
@@ -45,8 +46,11 @@ typedef struct {
 typedef struct {
     char    *func_name;    /* function name (e.g., "ExitProcess") */
     char    *dll_name;     /* DLL name (e.g., "kernel32.dll") */
-    uint32_t sym_index;    /* corresponding symbol index */
+    uint32_t sym_index;    /* symbol for thunk, or (uint32_t)-1 */
+    uint32_t imp_sym_index;/* __imp_ symbol for direct IAT, or (uint32_t)-1 */
     uint16_t hint;         /* ordinal hint (0 if unknown) */
+    size_t   iat_rdata_offset;  /* filled during link: IAT slot in .rdata */
+    size_t   thunk_text_offset; /* filled during link: thunk in .text */
 } PEImportEntry;
 
 /* Grouped by DLL for import table generation */
@@ -87,6 +91,12 @@ typedef struct {
     uint64_t       stack_reserve;
     uint64_t       image_base;
     const char    *entry_name;  /* default: "main" */
+
+    /* Library support */
+    char      **lib_paths;
+    size_t      lib_path_count;
+    char      **libraries;
+    size_t      lib_count;
 } PELinker;
 
 /* Create / destroy */
@@ -103,5 +113,10 @@ void pe_linker_add_import(PELinker *l, const char *func_name,
 
 /* Perform linking.  Returns 0 on success. */
 int  pe_linker_link(PELinker *l, const char *output_path);
+
+/* Library search / loading support */
+void pe_linker_add_lib_path(PELinker *l, const char *path);
+void pe_linker_add_library(PELinker *l, const char *name);
+void pe_linker_set_entry(PELinker *l, const char *name);
 
 #endif /* PE_LINKER_H */

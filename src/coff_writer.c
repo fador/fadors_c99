@@ -4,9 +4,7 @@
 #include <stdio.h>
 #include <time.h>
 
-#ifndef _MSC_VER
-#define _strdup strdup
-#endif
+
 
 void coff_writer_init(COFFWriter *w) {
     buffer_init(&w->text_section);
@@ -71,7 +69,7 @@ uint32_t coff_writer_add_symbol(COFFWriter *w, const char *name, uint32_t value,
     }
     
     uint32_t index = (uint32_t)w->symbols_count++;
-    w->symbols[index].name = _strdup(name);
+    w->symbols[index].name = strdup(name);
     w->symbols[index].value = value;
     w->symbols[index].section = section;
     w->symbols[index].type = type;

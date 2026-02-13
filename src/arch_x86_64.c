@@ -4,9 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifndef _MSC_VER
-#define _strdup strdup
-#endif
+
 
 #include "encoder.h"
 
@@ -1509,7 +1507,7 @@ static void gen_expression(ASTNode *node) {
             current_section = old_section;
         } else {
             if (string_literals_count >= 8192) { fprintf(stderr, "Error: Too many string literals\n"); exit(1); }
-            string_literals[string_literals_count].label = _strdup(label);
+            string_literals[string_literals_count].label = strdup(label);
             string_literals[string_literals_count].value = malloc(len + 1);
             memcpy(string_literals[string_literals_count].value, node->data.string.value, len + 1);
             string_literals[string_literals_count].length = len;
@@ -1696,7 +1694,7 @@ static void gen_statement(ASTNode *node) {
             current_section = old_section;
             
             locals[locals_count].name = node->data.var_decl.name;
-            locals[locals_count].label = _strdup(slabel);
+            locals[locals_count].label = strdup(slabel);
             locals[locals_count].offset = 0;
             locals[locals_count].type = node->resolved_type;
             locals_count++;
@@ -2040,13 +2038,13 @@ static void gen_statement(ASTNode *node) {
             case_labels[i] = lbl;
             emit_inst2("cmp", op_imm(cases[i]->data.case_stmt.value), op_reg("rax"));
             emit_inst1("je", op_label(case_labels[i]));
-            cases[i]->resolved_type = (Type *)_strdup(case_labels[i]);
+            cases[i]->resolved_type = (Type *)strdup(case_labels[i]);
         }
 
         if (default_node) {
             char default_label[32];
             sprintf(default_label, ".L%d", label_count++);
-            default_node->resolved_type = (Type *)_strdup(default_label);
+            default_node->resolved_type = (Type *)strdup(default_label);
             emit_inst1("jmp", op_label(default_label));
         } else {
             emit_inst1("jmp", op_label(l_end));
