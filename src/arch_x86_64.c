@@ -45,6 +45,24 @@ static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2);
 static Type *get_expr_type(ASTNode *node);
 static int is_float_type(Type *t);
 
+// Peephole optimization state: eliminates redundant jumps and dead code
+static int peep_unreachable = 0;     // 1 after unconditional jmp (suppress dead code)
+static int peep_pending_jmp = 0;     // 1 if there's a buffered jmp to emit
+static char peep_jmp_target[64];     // target label of the buffered jmp
+static int peep_in_flush = 0;        // prevent recursion during flush
+
+static void peep_flush_jmp(void) {
+    if (peep_pending_jmp) {
+        peep_pending_jmp = 0;
+        peep_in_flush = 1;
+        Operand flush_op;
+        flush_op.type = OP_LABEL;
+        flush_op.data.label = peep_jmp_target;
+        emit_inst1("jmp", &flush_op);
+        peep_in_flush = 0;
+    }
+}
+
 static Operand _op_pool[16];
 static int _op_idx = 0;
 
@@ -86,6 +104,20 @@ void arch_x86_64_set_writer(COFFWriter *writer) {
 }
 
 static void emit_label_def(const char *name) {
+    // Peephole: only apply to text section labels
+    if (current_section == SECTION_TEXT) {
+        if (peep_pending_jmp) {
+            const char *cmp_name = name;
+            if (current_syntax == SYNTAX_INTEL && name[0] == '.') cmp_name = name + 1;
+            if (strcmp(cmp_name, peep_jmp_target) == 0) {
+                peep_pending_jmp = 0;  // jmp to next instruction — redundant, cancel it
+            } else {
+                peep_flush_jmp();      // different label — flush the pending jmp
+            }
+        }
+        peep_unreachable = 0;  // label is a potential jump target, code is reachable again
+    }
+
     if (obj_writer) {
         uint8_t storage_class = IMAGE_SYM_CLASS_EXTERNAL;
         if (name[0] == '.') storage_class = IMAGE_SYM_CLASS_STATIC;
@@ -537,6 +569,12 @@ static void print_operand_jmp(Operand *op) {
 }
 
 static void emit_inst0(const char *mnemonic) {
+    // Peephole: suppress dead code after unconditional jmp
+    if (!peep_in_flush && current_section == SECTION_TEXT) {
+        peep_flush_jmp();
+        if (peep_unreachable) return;
+    }
+
     if (obj_writer) {
         encode_inst0(&obj_writer->text_section, mnemonic);
         return;
@@ -551,6 +589,22 @@ static void emit_inst0(const char *mnemonic) {
 }
 
 static void emit_inst1(const char *mnemonic, Operand *op1) {
+    // Peephole: intercept unconditional jmp for buffering/dead-code elimination
+    if (!peep_in_flush && current_section == SECTION_TEXT &&
+        strcmp(mnemonic, "jmp") == 0 && op1->type == OP_LABEL) {
+        if (peep_unreachable) return;  // dead code after previous jmp
+        peep_pending_jmp = 1;
+        strncpy(peep_jmp_target, op1->data.label, 63);
+        peep_jmp_target[63] = '\0';
+        peep_unreachable = 1;
+        return;
+    }
+    // Peephole: suppress dead code after unconditional jmp
+    if (!peep_in_flush && current_section == SECTION_TEXT) {
+        peep_flush_jmp();
+        if (peep_unreachable) return;
+    }
+
     if (obj_writer) {
         encode_inst1(&obj_writer->text_section, mnemonic, op1);
         return;
@@ -585,6 +639,12 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
 }
 
 static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
+    // Peephole: suppress dead code after unconditional jmp
+    if (!peep_in_flush && current_section == SECTION_TEXT) {
+        peep_flush_jmp();
+        if (peep_unreachable) return;
+    }
+
     if (obj_writer) {
         encode_inst2(&obj_writer->text_section, mnemonic, op1, op2);
         return;
@@ -2086,6 +2146,10 @@ static void gen_function(ASTNode *node) {
         return;
     }
     current_function_end_label = label_count++;
+
+    // Reset peephole state for new function
+    peep_unreachable = 0;
+    peep_pending_jmp = 0;
     if (current_syntax == SYNTAX_ATT) {
         if (out) fprintf(out, ".globl %s\n", node->data.function.name);
         emit_label_def(node->data.function.name);
