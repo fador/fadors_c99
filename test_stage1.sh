@@ -38,6 +38,7 @@ EXPECTED=(
     [08_include]=57
     [09_struct_ptr]=10
     [10_ptr]=100
+    [11_nested_struct]=10
     [12_string]=72
     [14_params]=10
     [15_nested_calls]=10
@@ -94,15 +95,15 @@ EXPECTED=(
     [68_union_member_chain]=0
     [69_self_ref_struct]=0
     [70_minimal_switch]=20
+    [71_2d_array]=0
     [test_ternary]=42
 )
 
 # Tests skipped (known blockers that are not regressions)
 declare -A SKIP
 SKIP=(
-    [11_nested_struct]=1   # Parser limitation: nested struct init
-    [13_extern]=1          # Requires external linkage
-    [26_external]=1        # Requires external linkage
+    [13_extern]=1          # Requires external linkage (Windows ExitProcess)
+    [26_external]=1        # Requires external linkage (Windows ExitProcess)
 )
 
 TMPDIR=$(mktemp -d)

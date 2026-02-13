@@ -861,6 +861,11 @@ static ASTNode *parse_initializer(Parser *parser) {
 static ASTNode *parse_statement(Parser *parser) {
     if (parser->current_token.type == TOKEN_KEYWORD_EXTERN) {
     }
+    // Null statement (bare semicolon)
+    if (parser->current_token.type == TOKEN_SEMICOLON) {
+        parser_advance(parser);
+        return NULL;
+    }
     if (parser->current_token.type == TOKEN_KEYWORD_RETURN) {
         parser_advance(parser);
         ASTNode *node = ast_create_node(AST_RETURN);
@@ -1072,13 +1077,19 @@ static ASTNode *parse_statement(Parser *parser) {
                 // Anonymous definition: struct { ... }
                 parser_advance(parser); // Consume keyword
                 Type *type;
+                ASTNode *def_node;
                 if (tag_kind == TOKEN_KEYWORD_ENUM) {
                     type = type_enum(NULL);
-                    return parse_enum_body(parser, type);
+                    def_node = parse_enum_body(parser, type);
                 } else {
                     type = (tag_kind == TOKEN_KEYWORD_UNION) ? type_union(NULL) : type_struct(NULL);
-                    return parse_tag_body(parser, type);
+                    def_node = parse_tag_body(parser, type);
                 }
+                // After body, consume semicolon or handle variable declaration
+                if (parser->current_token.type == TOKEN_SEMICOLON) {
+                    parser_advance(parser);
+                }
+                return def_node;
             } else if (next.type == TOKEN_IDENTIFIER) {
                 // Potential definition or just type usage
                 parser_advance(parser); // Consume keyword
@@ -1091,13 +1102,44 @@ static ASTNode *parse_statement(Parser *parser) {
                 if (check.type == TOKEN_LBRACE) {
                     parser_advance(parser); // Consume Name
                     Type *type;
+                    ASTNode *def_node;
                     if (tag_kind == TOKEN_KEYWORD_ENUM) {
                         type = type_enum(name);
-                        return parse_enum_body(parser, type);
+                        def_node = parse_enum_body(parser, type);
                     } else {
                         type = (tag_kind == TOKEN_KEYWORD_UNION) ? type_union(name) : type_struct(name);
-                        return parse_tag_body(parser, type);
+                        def_node = parse_tag_body(parser, type);
                     }
+                    // After body: might be ';' (type def only) or an identifier (variable decl)
+                    if (parser->current_token.type == TOKEN_SEMICOLON) {
+                        parser_advance(parser);
+                        return def_node;
+                    }
+                    // Variable declaration after body: struct Point { ... } p;
+                    if (parser->current_token.type == TOKEN_STAR || parser->current_token.type == TOKEN_IDENTIFIER) {
+                        while (parser->current_token.type == TOKEN_STAR) {
+                            type = type_ptr(type);
+                            parser_advance(parser);
+                        }
+                        ASTNode *var_node = ast_create_node(AST_VAR_DECL);
+                        var_node->resolved_type = type;
+                        if (parser->current_token.type == TOKEN_IDENTIFIER) {
+                            var_node->data.var_decl.name = malloc(parser->current_token.length + 1);
+                            strncpy(var_node->data.var_decl.name, parser->current_token.start, parser->current_token.length);
+                            var_node->data.var_decl.name[parser->current_token.length] = '\0';
+                            parser_advance(parser);
+                            add_local(parser, var_node->data.var_decl.name, var_node->resolved_type);
+                        }
+                        if (parser->current_token.type == TOKEN_EQUAL) {
+                            parser_advance(parser);
+                            var_node->data.var_decl.initializer = parse_initializer(parser);
+                        } else {
+                            var_node->data.var_decl.initializer = NULL;
+                        }
+                        parser_expect(parser, TOKEN_SEMICOLON);
+                        return var_node;
+                    }
+                    return def_node;
                 }
                 
                 // Variable declaration: struct Name var;
