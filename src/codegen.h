@@ -11,8 +11,14 @@ typedef enum {
     SYNTAX_INTEL
 } CodegenSyntax;
 
+typedef enum {
+    TARGET_LINUX,
+    TARGET_WINDOWS
+} TargetPlatform;
+
 void codegen_init(FILE *output);
 void codegen_set_syntax(CodegenSyntax syntax);
+void codegen_set_target(TargetPlatform target);
 void codegen_set_writer(COFFWriter *writer);
 void codegen_generate(ASTNode *program);
 

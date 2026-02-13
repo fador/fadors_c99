@@ -31,6 +31,13 @@ static const char *g_xmm_arg_regs[8];
 static int g_max_reg_args = 4;       // 4 for Win64, 6 for SysV
 static int g_use_shadow_space = 1;   // 1 for Win64, 0 for SysV
 
+static TargetPlatform g_target =
+#ifdef _WIN32
+    TARGET_WINDOWS;
+#else
+    TARGET_LINUX;
+#endif
+
 static void gen_function(ASTNode *node);
 static void gen_statement(ASTNode *node);
 static void gen_global_decl(ASTNode *node);
@@ -107,37 +114,37 @@ static void emit_label_def(const char *name) {
 
 void arch_x86_64_init(FILE *output) {
     out = output;
-#ifdef _WIN32
-    // Win64 ABI
-    g_arg_regs[0] = "rcx";
-    g_arg_regs[1] = "rdx";
-    g_arg_regs[2] = "r8";
-    g_arg_regs[3] = "r9";
-    g_xmm_arg_regs[0] = "xmm0";
-    g_xmm_arg_regs[1] = "xmm1";
-    g_xmm_arg_regs[2] = "xmm2";
-    g_xmm_arg_regs[3] = "xmm3";
-    g_max_reg_args = 4;
-    g_use_shadow_space = 1;
-#else
-    // System V AMD64 ABI (Linux/macOS)
-    g_arg_regs[0] = "rdi";
-    g_arg_regs[1] = "rsi";
-    g_arg_regs[2] = "rdx";
-    g_arg_regs[3] = "rcx";
-    g_arg_regs[4] = "r8";
-    g_arg_regs[5] = "r9";
-    g_xmm_arg_regs[0] = "xmm0";
-    g_xmm_arg_regs[1] = "xmm1";
-    g_xmm_arg_regs[2] = "xmm2";
-    g_xmm_arg_regs[3] = "xmm3";
-    g_xmm_arg_regs[4] = "xmm4";
-    g_xmm_arg_regs[5] = "xmm5";
-    g_xmm_arg_regs[6] = "xmm6";
-    g_xmm_arg_regs[7] = "xmm7";
-    g_max_reg_args = 6;
-    g_use_shadow_space = 0;
-#endif
+    if (g_target == TARGET_WINDOWS) {
+        // Win64 ABI
+        g_arg_regs[0] = "rcx";
+        g_arg_regs[1] = "rdx";
+        g_arg_regs[2] = "r8";
+        g_arg_regs[3] = "r9";
+        g_xmm_arg_regs[0] = "xmm0";
+        g_xmm_arg_regs[1] = "xmm1";
+        g_xmm_arg_regs[2] = "xmm2";
+        g_xmm_arg_regs[3] = "xmm3";
+        g_max_reg_args = 4;
+        g_use_shadow_space = 1;
+    } else {
+        // System V AMD64 ABI (Linux/macOS)
+        g_arg_regs[0] = "rdi";
+        g_arg_regs[1] = "rsi";
+        g_arg_regs[2] = "rdx";
+        g_arg_regs[3] = "rcx";
+        g_arg_regs[4] = "r8";
+        g_arg_regs[5] = "r9";
+        g_xmm_arg_regs[0] = "xmm0";
+        g_xmm_arg_regs[1] = "xmm1";
+        g_xmm_arg_regs[2] = "xmm2";
+        g_xmm_arg_regs[3] = "xmm3";
+        g_xmm_arg_regs[4] = "xmm4";
+        g_xmm_arg_regs[5] = "xmm5";
+        g_xmm_arg_regs[6] = "xmm6";
+        g_xmm_arg_regs[7] = "xmm7";
+        g_max_reg_args = 6;
+        g_use_shadow_space = 0;
+    }
     if (out && !obj_writer && current_syntax == SYNTAX_INTEL) {
         fprintf(out, "_TEXT SEGMENT\n");
     }
@@ -145,6 +152,10 @@ void arch_x86_64_init(FILE *output) {
 
 void arch_x86_64_set_syntax(CodegenSyntax syntax) {
     current_syntax = syntax;
+}
+
+void arch_x86_64_set_target(TargetPlatform target) {
+    g_target = target;
 }
 
 void arch_x86_64_generate(ASTNode *program) {

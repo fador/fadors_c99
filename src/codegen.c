@@ -12,6 +12,10 @@ void codegen_set_syntax(CodegenSyntax syntax) {
     arch_x86_64_set_syntax(syntax);
 }
 
+void codegen_set_target(TargetPlatform target) {
+    arch_x86_64_set_target(target);
+}
+
 void codegen_set_writer(COFFWriter *writer) {
     arch_x86_64_set_writer(writer);
 }

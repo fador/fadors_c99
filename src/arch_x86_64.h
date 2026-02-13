@@ -32,6 +32,9 @@ void arch_x86_64_init(FILE *output);
 // Set the output syntax (AT&T or Intel/MASM)
 void arch_x86_64_set_syntax(CodegenSyntax syntax);
 
+// Set the target platform / ABI (Linux SysV or Windows Win64)
+void arch_x86_64_set_target(TargetPlatform target);
+
 // Set the COFF writer for binary generation
 void arch_x86_64_set_writer(COFFWriter *writer);
 
