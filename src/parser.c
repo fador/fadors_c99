@@ -1127,15 +1127,21 @@ static ASTNode *parse_statement(Parser *parser) {
                     parser_advance(parser);
                     add_local(parser, node->data.var_decl.name, node->resolved_type);
                     
-                    // Handle array: struct Foo arr[10];
-                    if (parser->current_token.type == TOKEN_LBRACKET) {
-                        parser_advance(parser);
-                        if (parser->current_token.type != TOKEN_RBRACKET) {
-                            ASTNode *size_expr = parse_expression(parser);
-                            int sz = eval_constant_expression(size_expr);
-                            node->resolved_type = type_array(node->resolved_type, sz);
+                    // Handle array: struct Foo arr[10]; or arr[4][8];
+                    {
+                        int dims[16];
+                        int ndims = 0;
+                        while (parser->current_token.type == TOKEN_LBRACKET) {
+                            parser_advance(parser);
+                            if (parser->current_token.type != TOKEN_RBRACKET) {
+                                ASTNode *size_expr = parse_expression(parser);
+                                dims[ndims++] = eval_constant_expression(size_expr);
+                            }
+                            parser_expect(parser, TOKEN_RBRACKET);
                         }
-                        parser_expect(parser, TOKEN_RBRACKET);
+                        for (int _di = ndims - 1; _di >= 0; _di--) {
+                            node->resolved_type = type_array(node->resolved_type, dims[_di]);
+                        }
                     }
                     
                     if (parser->current_token.type == TOKEN_EQUAL) {
@@ -1159,13 +1165,20 @@ static ASTNode *parse_statement(Parser *parser) {
                             n2[parser->current_token.length] = '\0';
                             parser_advance(parser);
                             Type *t2 = vt;
-                            if (parser->current_token.type == TOKEN_LBRACKET) {
-                                parser_advance(parser);
-                                if (parser->current_token.type != TOKEN_RBRACKET) {
-                                    ASTNode *sz2 = parse_expression(parser);
-                                    t2 = type_array(t2, eval_constant_expression(sz2));
+                            {
+                                int dims[16];
+                                int ndims = 0;
+                                while (parser->current_token.type == TOKEN_LBRACKET) {
+                                    parser_advance(parser);
+                                    if (parser->current_token.type != TOKEN_RBRACKET) {
+                                        ASTNode *sz2 = parse_expression(parser);
+                                        dims[ndims++] = eval_constant_expression(sz2);
+                                    }
+                                    parser_expect(parser, TOKEN_RBRACKET);
                                 }
-                                parser_expect(parser, TOKEN_RBRACKET);
+                                for (int _di = ndims - 1; _di >= 0; _di--) {
+                                    t2 = type_array(t2, dims[_di]);
+                                }
                             }
                             add_local(parser, n2, t2);
                             free(n2);
@@ -1220,14 +1233,22 @@ static ASTNode *parse_statement(Parser *parser) {
             memcpy(node->data.var_decl.name, parser->current_token.start, parser->current_token.length);
             node->data.var_decl.name[parser->current_token.length] = '\0';
             parser_advance(parser);
-            while (parser->current_token.type == TOKEN_LBRACKET) {
-                parser_advance(parser);
-                if (parser->current_token.type != TOKEN_RBRACKET) {
-                    ASTNode *size_expr = parse_expression(parser);
-                    int size = eval_constant_expression(size_expr);
-                    node->resolved_type = type_array(node->resolved_type, size);
+            // Collect all array dimensions, then apply in reverse for correct C semantics
+            // e.g. char a[4][8] = array of 4, each being array of 8 chars
+            {
+                int dims[16];
+                int ndims = 0;
+                while (parser->current_token.type == TOKEN_LBRACKET) {
+                    parser_advance(parser);
+                    if (parser->current_token.type != TOKEN_RBRACKET) {
+                        ASTNode *size_expr = parse_expression(parser);
+                        dims[ndims++] = eval_constant_expression(size_expr);
+                    }
+                    parser_expect(parser, TOKEN_RBRACKET);
                 }
-                parser_expect(parser, TOKEN_RBRACKET);
+                for (int _di = ndims - 1; _di >= 0; _di--) {
+                    node->resolved_type = type_array(node->resolved_type, dims[_di]);
+                }
             }
             if (parser->current_token.type == TOKEN_LPAREN) {
                 int depth = 0;
@@ -1274,14 +1295,20 @@ static ASTNode *parse_statement(Parser *parser) {
                         memcpy(extra->data.var_decl.name, parser->current_token.start, parser->current_token.length);
                         extra->data.var_decl.name[parser->current_token.length] = '\0';
                         parser_advance(parser);
-                        if (parser->current_token.type == TOKEN_LBRACKET) {
-                            parser_advance(parser);
-                            if (parser->current_token.type != TOKEN_RBRACKET) {
-                                ASTNode *sz = parse_expression(parser);
-                                int arr_size = eval_constant_expression(sz);
-                                extra->resolved_type = type_array(extra->resolved_type, arr_size);
+                        {
+                            int dims[16];
+                            int ndims = 0;
+                            while (parser->current_token.type == TOKEN_LBRACKET) {
+                                parser_advance(parser);
+                                if (parser->current_token.type != TOKEN_RBRACKET) {
+                                    ASTNode *sz = parse_expression(parser);
+                                    dims[ndims++] = eval_constant_expression(sz);
+                                }
+                                parser_expect(parser, TOKEN_RBRACKET);
                             }
-                            parser_expect(parser, TOKEN_RBRACKET);
+                            for (int _di = ndims - 1; _di >= 0; _di--) {
+                                extra->resolved_type = type_array(extra->resolved_type, dims[_di]);
+                            }
                         }
                         add_local(parser, extra->data.var_decl.name, extra->resolved_type);
                         if (parser->current_token.type == TOKEN_EQUAL) {
@@ -1546,15 +1573,21 @@ static ASTNode *parse_external_declaration(Parser *parser) {
             node->data.var_decl.is_static = is_static;
             node->data.var_decl.is_extern = is_extern;
             node->data.var_decl.name = name;
-            // Array support: int a[10];
-            if (parser->current_token.type == TOKEN_LBRACKET) {
-                parser_advance(parser);
-                if (parser->current_token.type != TOKEN_RBRACKET) {
-                    ASTNode *size_expr = parse_expression(parser);
-                    int size = eval_constant_expression(size_expr);
-                    node->resolved_type = type_array(node->resolved_type, size);
+            // Array support: int a[10]; or a[4][8];
+            {
+                int dims[16];
+                int ndims = 0;
+                while (parser->current_token.type == TOKEN_LBRACKET) {
+                    parser_advance(parser);
+                    if (parser->current_token.type != TOKEN_RBRACKET) {
+                        ASTNode *size_expr = parse_expression(parser);
+                        dims[ndims++] = eval_constant_expression(size_expr);
+                    }
+                    parser_expect(parser, TOKEN_RBRACKET);
                 }
-                parser_expect(parser, TOKEN_RBRACKET);
+                for (int _di = ndims - 1; _di >= 0; _di--) {
+                    node->resolved_type = type_array(node->resolved_type, dims[_di]);
+                }
             }
 
             add_global(parser, name, node->resolved_type);
@@ -1639,15 +1672,21 @@ static ASTNode *parse_tag_body(Parser *parser, Type *type) {
                 member->data.var_decl.name[parser->current_token.length] = '\0';
                 parser_advance(parser);
                 
-                // Array support: int a[10];
-                if (parser->current_token.type == TOKEN_LBRACKET) {
-                    parser_advance(parser);
-                    if (parser->current_token.type != TOKEN_RBRACKET) {
-                        ASTNode *size_expr = parse_expression(parser);
-                        int size = eval_constant_expression(size_expr);
-                        member_type = type_array(member_type, size);
+                // Array support: int a[10]; or a[4][8];
+                {
+                    int dims[16];
+                    int ndims = 0;
+                    while (parser->current_token.type == TOKEN_LBRACKET) {
+                        parser_advance(parser);
+                        if (parser->current_token.type != TOKEN_RBRACKET) {
+                            ASTNode *size_expr = parse_expression(parser);
+                            dims[ndims++] = eval_constant_expression(size_expr);
+                        }
+                        parser_expect(parser, TOKEN_RBRACKET);
                     }
-                    parser_expect(parser, TOKEN_RBRACKET);
+                    for (int _di = ndims - 1; _di >= 0; _di--) {
+                        member_type = type_array(member_type, dims[_di]);
+                    }
                 }
                 
                 member->resolved_type = member_type;

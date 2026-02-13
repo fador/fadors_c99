@@ -1019,7 +1019,9 @@ static void gen_expression(ASTNode *node) {
     } else if (node->type == AST_ARRAY_ACCESS) {
         gen_addr(node);
         Type *t = node->resolved_type; // Element type
-        if (is_float_type(t)) {
+        if (t && t->kind == TYPE_ARRAY) {
+            // Array element decays to pointer - address is already the value
+        } else if (is_float_type(t)) {
             if (t->size == 4) emit_inst2("movss", op_mem("rax", 0), op_reg("xmm0"));
             else emit_inst2("movsd", op_mem("rax", 0), op_reg("xmm0"));
         } else if (t && t->size == 1) {
