@@ -882,6 +882,192 @@ static void pe_add_default_imports(PELinker *l) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Built-in CRT/Win32 import table for cross-compilation             */
+/*  Maps common function names to their Windows DLL when .lib files   */
+/*  are not available (e.g. cross-compiling from Linux).              */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    const char *func_name;
+    const char *dll_name;
+} BuiltinImportEntry;
+
+static const BuiltinImportEntry builtin_imports[] = {
+    /* kernel32.dll */
+    {"ExitProcess",              "kernel32.dll"},
+    {"GetStdHandle",             "kernel32.dll"},
+    {"WriteFile",                "kernel32.dll"},
+    {"ReadFile",                 "kernel32.dll"},
+    {"GetLastError",             "kernel32.dll"},
+    {"SetLastError",             "kernel32.dll"},
+    {"CloseHandle",              "kernel32.dll"},
+    {"CreateFileA",              "kernel32.dll"},
+    {"CreateFileW",              "kernel32.dll"},
+    {"GetFileSize",              "kernel32.dll"},
+    {"GetFileSizeEx",            "kernel32.dll"},
+    {"VirtualAlloc",             "kernel32.dll"},
+    {"VirtualFree",              "kernel32.dll"},
+    {"GetProcessHeap",           "kernel32.dll"},
+    {"HeapAlloc",                "kernel32.dll"},
+    {"HeapFree",                 "kernel32.dll"},
+    {"HeapReAlloc",              "kernel32.dll"},
+    {"GetCommandLineA",          "kernel32.dll"},
+    {"GetCommandLineW",          "kernel32.dll"},
+    {"GetEnvironmentVariableA",  "kernel32.dll"},
+    {"GetEnvironmentVariableW",  "kernel32.dll"},
+    {"GetModuleHandleA",         "kernel32.dll"},
+    {"GetModuleHandleW",         "kernel32.dll"},
+    {"LoadLibraryA",             "kernel32.dll"},
+    {"GetProcAddress",           "kernel32.dll"},
+    {"QueryPerformanceCounter",  "kernel32.dll"},
+    {"QueryPerformanceFrequency","kernel32.dll"},
+    {"Sleep",                    "kernel32.dll"},
+    {"GetTickCount",             "kernel32.dll"},
+    {"MultiByteToWideChar",      "kernel32.dll"},
+    {"WideCharToMultiByte",      "kernel32.dll"},
+    {"GetCurrentDirectoryA",     "kernel32.dll"},
+    {"SetCurrentDirectoryA",     "kernel32.dll"},
+    {"CreateProcessA",           "kernel32.dll"},
+    {"WaitForSingleObject",      "kernel32.dll"},
+    {"GetExitCodeProcess",       "kernel32.dll"},
+
+    /* ucrtbase.dll — C stdio */
+    {"__acrt_iob_func",          "ucrtbase.dll"},
+    {"printf",                   "ucrtbase.dll"},
+    {"sprintf",                  "ucrtbase.dll"},
+    {"snprintf",                 "ucrtbase.dll"},
+    {"fprintf",                  "ucrtbase.dll"},
+    {"sscanf",                   "ucrtbase.dll"},
+    {"fscanf",                   "ucrtbase.dll"},
+    {"scanf",                    "ucrtbase.dll"},
+    {"vprintf",                  "ucrtbase.dll"},
+    {"vfprintf",                 "ucrtbase.dll"},
+    {"vsprintf",                 "ucrtbase.dll"},
+    {"vsnprintf",                "ucrtbase.dll"},
+    {"puts",                     "ucrtbase.dll"},
+    {"fputs",                    "ucrtbase.dll"},
+    {"fputc",                    "ucrtbase.dll"},
+    {"putchar",                  "ucrtbase.dll"},
+    {"fgets",                    "ucrtbase.dll"},
+    {"fgetc",                    "ucrtbase.dll"},
+    {"getchar",                  "ucrtbase.dll"},
+    {"fopen",                    "ucrtbase.dll"},
+    {"fclose",                   "ucrtbase.dll"},
+    {"fread",                    "ucrtbase.dll"},
+    {"fwrite",                   "ucrtbase.dll"},
+    {"fseek",                    "ucrtbase.dll"},
+    {"ftell",                    "ucrtbase.dll"},
+    {"fflush",                   "ucrtbase.dll"},
+    {"feof",                     "ucrtbase.dll"},
+    {"ferror",                   "ucrtbase.dll"},
+    {"rewind",                   "ucrtbase.dll"},
+    {"remove",                   "ucrtbase.dll"},
+    {"rename",                   "ucrtbase.dll"},
+    {"tmpfile",                  "ucrtbase.dll"},
+    {"tmpnam",                   "ucrtbase.dll"},
+    {"perror",                   "ucrtbase.dll"},
+    {"setvbuf",                  "ucrtbase.dll"},
+
+    /* ucrtbase.dll — C stdlib */
+    {"malloc",                   "ucrtbase.dll"},
+    {"calloc",                   "ucrtbase.dll"},
+    {"realloc",                  "ucrtbase.dll"},
+    {"free",                     "ucrtbase.dll"},
+    {"atoi",                     "ucrtbase.dll"},
+    {"atol",                     "ucrtbase.dll"},
+    {"atof",                     "ucrtbase.dll"},
+    {"strtol",                   "ucrtbase.dll"},
+    {"strtoul",                  "ucrtbase.dll"},
+    {"strtoll",                  "ucrtbase.dll"},
+    {"strtoull",                 "ucrtbase.dll"},
+    {"strtod",                   "ucrtbase.dll"},
+    {"strtof",                   "ucrtbase.dll"},
+    {"abs",                      "ucrtbase.dll"},
+    {"labs",                     "ucrtbase.dll"},
+    {"exit",                     "ucrtbase.dll"},
+    {"_exit",                    "ucrtbase.dll"},
+    {"abort",                    "ucrtbase.dll"},
+    {"atexit",                   "ucrtbase.dll"},
+    {"getenv",                   "ucrtbase.dll"},
+    {"system",                   "ucrtbase.dll"},
+    {"qsort",                    "ucrtbase.dll"},
+    {"bsearch",                  "ucrtbase.dll"},
+    {"rand",                     "ucrtbase.dll"},
+    {"srand",                    "ucrtbase.dll"},
+
+    /* ucrtbase.dll — C string */
+    {"memcpy",                   "ucrtbase.dll"},
+    {"memset",                   "ucrtbase.dll"},
+    {"memcmp",                   "ucrtbase.dll"},
+    {"memmove",                  "ucrtbase.dll"},
+    {"memchr",                   "ucrtbase.dll"},
+    {"strlen",                   "ucrtbase.dll"},
+    {"strcmp",                    "ucrtbase.dll"},
+    {"strncmp",                  "ucrtbase.dll"},
+    {"strcpy",                   "ucrtbase.dll"},
+    {"strncpy",                  "ucrtbase.dll"},
+    {"strcat",                   "ucrtbase.dll"},
+    {"strncat",                  "ucrtbase.dll"},
+    {"strchr",                   "ucrtbase.dll"},
+    {"strrchr",                  "ucrtbase.dll"},
+    {"strstr",                   "ucrtbase.dll"},
+    {"strpbrk",                  "ucrtbase.dll"},
+    {"strspn",                   "ucrtbase.dll"},
+    {"strcspn",                  "ucrtbase.dll"},
+    {"strtok",                   "ucrtbase.dll"},
+    {"strerror",                 "ucrtbase.dll"},
+    {"_strdup",                  "ucrtbase.dll"},
+
+    /* ucrtbase.dll — C ctype */
+    {"isalpha",                  "ucrtbase.dll"},
+    {"isdigit",                  "ucrtbase.dll"},
+    {"isalnum",                  "ucrtbase.dll"},
+    {"isspace",                  "ucrtbase.dll"},
+    {"isupper",                  "ucrtbase.dll"},
+    {"islower",                  "ucrtbase.dll"},
+    {"isprint",                  "ucrtbase.dll"},
+    {"ispunct",                  "ucrtbase.dll"},
+    {"isxdigit",                 "ucrtbase.dll"},
+    {"toupper",                  "ucrtbase.dll"},
+    {"tolower",                  "ucrtbase.dll"},
+
+    /* ucrtbase.dll — C time */
+    {"time",                     "ucrtbase.dll"},
+    {"_time64",                  "ucrtbase.dll"},
+    {"_time32",                  "ucrtbase.dll"},
+    {"clock",                    "ucrtbase.dll"},
+    {"difftime",                 "ucrtbase.dll"},
+    {"mktime",                   "ucrtbase.dll"},
+    {"localtime",                "ucrtbase.dll"},
+    {"gmtime",                   "ucrtbase.dll"},
+    {"strftime",                 "ucrtbase.dll"},
+
+    /* ucrtbase.dll — C math (some may also be in ucrtbase) */
+    {"ceil",                     "ucrtbase.dll"},
+    {"floor",                    "ucrtbase.dll"},
+    {"sqrt",                     "ucrtbase.dll"},
+    {"pow",                      "ucrtbase.dll"},
+    {"fabs",                     "ucrtbase.dll"},
+    {"log",                      "ucrtbase.dll"},
+    {"log10",                    "ucrtbase.dll"},
+    {"exp",                      "ucrtbase.dll"},
+    {"sin",                      "ucrtbase.dll"},
+    {"cos",                      "ucrtbase.dll"},
+    {"tan",                      "ucrtbase.dll"},
+
+    {NULL, NULL}  /* sentinel */
+};
+
+static const char *pe_lookup_builtin_dll(const char *func_name) {
+    const BuiltinImportEntry *e;
+    for (e = builtin_imports; e->func_name != NULL; e++) {
+        if (strcmp(e->func_name, func_name) == 0)
+            return e->dll_name;
+    }
+    return NULL;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Resolve imports: match undefined symbols to import entries        */
 /* ------------------------------------------------------------------ */
 
@@ -905,9 +1091,44 @@ static void pe_resolve_imports(PELinker *l) {
         }
 
         if (!found) {
-            /* Unknown undefined symbol — try to auto-import from common DLLs.
-             * This is a simple heuristic: if the symbol is referenced by
-             * a relocation, it might be a DLL import. For now, report error. */
+            /* Try built-in import table (for cross-compilation without .lib files) */
+            const char *dll = pe_lookup_builtin_dll(l->symbols[i].name);
+            if (dll) {
+                pe_linker_add_import(l, l->symbols[i].name, dll, 0);
+                l->imports[l->import_count - 1].sym_index = (uint32_t)i;
+                found = 1;
+            }
+        }
+
+        if (!found) {
+            /* Check for __imp_ prefixed symbols and try builtin table
+             * with the unprefixed name */
+            if (strncmp(l->symbols[i].name, "__imp_", 6) == 0) {
+                const char *unprefixed = l->symbols[i].name + 6;
+                const char *dll = pe_lookup_builtin_dll(unprefixed);
+                if (dll) {
+                    /* Find or create the import entry */
+                    size_t k;
+                    int imp_found = 0;
+                    for (k = 0; k < l->import_count; k++) {
+                        if (strcmp(l->imports[k].func_name, unprefixed) == 0 &&
+                            strcmp(l->imports[k].dll_name, dll) == 0) {
+                            l->imports[k].imp_sym_index = (uint32_t)i;
+                            imp_found = 1;
+                            break;
+                        }
+                    }
+                    if (!imp_found) {
+                        pe_linker_add_import(l, unprefixed, dll, 0);
+                        l->imports[l->import_count - 1].imp_sym_index = (uint32_t)i;
+                    }
+                    found = 1;
+                }
+            }
+        }
+
+        if (!found) {
+            /* Still unknown — report error if referenced by a relocation */
             int referenced = 0;
             size_t k;
             for (k = 0; k < l->reloc_count; k++) {

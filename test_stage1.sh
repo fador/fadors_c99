@@ -49,7 +49,7 @@ EXPECTED=(
     [20_switch]=120
     [21_enum]=6
     [22_union]=42
-    [23_pointer_math]=2
+    [23_pointer_math]=0
     [24_coff_test]=42
     [25_global]=52
     [28_minimal_float]=0
@@ -96,6 +96,10 @@ EXPECTED=(
     [69_self_ref_struct]=0
     [70_minimal_switch]=20
     [71_2d_array]=0
+    [72_global_init_list]=0
+    [73_int64_arith]=42
+    [74_reloc_arith]=42
+    [75_reloc_test]=42
     [test_ternary]=42
 )
 

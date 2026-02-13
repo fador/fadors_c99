@@ -30,7 +30,7 @@ int main() {
     reloc.addend = -4;
 
     LinkSym sym;
-    sym.value = 4259043;  /* 0x4000e3 */
+    sym.value = 4194531;  /* 0x4000e3 */
 
     LinkReloc *r = &reloc;
     uint64_t text_vaddr = 4194480;  /* 0x4000b0 */

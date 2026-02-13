@@ -2,6 +2,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* 0 = LP64 (Linux: long=8), 1 = LLP64 (Windows: long=4) */
+static int target_is_windows = 0;
+
+void types_set_target(int is_windows) {
+    target_is_windows = is_windows;
+}
+
 Type *type_int() {
     Type *t = malloc(sizeof(Type));
     t->kind = TYPE_INT;
@@ -21,7 +28,7 @@ Type *type_short() {
 Type *type_long() {
     Type *t = malloc(sizeof(Type));
     t->kind = TYPE_LONG;
-    t->size = 4;
+    t->size = target_is_windows ? 4 : 8;  /* LLP64 vs LP64 */
     t->array_len = 0;
     return t;
 }

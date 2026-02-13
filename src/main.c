@@ -9,6 +9,7 @@
 #include "elf_writer.h"
 #include "linker.h"
 #include "pe_linker.h"
+#include "types.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -120,6 +121,7 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
     lexer_init(&lexer, preprocessed);
     current_parser = malloc(sizeof(Parser));
     parser_init(current_parser, &lexer);
+    types_set_target(target == TARGET_WINDOWS);
     ASTNode *program = parser_parse(current_parser);
 
     codegen_set_target(target);
@@ -278,6 +280,7 @@ static int do_cc(int input_count, const char **input_files,
     current_parser = malloc(sizeof(Parser));
     parser_init(current_parser, &lexer);
 
+    types_set_target(target == TARGET_WINDOWS);
     printf("Parsing...\n"); fflush(stdout);
     ASTNode *program = parser_parse(current_parser);
     printf("Parsing complete.\n");

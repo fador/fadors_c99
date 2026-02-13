@@ -41,6 +41,9 @@ typedef struct Type {
     } data;
 } Type;
 
+/* Set target data model: 0 = LP64 (Linux), 1 = LLP64 (Windows) */
+void types_set_target(int is_windows);
+
 Type *type_int();
 Type *type_short();
 Type *type_long();
