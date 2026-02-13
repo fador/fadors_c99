@@ -719,7 +719,7 @@ int linker_link(Linker *l, const char *output_path) {
 
         /* Replace text buffer */
         buffer_free(&l->text);
-        l->text = new_text;
+        memcpy(&l->text, &new_text, sizeof(Buffer));
 
         /* Add _start symbol at offset 0 */
         linker_add_sym(l, "_start", 0, SEC_TEXT,

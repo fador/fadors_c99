@@ -922,6 +922,16 @@ static void gen_binary_expr(ASTNode *node) {
         size = right_type->data.ptr_to->size;
     }
     
+    // Determine if we should use 32-bit or 64-bit integer operations
+    // Use 32-bit only when both operands are <= 4 bytes and neither is a pointer
+    int use_32bit = 0;
+    if (left_type && right_type &&
+        left_type->kind != TYPE_PTR && left_type->kind != TYPE_ARRAY &&
+        right_type->kind != TYPE_PTR && right_type->kind != TYPE_ARRAY &&
+        left_type->size <= 4 && right_type->size <= 4) {
+        use_32bit = 1;
+    }
+
     switch (node->data.binary_expr.op) {
         case TOKEN_PLUS:
             if ((left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY)) && 
@@ -935,7 +945,7 @@ static void gen_binary_expr(ASTNode *node) {
             } else {
                 node->resolved_type = left_type ? left_type : right_type;
             }
-            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("addl", op_reg("ecx"), op_reg("eax"));
+            if (use_32bit) emit_inst2("addl", op_reg("ecx"), op_reg("eax"));
             else emit_inst2("add", op_reg("rcx"), op_reg("rax"));
             break;
         case TOKEN_MINUS: 
@@ -954,13 +964,13 @@ static void gen_binary_expr(ASTNode *node) {
                 }
                 node->resolved_type = type_int();
             } else {
-                if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("subl", op_reg("ecx"), op_reg("eax"));
+                if (use_32bit) emit_inst2("subl", op_reg("ecx"), op_reg("eax"));
                 else emit_inst2("sub", op_reg("rcx"), op_reg("rax"));
                 node->resolved_type = left_type;
             }
             break;
         case TOKEN_STAR:  
-            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("imull", op_reg("ecx"), op_reg("eax"));
+            if (use_32bit) emit_inst2("imull", op_reg("ecx"), op_reg("eax"));
             else emit_inst2("imul", op_reg("rcx"), op_reg("rax")); 
             node->resolved_type = left_type;
             break;
@@ -974,17 +984,17 @@ static void gen_binary_expr(ASTNode *node) {
             node->resolved_type = left_type;
             break;
         case TOKEN_AMPERSAND:
-            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("andl", op_reg("ecx"), op_reg("eax"));
+            if (use_32bit) emit_inst2("andl", op_reg("ecx"), op_reg("eax"));
             else emit_inst2("and", op_reg("rcx"), op_reg("rax"));
             node->resolved_type = left_type;
             break;
         case TOKEN_PIPE:
-            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("orl", op_reg("ecx"), op_reg("eax"));
+            if (use_32bit) emit_inst2("orl", op_reg("ecx"), op_reg("eax"));
             else emit_inst2("or", op_reg("rcx"), op_reg("rax"));
             node->resolved_type = left_type;
             break;
         case TOKEN_CARET:
-            if (node->resolved_type && node->resolved_type->size == 4) emit_inst2("xorl", op_reg("ecx"), op_reg("eax"));
+            if (use_32bit) emit_inst2("xorl", op_reg("ecx"), op_reg("eax"));
             else emit_inst2("xor", op_reg("rcx"), op_reg("rax"));
             node->resolved_type = left_type;
             break;
@@ -1231,9 +1241,29 @@ static void gen_expression(ASTNode *node) {
         node->resolved_type = dst;
     } else if (node->type == AST_ASSIGN) {
         if (!node->data.assign.left || !node->data.assign.value) { fprintf(stderr, "      Assign: NULL child!\n"); return; }
-        gen_expression(node->data.assign.value);
         ASTNode *left_node = node->data.assign.left;
         Type *t = get_expr_type(left_node);
+
+        /* --- Struct / large-type assignment: use memcpy ----------- */
+        if (t && t->size > 8) {
+            /* Get source address → push */
+            gen_addr(node->data.assign.value);
+            emit_inst1("pushq", op_reg("rax"));
+            /* Get dest address → rdi */
+            gen_addr(left_node);
+            emit_inst2("mov", op_reg("rax"), op_reg("rdi"));
+            /* source → rsi */
+            emit_inst1("popq", op_reg("rsi"));
+            /* size → rdx */
+            emit_inst2("mov", op_imm(t->size), op_reg("rdx"));
+            /* call memcpy */
+            emit_inst2("mov", op_imm(0), op_reg("eax"));
+            emit_inst0("call memcpy");
+            node->resolved_type = t;
+            return;
+        }
+
+        gen_expression(node->data.assign.value);
         if (left_node->type == AST_IDENTIFIER) {
             const char *ident_name = left_node->data.identifier.name;
             const char *label = get_local_label(ident_name);
@@ -1490,6 +1520,7 @@ static int break_label_ptr = 0;
 static int continue_label_stack[32];
 static int continue_label_ptr = 0;
 static int loop_saved_stack_offset[32];
+static int loop_saved_locals_count[32];
 static int loop_saved_stack_ptr = 0;
 
 static void collect_cases(ASTNode *node, ASTNode **cases, int *case_count, ASTNode **default_node) {
@@ -1770,6 +1801,13 @@ static void gen_statement(ASTNode *node) {
                     else if (size == 2) emit_inst2("movw", op_reg("ax"), op_mem("rsp", 0));
                     else if (size == 4) emit_inst2("movl", op_reg("eax"), op_mem("rsp", 0));
                     else emit_inst2("mov", op_reg("rax"), op_mem("rsp", 0));
+                } else if (node->resolved_type && (node->resolved_type->kind == TYPE_STRUCT || node->resolved_type->kind == TYPE_ARRAY) && node->data.var_decl.initializer && node->data.var_decl.initializer->type != AST_INIT_LIST) {
+                    /* Struct/array copy via memcpy: rax has source address from gen_expression */
+                    emit_inst2("mov", op_reg("rsp"), op_reg("rdi"));
+                    emit_inst2("mov", op_reg("rax"), op_reg("rsi"));
+                    emit_inst2("mov", op_imm(alloc_size), op_reg("rdx"));
+                    emit_inst2("mov", op_imm(0), op_reg("eax"));
+                    emit_inst0("call memcpy");
                 }
             }
         }
@@ -1830,6 +1868,7 @@ static void gen_statement(ASTNode *node) {
         
         int lsp_idx = loop_saved_stack_ptr;
         loop_saved_stack_offset[lsp_idx] = saved_stack_offset;
+        loop_saved_locals_count[lsp_idx] = saved_locals_count;
         loop_saved_stack_ptr = lsp_idx + 1;
         int blp_idx = break_label_ptr;
         break_label_stack[blp_idx] = label_end;
@@ -1867,7 +1906,7 @@ static void gen_statement(ASTNode *node) {
         int saved_stack_offset_dw = stack_offset;
         int saved_locals_count_dw = locals_count;
         
-        { int i0 = loop_saved_stack_ptr; loop_saved_stack_offset[i0] = saved_stack_offset_dw; loop_saved_stack_ptr = i0 + 1; }
+        { int i0 = loop_saved_stack_ptr; loop_saved_stack_offset[i0] = saved_stack_offset_dw; loop_saved_locals_count[i0] = saved_locals_count_dw; loop_saved_stack_ptr = i0 + 1; }
         { int i1 = break_label_ptr; break_label_stack[i1] = label_end; break_label_ptr = i1 + 1; }
         { int i2 = continue_label_ptr; continue_label_stack[i2] = label_continue; continue_label_ptr = i2 + 1; }
         gen_statement(node->data.while_stmt.body);
@@ -1911,7 +1950,7 @@ static void gen_statement(ASTNode *node) {
         int saved_stack_offset_for = stack_offset;
         int saved_locals_count_for = locals_count;
         
-        { int i0 = loop_saved_stack_ptr; loop_saved_stack_offset[i0] = saved_stack_offset_for; loop_saved_stack_ptr = i0 + 1; }
+        { int i0 = loop_saved_stack_ptr; loop_saved_stack_offset[i0] = saved_stack_offset_for; loop_saved_locals_count[i0] = saved_locals_count_for; loop_saved_stack_ptr = i0 + 1; }
         { int i1 = break_label_ptr; break_label_stack[i1] = label_end; break_label_ptr = i1 + 1; }
         { int i2 = continue_label_ptr; continue_label_stack[i2] = label_continue; continue_label_ptr = i2 + 1; }
         gen_statement(node->data.for_stmt.body);
@@ -1941,6 +1980,9 @@ static void gen_statement(ASTNode *node) {
                 if (saved != stack_offset) {
                     emit_inst2("lea", op_mem("rbp", saved), op_reg("rsp"));
                 }
+                // Reset compiler state so the next case starts with correct offsets
+                stack_offset = saved;
+                locals_count = loop_saved_locals_count[loop_saved_stack_ptr - 1];
             }
             char l_break[32];
             sprintf(l_break, ".L%d", break_label_stack[break_label_ptr - 1]);
@@ -1956,6 +1998,9 @@ static void gen_statement(ASTNode *node) {
                 if (saved != stack_offset) {
                     emit_inst2("lea", op_mem("rbp", saved), op_reg("rsp"));
                 }
+                // Reset compiler state so subsequent code starts with correct offsets
+                stack_offset = saved;
+                locals_count = loop_saved_locals_count[loop_saved_stack_ptr - 1];
             }
             char l_cont[32];
             sprintf(l_cont, ".L%d", continue_label_stack[continue_label_ptr - 1]);
@@ -2000,7 +2045,7 @@ static void gen_statement(ASTNode *node) {
         }
 
         { int i0 = break_label_ptr; break_label_stack[i0] = label_end; break_label_ptr = i0 + 1; }
-        { int i1 = loop_saved_stack_ptr; loop_saved_stack_offset[i1] = stack_offset; loop_saved_stack_ptr = i1 + 1; }
+        { int i1 = loop_saved_stack_ptr; loop_saved_stack_offset[i1] = stack_offset; loop_saved_locals_count[i1] = locals_count; loop_saved_stack_ptr = i1 + 1; }
         gen_statement(node->data.switch_stmt.body);
         break_label_ptr--;
         loop_saved_stack_ptr--;
