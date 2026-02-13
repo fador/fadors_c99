@@ -31,7 +31,7 @@ int main() {
     if (*p != 5) return 6;
     
     // sizeof with const type
-    if (sizeof(const int) != 8) return 7;
+    if (sizeof(const int) != 4) return 7;
     
     // unsigned char
     unsigned char c = 255;

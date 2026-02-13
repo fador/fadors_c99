@@ -20,23 +20,23 @@ struct Packed2 {
 #pragma pack(pop)
 
 int main() {
-    // Packed1: 1 (char) + 8 (int) = 9
-    // pack: 1. alignment = min(8, 1) = 1.
-    if (sizeof(struct Packed1) != 9) {
-        printf("Error: sizeof(struct Packed1) is %d, expected 9\n", (int)sizeof(struct Packed1));
+    // Packed1: 1 (char) + 4 (int) = 5
+    // pack: 1. alignment = min(4, 1) = 1.
+    if (sizeof(struct Packed1) != 5) {
+        printf("Error: sizeof(struct Packed1) is %d, expected 5\n", (int)sizeof(struct Packed1));
         return 1;
     }
 
-    // Default: 1 (char) + 7 (padding) + 8 (int) = 16
-    if (sizeof(struct Default) != 16) {
-        printf("Error: sizeof(struct Default) is %d, expected 16\n", (int)sizeof(struct Default));
+    // Default: 1 (char) + 3 (padding) + 4 (int) = 8
+    if (sizeof(struct Default) != 8) {
+        printf("Error: sizeof(struct Default) is %d, expected 8\n", (int)sizeof(struct Default));
         return 2;
     }
 
-    // Packed2: 1 (char) + 1 (padding) + 8 (int) = 10
-    // pack: 2. alignment = min(8, 2) = 2.
-    if (sizeof(struct Packed2) != 10) {
-        printf("Error: sizeof(struct Packed2) is %d, expected 10\n", (int)sizeof(struct Packed2));
+    // Packed2: 1 (char) + 1 (padding) + 4 (int) = 6
+    // pack: 2. alignment = min(4, 2) = 2.
+    if (sizeof(struct Packed2) != 6) {
+        printf("Error: sizeof(struct Packed2) is %d, expected 6\n", (int)sizeof(struct Packed2));
         return 3;
     }
 

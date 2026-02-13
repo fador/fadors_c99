@@ -1602,7 +1602,9 @@ static void gen_statement(ASTNode *node) {
             locals_count++;
             
             if (is_float_type(node->resolved_type)) {
-                emit_push_xmm("xmm0"); 
+                // Don't use emit_push_xmm here - stack_offset already adjusted above
+                emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
+                emit_inst2("movsd", op_reg("xmm0"), op_mem("rsp", 0));
             } else {
                 emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
                 if (node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
@@ -1820,9 +1822,12 @@ static void gen_statement(ASTNode *node) {
         ASTNode *default_node = NULL;
         collect_cases(node->data.switch_stmt.body, cases, &case_count, &default_node);
 
-        char case_labels[1024][32];
+        // Use flat array + manual indexing to avoid 2D array (self-compilation limitation)
+        char *case_labels[1024];
         for (int i = 0; i < case_count; i++) {
-            sprintf(case_labels[i], ".L%d", label_count++);
+            char *lbl = malloc(32);
+            sprintf(lbl, ".L%d", label_count++);
+            case_labels[i] = lbl;
             emit_inst2("cmp", op_imm(cases[i]->data.case_stmt.value), op_reg("rax"));
             emit_inst1("je", op_label(case_labels[i]));
             cases[i]->resolved_type = (Type *)_strdup(case_labels[i]);
