@@ -8,6 +8,7 @@
 #include "coff_writer.h"
 #include "elf_writer.h"
 #include "linker.h"
+#include "pe_linker.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -64,7 +65,7 @@ static void strip_extension(char *buf, const char *path, size_t bufsz) {
 }
 
 static void print_usage(const char *progname) {
-    printf("FadorsC99 Compiler Toolchain\n\n");
+    printf("Fador's C99 Compiler Toolchain\n\n");
     printf("Usage: %s [mode] [options] <input-file> [-o <output>]\n\n", progname);
     printf("Modes (auto-detected from file extension if omitted):\n");
     printf("  cc           Compile C source (.c)\n");
@@ -123,9 +124,11 @@ static int do_cc(const char *source_filename, const char *output_name,
 
     codegen_set_target(target);
 
-    if (stop == STOP_OBJ || (stop == STOP_FULL && target == TARGET_LINUX)) {
+    if (stop == STOP_OBJ || (stop == STOP_FULL && target == TARGET_LINUX)
+                         || (stop == STOP_FULL && target == TARGET_WINDOWS && !use_masm)) {
         /* Direct binary object generation (binary encoder).
-         * For STOP_FULL on Linux we also continue to link below. */
+         * For STOP_FULL on Linux we continue to link with custom ELF linker.
+         * For STOP_FULL on Windows (without --masm) we link with custom PE linker. */
         char obj_filename[260];
         char exe_filename[260];
 
@@ -159,23 +162,33 @@ static int do_cc(const char *source_filename, const char *output_name,
         if (stop == STOP_OBJ)
             return 0;
 
-        /* STOP_FULL + TARGET_LINUX: link with custom linker */
+        /* STOP_FULL: link with custom linker */
         if (output_name) {
             strncpy(exe_filename, output_name, 259);
             exe_filename[259] = '\0';
         } else {
             strcpy(exe_filename, out_base);
+            if (target == TARGET_WINDOWS) strcat(exe_filename, ".exe");
         }
 
-        Linker *lnk = linker_new();
-        linker_add_object_file(lnk, obj_filename);
-        { int li; for (li = 0; li < libpath_count; li++)
-            linker_add_lib_path(lnk, libpaths[li]); }
-        { int li; for (li = 0; li < lib_count; li++)
-            linker_add_library(lnk, libraries[li]); }
-        int rc = linker_link(lnk, exe_filename);
-        linker_free(lnk);
-        if (rc != 0) { printf("Error: Linking failed.\n"); return 1; }
+        if (target == TARGET_LINUX) {
+            Linker *lnk = linker_new();
+            linker_add_object_file(lnk, obj_filename);
+            { int li; for (li = 0; li < libpath_count; li++)
+                linker_add_lib_path(lnk, libpaths[li]); }
+            { int li; for (li = 0; li < lib_count; li++)
+                linker_add_library(lnk, libraries[li]); }
+            int rc = linker_link(lnk, exe_filename);
+            linker_free(lnk);
+            if (rc != 0) { printf("Error: ELF linking failed.\n"); return 1; }
+        } else {
+            /* Windows: custom PE linker */
+            PELinker *plnk = pe_linker_new();
+            pe_linker_add_object_file(plnk, obj_filename);
+            int rc = pe_linker_link(plnk, exe_filename);
+            pe_linker_free(plnk);
+            if (rc != 0) { printf("Error: PE linking failed.\n"); return 1; }
+        }
         printf("Compiled to: %s\n", exe_filename);
         return 0;
     }
@@ -320,27 +333,16 @@ static int do_link(int obj_count, const char **obj_files, const char *output_nam
         return rc;
     }
 
-    /* Windows target: external linker */
+    /* Windows target: use custom PE linker */
     {
-        const char *linker = getenv("FADORS_LINKER");
-        if (!linker) linker = "link";
-        const char *lfmt = strchr(linker, ' ') ? "\"%s\"" : "%s";
-        char lcmd[1024]; sprintf(lcmd, lfmt, linker);
-
-        int pos = sprintf(cmd, "%s /nologo /STACK:8000000 /subsystem:console /out:\"%s\"",
-                          lcmd, exe_filename);
-        { int i; for (i = 0; i < obj_count; i++)
-            pos += sprintf(cmd + pos, " \"%s\"", obj_files[i]); }
-        pos += sprintf(cmd + pos, " kernel32.lib libcmt.lib legacy_stdio_definitions.lib");
+        PELinker *plnk = pe_linker_new();
+        int i;
+        for (i = 0; i < obj_count; i++)
+            pe_linker_add_object_file(plnk, obj_files[i]);
+        int rc = pe_linker_link(plnk, exe_filename);
+        pe_linker_free(plnk);
+        return rc;
     }
-
-    if (run_command(cmd) != 0) {
-        printf("Error: Linking failed.\n");
-        return 1;
-    }
-
-    printf("Linked to: %s\n", exe_filename);
-    return 0;
 }
 
 // ---------- main ----------

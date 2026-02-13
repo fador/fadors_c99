@@ -10,9 +10,9 @@ int main() {
     // Check scaling logic
     char *c = p;
     char *d = q;
-    // q is p + 2 ints. int is 8 bytes in this compiler (based on type_int() in types.c).
-    // So distance in bytes should be 16.
-    if (d - c != 16) return 2;
+    // q is p + 2 ints. int is 4 bytes (LLP64 model).
+    // So distance in bytes should be 8.
+    if (d - c != 8) return 2;
     
     // Check ptr - int
     int *r = q - 1;

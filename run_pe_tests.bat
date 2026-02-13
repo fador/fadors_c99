@@ -1,6 +1,5 @@
 @echo off
 setlocal enabledelayedexpansion
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" > nul
 
 set "FADORS=.\build\Release\fadors99.exe"
 
@@ -11,8 +10,8 @@ set PASS=0
 set FAIL=0
 set TOTAL=0
 
-echo Running COFF tests...
-echo ===================
+echo Running PE linker tests (custom linker, no external tools)...
+echo ============================================================
 
 for %%T in (%TEST_LIST%) do (
     set /a TOTAL+=1
@@ -21,25 +20,19 @@ for %%T in (%TEST_LIST%) do (
         set "EXPECTED=%%B"
     )
     echo [TEST] !TNAME! ^(expected: !EXPECTED!^)
-    %FADORS% tests\!TNAME!.c --obj > nul 2>&1
+    %FADORS% tests\!TNAME!.c -o tests\!TNAME!.exe > nul 2>&1
     if errorlevel 1 (
-        echo [FAIL] Compilation failed for !TNAME!
+        echo [FAIL] Compilation/PE-linking failed for !TNAME!
         set /a FAIL+=1
     ) else (
-        link.exe /nologo /entry:main /subsystem:console /out:"tests\!TNAME!.exe" "tests\!TNAME!.obj" kernel32.lib > nul 2>&1
-        if errorlevel 1 (
-            echo [FAIL] Linking failed for !TNAME!
-            set /a FAIL+=1
+        tests\!TNAME!.exe
+        set "RC=!errorlevel!"
+        if "!RC!"=="!EXPECTED!" (
+            echo [PASS] !TNAME! returned !RC!
+            set /a PASS+=1
         ) else (
-            tests\!TNAME!.exe
-            set "RC=!errorlevel!"
-            if "!RC!"=="!EXPECTED!" (
-                echo [PASS] !TNAME! returned !RC!
-                set /a PASS+=1
-            ) else (
-                echo [FAIL] !TNAME! returned !RC!, expected !EXPECTED!
-                set /a FAIL+=1
-            )
+            echo [FAIL] !TNAME! returned !RC!, expected !EXPECTED!
+            set /a FAIL+=1
         )
     )
     echo -------------------
@@ -53,6 +46,6 @@ if !FAIL! GTR 0 (
     echo SOME TESTS FAILED.
     exit /b 1
 ) else (
-    echo ALL COFF TESTS PASSED!
+    echo ALL PE LINKER TESTS PASSED!
     exit /b 0
 )

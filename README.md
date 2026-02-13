@@ -1,6 +1,6 @@
 # Fador's C99 Compiler
 
-A lightweight C99-standard compliant compiler written in C99, targeting x86_64 Windows (MASM/COFF) and Linux/Unix (AT&T/ELF).
+A lightweight C99-standard compliant compiler written in C99, targeting x86_64 Windows (COFF/PE) and Linux/Unix (ELF). Features a fully custom toolchain on Linux — including assembler, linker, and dynamic linking — with no external tools required.
 
 ## Features
 
@@ -18,8 +18,11 @@ A lightweight C99-standard compliant compiler written in C99, targeting x86_64 W
   - **Pointers**: Full support for pointer depth, address-of (`&`), and dereference (`*`) operators.
 
 ### Backends / Assembly Generation
-- **Integrated Pipeline**: Automatically invokes system assemblers (`as`, `ml/ml64`) and linkers (`gcc`, `link.exe`) to produce executables.
-- **x86_64 AT&T**: Default for Linux/Unix (generates `.s`).
+- **Integrated Pipeline**: Full compilation to executable without external tools on Linux. Windows uses system linker (`link.exe`) for final linking.
+- **Custom ELF Linker**: Built-in static linker for Linux that merges `.o` files and static archives (`.a`) into executables. Includes a `_start` stub (no CRT needed) and supports dynamic linking against `libc.so.6` via PLT/GOT generation.
+- **Custom COFF Object Writer**: Direct machine code → COFF `.obj` generation on Windows (bypasses MASM).
+- **Custom ELF Object Writer**: Direct machine code → ELF `.o` generation on Linux (bypasses GNU `as`).
+- **x86_64 AT&T**: Default text assembly for Linux/Unix (generates `.s`).
 - **x86_64 Intel/MASM**: Supported via `--masm` flag (generates `.asm` for Windows).
 - **Stack Management**: Automatic local variable allocation and ABI-compliant register-based argument passing.
 
@@ -37,16 +40,20 @@ cmake --build .
 ## Usage
 
 ### Compile to Executable
-Automatically detects platform tools (e.g., `ml64` on Windows).
+Automatically detects platform tools. On Linux, the entire pipeline (compile → assemble → link) runs without any external tools.
 
 ```bash
-# Windows (MASM)
+# Windows (COFF binary path — generates .obj, links with system link.exe)
 ./fadors99 main.c --masm
 # Output: main.exe
 
-# Linux (AT&T)
+# Linux (fully self-contained — custom ELF assembler + linker)
 ./fadors99 main.c
-# Output: a.out
+# Output: main (static executable, no CRT required)
+
+# Linux with dynamic linking (libc)
+./fadors99 main.c -lc
+# Output: main (dynamically linked against libc.so.6)
 ```
 
 ### Inspect Assembly
@@ -95,8 +102,14 @@ Assembles a file with `fadors99`, links it manually, and executes it. Useful for
 
 ## Development Roadmap
 
-### Current Focus: Direct Code Generation
-- [x] Custom Assembler (COFF/ELF writer foundation)
+### Current Focus: Custom Windows PE Linker
+- [x] Custom ELF Assembler (`.o` writer from machine code)
+- [x] Custom COFF Assembler (`.obj` writer from machine code)
+- [x] Custom ELF Static Linker (merges `.o` + `.a` → executable)
+- [x] ELF Dynamic Linking (PLT/GOT, `.interp`, `.dynamic` section generation)
+- [x] Built-in `_start` stub (no CRT needed for simple programs)
+- [ ] Custom Windows PE/COFF Linker (merge `.obj` → `.exe`, import tables for `kernel32.dll`)
+- [ ] PE Import Table generation (dynamic linking against Windows DLLs)
 - [x] Direct machine code generation (COFF) completion for verification without external tools.
 - [x] Global variable initialization support.
 - [x] Relocation handling for external symbols.
