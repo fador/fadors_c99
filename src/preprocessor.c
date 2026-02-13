@@ -59,6 +59,10 @@ static const char *get_macro_value(const char *name) {
     return NULL;
 }
 
+void preprocess_define(const char *name, const char *value) {
+    add_macro(name, value ? value : "1", 0, NULL, 0);
+}
+
 static char *read_file(const char *filename) {
     FILE *f = fopen(filename, "rb");
     if (!f) return NULL;

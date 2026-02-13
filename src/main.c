@@ -427,6 +427,22 @@ int main(int argc, char **argv) {
                 libpaths[libpath_count++] = argv[i] + 2;
             continue;
         }
+        // -D<name>[=<value>]  preprocessor define
+        if (strncmp(argv[i], "-D", 2) == 0 && argv[i][2] != '\0') {
+            const char *def = argv[i] + 2;
+            const char *eq = strchr(def, '=');
+            if (eq) {
+                char name_buf[256];
+                size_t nlen = (size_t)(eq - def);
+                if (nlen > 255) nlen = 255;
+                strncpy(name_buf, def, nlen);
+                name_buf[nlen] = '\0';
+                preprocess_define(name_buf, eq + 1);
+            } else {
+                preprocess_define(def, "1");
+            }
+            continue;
+        }
         // Positional argument (input file)
         if (input_count < 64)
             input_files[input_count++] = argv[i];
@@ -455,6 +471,15 @@ int main(int argc, char **argv) {
     // Intel/MASM implies Windows target & Intel syntax
     if (use_masm) {
         target = TARGET_WINDOWS;
+    }
+
+    // Auto-define platform macros based on target
+    if (target == TARGET_WINDOWS) {
+        preprocess_define("_WIN32", "1");
+        preprocess_define("_WIN64", "1");
+    } else {
+        preprocess_define("__linux__", "1");
+        preprocess_define("__unix__", "1");
     }
 
     switch (mode) {

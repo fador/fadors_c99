@@ -507,17 +507,17 @@ typedef struct {
     size_t   rdata_start; /* Offset into rdata buffer where import data begins */
 } ImportTableInfo;
 
-static ImportTableInfo pe_build_import_tables(PELinker *l,
-                                              uint32_t rdata_rva_base) {
-    ImportTableInfo info;
-    memset(&info, 0, sizeof(info));
+static void pe_build_import_tables(PELinker *l,
+                                   uint32_t rdata_rva_base,
+                                   ImportTableInfo *info) {
+    memset(info, 0, sizeof(ImportTableInfo));
 
-    if (l->import_count == 0) return info;
+    if (l->import_count == 0) return;
 
     size_t rdata_start = l->rdata.size;
     buffer_pad(&l->rdata, 8);
     rdata_start = l->rdata.size;
-    info.rdata_start = rdata_start;
+    info->rdata_start = rdata_start;
 
     /*
      * We'll compute offsets relative to rdata_start.
@@ -675,16 +675,14 @@ static ImportTableInfo pe_build_import_tables(PELinker *l,
     }
 
     /* Set info for header */
-    info.idt_rva  = (uint32_t)(rdata_rva_base + idt_off);
-    info.idt_size = (uint32_t)idt_size;
-    info.iat_rva  = (uint32_t)(rdata_rva_base + iat_off);
-    info.iat_size = (uint32_t)iat_size;
+    info->idt_rva  = (uint32_t)(rdata_rva_base + idt_off);
+    info->idt_size = (uint32_t)idt_size;
+    info->iat_rva  = (uint32_t)(rdata_rva_base + iat_off);
+    info->iat_size = (uint32_t)iat_size;
 
     free(hnt_offsets);
     free(dllname_offsets);
     (void)orig_rdata_size;
-
-    return info;
 }
 
 /* ------------------------------------------------------------------ */
@@ -794,7 +792,8 @@ int pe_linker_link(PELinker *l, const char *output_path) {
 
     /* .rdata — build import tables now that we know the rdata RVA */
     uint32_t rdata_rva = current_rva;
-    ImportTableInfo import_info = pe_build_import_tables(l, rdata_rva);
+    ImportTableInfo import_info;
+    pe_build_import_tables(l, rdata_rva, &import_info);
 
     uint32_t rdata_foff = current_foff;
     uint32_t rdata_vsize = (uint32_t)l->rdata.size;
