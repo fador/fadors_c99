@@ -83,17 +83,29 @@ static void print_usage(const char *progname) {
     printf("If only a .c file is given, the full pipeline runs (compile -> assemble -> link).\n");
 }
 
-// ---------- CC mode: compile C source ----------
-static int do_cc(const char *source_filename, const char *output_name,
-                 StopAfter stop, TargetPlatform target, int use_masm,
-                 int lib_count, const char **libraries,
-                 int libpath_count, const char **libpaths) {
+// ---------- Helper: compile a single .c file to .obj/.o ----------
+static int compile_c_to_obj(const char *source_filename, const char *obj_filename,
+                            TargetPlatform target,
+                            int define_count, const char **define_names,
+                            const char **define_values) {
+    int i;
+    /* Reset preprocessor for this compilation unit */
+    preprocess_reset();
+    if (target == TARGET_WINDOWS) {
+        preprocess_define("_WIN32", "1");
+        preprocess_define("_WIN64", "1");
+    } else {
+        preprocess_define("__linux__", "1");
+        preprocess_define("__unix__", "1");
+    }
+    for (i = 0; i < define_count; i++)
+        preprocess_define(define_names[i], define_values[i]);
+
     FILE *f = fopen(source_filename, "rb");
     if (!f) {
         printf("Could not open file %s\n", source_filename);
         return 1;
     }
-
     fseek(f, 0, SEEK_END);
     long size = ftell(f);
     fseek(f, 0, SEEK_SET);
@@ -104,9 +116,169 @@ static int do_cc(const char *source_filename, const char *output_name,
     char *preprocessed = preprocess(source, source_filename);
     free(source);
 
-    // Debug: dump preprocessed source
-    FILE *pf = fopen("preprocessed.i", "w");
-    if (pf) { fputs(preprocessed, pf); fclose(pf); }
+    Lexer lexer;
+    lexer_init(&lexer, preprocessed);
+    current_parser = malloc(sizeof(Parser));
+    parser_init(current_parser, &lexer);
+    ASTNode *program = parser_parse(current_parser);
+
+    codegen_set_target(target);
+    current_writer = malloc(sizeof(COFFWriter));
+    coff_writer_init(current_writer);
+    codegen_set_writer(current_writer);
+    codegen_init(NULL);
+    codegen_generate(program);
+
+    if (target == TARGET_WINDOWS)
+        coff_writer_write(current_writer, obj_filename);
+    else
+        elf_writer_write(current_writer, obj_filename);
+
+    coff_writer_free(current_writer);
+    free(current_writer);
+    printf("  %s -> %s\n", source_filename, obj_filename);
+    return 0;
+}
+
+// ---------- CC mode: compile C source ----------
+static int do_cc(int input_count, const char **input_files,
+                 const char *output_name,
+                 StopAfter stop, TargetPlatform target, int use_masm,
+                 int lib_count, const char **libraries,
+                 int libpath_count, const char **libpaths,
+                 int define_count, const char **define_names,
+                 const char **define_values) {
+    int i;
+
+    /*
+     * Binary encoder path: .c -> .obj (no external assembler).
+     * Supports multiple input files.
+     */
+    if (!use_masm && (stop == STOP_OBJ || stop == STOP_FULL)) {
+        char *obj_paths[64];
+        int obj_count = 0;
+
+        for (i = 0; i < input_count; i++) {
+            char out_base[256];
+            strip_extension(out_base, input_files[i], sizeof(out_base));
+
+            char obj_filename[260];
+            if (stop == STOP_OBJ && input_count == 1 && output_name) {
+                strncpy(obj_filename, output_name, 259);
+                obj_filename[259] = '\0';
+            } else {
+                strncpy(obj_filename, out_base, 255);
+                obj_filename[255] = '\0';
+                if (target == TARGET_WINDOWS)
+                    strcat(obj_filename, ".obj");
+                else
+                    strcat(obj_filename, ".o");
+            }
+
+            if (compile_c_to_obj(input_files[i], obj_filename, target,
+                                 define_count, define_names, define_values) != 0)
+                return 1;
+
+            obj_paths[obj_count++] = strdup(obj_filename);
+        }
+
+        if (stop == STOP_OBJ) {
+            for (i = 0; i < obj_count; i++) free(obj_paths[i]);
+            return 0;
+        }
+
+        /* STOP_FULL: link all .obj files */
+        char exe_filename[260];
+        if (output_name) {
+            strncpy(exe_filename, output_name, 259);
+            exe_filename[259] = '\0';
+        } else {
+            char out_base[256];
+            strip_extension(out_base, input_files[0], sizeof(out_base));
+            strcpy(exe_filename, out_base);
+            if (target == TARGET_WINDOWS) strcat(exe_filename, ".exe");
+        }
+
+        int rc = 0;
+        if (target == TARGET_LINUX) {
+            Linker *lnk = linker_new();
+            for (i = 0; i < obj_count; i++)
+                linker_add_object_file(lnk, obj_paths[i]);
+            for (i = 0; i < libpath_count; i++)
+                linker_add_lib_path(lnk, libpaths[i]);
+            for (i = 0; i < lib_count; i++)
+                linker_add_library(lnk, libraries[i]);
+            rc = linker_link(lnk, exe_filename);
+            linker_free(lnk);
+            if (rc != 0) printf("Error: ELF linking failed.\n");
+        } else if (lib_count > 0) {
+            /* Windows with external libraries: use system link.exe */
+            char cmd[4096];
+            int pos = 0;
+            pos += sprintf(cmd + pos,
+                "link /nologo /STACK:8000000 /entry:mainCRTStartup"
+                " /subsystem:console /out:\"%s\"", exe_filename);
+            for (i = 0; i < libpath_count; i++)
+                pos += sprintf(cmd + pos, " /LIBPATH:\"%s\"", libpaths[i]);
+            for (i = 0; i < obj_count; i++)
+                pos += sprintf(cmd + pos, " \"%s\"", obj_paths[i]);
+            for (i = 0; i < lib_count; i++)
+                pos += sprintf(cmd + pos, " %s", libraries[i]);
+            rc = run_command(cmd);
+            if (rc != 0) printf("Error: Linking failed.\n");
+        } else {
+            /* Windows without libraries: use custom PE linker */
+            PELinker *plnk = pe_linker_new();
+            for (i = 0; i < obj_count; i++)
+                pe_linker_add_object_file(plnk, obj_paths[i]);
+            rc = pe_linker_link(plnk, exe_filename);
+            pe_linker_free(plnk);
+            if (rc != 0) printf("Error: PE linking failed.\n");
+        }
+
+        for (i = 0; i < obj_count; i++) free(obj_paths[i]);
+        if (rc != 0) return 1;
+        printf("Linked: %s\n", exe_filename);
+        return 0;
+    }
+
+    /*
+     * Assembly text path (single file only).
+     * Also handles MASM assemble + system link.
+     */
+    if (input_count > 1) {
+        printf("Error: Multiple input files only supported with binary object output.\n");
+        return 1;
+    }
+
+    const char *source_filename = input_files[0];
+
+    /* Reset preprocessor for this file */
+    preprocess_reset();
+    if (target == TARGET_WINDOWS) {
+        preprocess_define("_WIN32", "1");
+        preprocess_define("_WIN64", "1");
+    } else {
+        preprocess_define("__linux__", "1");
+        preprocess_define("__unix__", "1");
+    }
+    for (i = 0; i < define_count; i++)
+        preprocess_define(define_names[i], define_values[i]);
+
+    FILE *f = fopen(source_filename, "rb");
+    if (!f) {
+        printf("Could not open file %s\n", source_filename);
+        return 1;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *source = malloc(size + 1);
+    fread(source, 1, size, f);
+    source[size] = '\0';
+    fclose(f);
+    char *preprocessed = preprocess(source, source_filename);
+    free(source);
 
     Lexer lexer;
     lexer_init(&lexer, preprocessed);
@@ -123,75 +295,6 @@ static int do_cc(const char *source_filename, const char *output_name,
     strip_extension(out_base, source_filename, sizeof(out_base));
 
     codegen_set_target(target);
-
-    if (stop == STOP_OBJ || (stop == STOP_FULL && target == TARGET_LINUX)
-                         || (stop == STOP_FULL && target == TARGET_WINDOWS && !use_masm)) {
-        /* Direct binary object generation (binary encoder).
-         * For STOP_FULL on Linux we continue to link with custom ELF linker.
-         * For STOP_FULL on Windows (without --masm) we link with custom PE linker. */
-        char obj_filename[260];
-        char exe_filename[260];
-
-        strncpy(obj_filename, out_base, 255);
-        obj_filename[255] = '\0';
-        if (target == TARGET_WINDOWS)
-            strcat(obj_filename, ".obj");
-        else
-            strcat(obj_filename, ".o");
-
-        if (stop == STOP_OBJ && output_name) {
-            strncpy(obj_filename, output_name, 259);
-            obj_filename[259] = '\0';
-        }
-
-        printf("Generating OBJ to %s...\n", obj_filename); fflush(stdout);
-        current_writer = malloc(sizeof(COFFWriter));
-        coff_writer_init(current_writer);
-        codegen_set_writer(current_writer);
-        codegen_init(NULL);
-        codegen_generate(program);
-        printf("Writing OBJ...\n"); fflush(stdout);
-        if (target == TARGET_WINDOWS)
-            coff_writer_write(current_writer, obj_filename);
-        else
-            elf_writer_write(current_writer, obj_filename);
-        coff_writer_free(current_writer);
-        free(current_writer);
-        printf("Generated Object: %s\n", obj_filename);
-
-        if (stop == STOP_OBJ)
-            return 0;
-
-        /* STOP_FULL: link with custom linker */
-        if (output_name) {
-            strncpy(exe_filename, output_name, 259);
-            exe_filename[259] = '\0';
-        } else {
-            strcpy(exe_filename, out_base);
-            if (target == TARGET_WINDOWS) strcat(exe_filename, ".exe");
-        }
-
-        if (target == TARGET_LINUX) {
-            Linker *lnk = linker_new();
-            linker_add_object_file(lnk, obj_filename);
-            { int li; for (li = 0; li < libpath_count; li++)
-                linker_add_lib_path(lnk, libpaths[li]); }
-            { int li; for (li = 0; li < lib_count; li++)
-                linker_add_library(lnk, libraries[li]); }
-            int rc = linker_link(lnk, exe_filename);
-            linker_free(lnk);
-            if (rc != 0) { printf("Error: ELF linking failed.\n"); return 1; }
-        } else {
-            /* Windows: custom PE linker */
-            PELinker *plnk = pe_linker_new();
-            pe_linker_add_object_file(plnk, obj_filename);
-            int rc = pe_linker_link(plnk, exe_filename);
-            pe_linker_free(plnk);
-            if (rc != 0) { printf("Error: PE linking failed.\n"); return 1; }
-        }
-        printf("Compiled to: %s\n", exe_filename);
-        return 0;
-    }
 
     // Assembly text generation
     if (use_masm)
@@ -373,6 +476,11 @@ int main(int argc, char **argv) {
     const char *libpaths[64];
     int libpath_count = 0;
 
+    // Preprocessor defines stored for per-file application
+    const char *define_names[256];
+    const char *define_values[256];
+    int define_count = 0;
+
     for (int i = 1; i < argc; i++) {
         // Mode selectors
         if (strcmp(argv[i], "cc") == 0 && i == 1) {
@@ -427,19 +535,24 @@ int main(int argc, char **argv) {
                 libpaths[libpath_count++] = argv[i] + 2;
             continue;
         }
-        // -D<name>[=<value>]  preprocessor define
+        // -D<name>[=<value>]  preprocessor define (stored for per-file application)
         if (strncmp(argv[i], "-D", 2) == 0 && argv[i][2] != '\0') {
-            const char *def = argv[i] + 2;
-            const char *eq = strchr(def, '=');
-            if (eq) {
-                char name_buf[256];
-                size_t nlen = (size_t)(eq - def);
-                if (nlen > 255) nlen = 255;
-                strncpy(name_buf, def, nlen);
-                name_buf[nlen] = '\0';
-                preprocess_define(name_buf, eq + 1);
-            } else {
-                preprocess_define(def, "1");
+            if (define_count < 256) {
+                const char *def = argv[i] + 2;
+                const char *eq = strchr(def, '=');
+                if (eq) {
+                    size_t nlen = (size_t)(eq - def);
+                    char *nm = malloc(nlen + 1);
+                    if (nlen > 255) nlen = 255;
+                    strncpy(nm, def, nlen);
+                    nm[nlen] = '\0';
+                    define_names[define_count] = nm;
+                    define_values[define_count] = eq + 1;
+                } else {
+                    define_names[define_count] = def;
+                    define_values[define_count] = "1";
+                }
+                define_count++;
             }
             continue;
         }
@@ -473,19 +586,11 @@ int main(int argc, char **argv) {
         target = TARGET_WINDOWS;
     }
 
-    // Auto-define platform macros based on target
-    if (target == TARGET_WINDOWS) {
-        preprocess_define("_WIN32", "1");
-        preprocess_define("_WIN64", "1");
-    } else {
-        preprocess_define("__linux__", "1");
-        preprocess_define("__unix__", "1");
-    }
-
     switch (mode) {
     case MODE_CC:
-        return do_cc(input_files[0], output_name, stop, target, use_masm,
-                     lib_count, libraries, libpath_count, libpaths);
+        return do_cc(input_count, input_files, output_name, stop, target, use_masm,
+                     lib_count, libraries, libpath_count, libpaths,
+                     define_count, define_names, define_values);
 
     case MODE_AS:
         return do_as(input_files[0], output_name, target);

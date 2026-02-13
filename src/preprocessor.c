@@ -63,6 +63,20 @@ void preprocess_define(const char *name, const char *value) {
     add_macro(name, value ? value : "1", 0, NULL, 0);
 }
 
+void preprocess_reset(void) {
+    int i, j;
+    for (i = 0; i < macros_count; i++) {
+        free(macros[i].name);
+        free(macros[i].value);
+        for (j = 0; j < macros[i].params_count; j++)
+            free(macros[i].params[j]);
+        free(macros[i].params);
+    }
+    macros_count = 0;
+    if_ptr = -1;
+    top_level = 1;
+}
+
 static char *read_file(const char *filename) {
     FILE *f = fopen(filename, "rb");
     if (!f) return NULL;
