@@ -313,6 +313,50 @@ static void gen_global_decl(ASTNode *node) {
             } else {
                 buffer_write_bytes(&obj_writer->data_section, &val, 8);
             }
+        } else if (init_node && init_node->type == AST_INIT_LIST) {
+            /* Array / struct initializer list: emit each element to .data */
+            int elem_size = 1;
+            if (node->resolved_type && node->resolved_type->kind == TYPE_ARRAY && node->resolved_type->data.ptr_to) {
+                elem_size = node->resolved_type->data.ptr_to->size;
+            }
+            size_t gi;
+            int total_written = 0;
+            for (gi = 0; gi < init_node->children_count; gi++) {
+                ASTNode *elem = init_node->children[gi];
+                if (elem && elem->type == AST_INTEGER) {
+                    if (elem_size == 1) {
+                        uint8_t b = (uint8_t)elem->data.integer.value;
+                        buffer_write_byte(&obj_writer->data_section, b);
+                    } else if (elem_size == 2) {
+                        uint16_t w = (uint16_t)elem->data.integer.value;
+                        buffer_write_word(&obj_writer->data_section, w);
+                    } else if (elem_size == 4) {
+                        int32_t d = (int32_t)elem->data.integer.value;
+                        buffer_write_dword(&obj_writer->data_section, (uint32_t)d);
+                    } else {
+                        int64_t q = (int64_t)elem->data.integer.value;
+                        buffer_write_qword(&obj_writer->data_section, (uint64_t)q);
+                    }
+                } else if (elem && elem->type == AST_FLOAT) {
+                    if (elem_size == 4) {
+                        float f = (float)elem->data.float_val.value;
+                        buffer_write_bytes(&obj_writer->data_section, &f, 4);
+                    } else {
+                        double d = elem->data.float_val.value;
+                        buffer_write_bytes(&obj_writer->data_section, &d, 8);
+                    }
+                } else {
+                    /* Unknown element — zero fill */
+                    int zi; for (zi = 0; zi < elem_size; zi++)
+                        buffer_write_byte(&obj_writer->data_section, 0);
+                }
+                total_written += elem_size;
+            }
+            /* Zero-fill remaining bytes if array larger than init list */
+            while (total_written < size) {
+                buffer_write_byte(&obj_writer->data_section, 0);
+                total_written++;
+            }
         } else {
             ASTNode *init = node->data.var_decl.initializer;
             int handled = 0;
@@ -355,10 +399,35 @@ static void gen_global_decl(ASTNode *node) {
                 fprintf(out, "%s %d\n", directive, init_intel->data.integer.value);
             } else if (init_intel && init_intel->type == AST_FLOAT) {
                 fprintf(out, "%s %f\n", directive, init_intel->data.float_val.value);
+            } else if (init_intel && init_intel->type == AST_INIT_LIST) {
+                /* Array / struct initializer list */
+                int elem_size = 1;
+                if (node->resolved_type && node->resolved_type->kind == TYPE_ARRAY && node->resolved_type->data.ptr_to) {
+                    elem_size = node->resolved_type->data.ptr_to->size;
+                }
+                const char *edirective = "DB";
+                if (elem_size == 4) edirective = "DD";
+                else if (elem_size >= 8) edirective = "DQ";
+                size_t ii;
+                int total_written = 0;
+                for (ii = 0; ii < init_intel->children_count; ii++) {
+                    ASTNode *elem = init_intel->children[ii];
+                    if (elem && elem->type == AST_INTEGER) {
+                        fprintf(out, "%s %d\n", edirective, elem->data.integer.value);
+                    } else if (elem && elem->type == AST_FLOAT) {
+                        fprintf(out, "%s %f\n", edirective, elem->data.float_val.value);
+                    } else {
+                        fprintf(out, "%s 0\n", edirective);
+                    }
+                    total_written += elem_size;
+                }
+                if (total_written < size) {
+                    fprintf(out, "DB %d DUP(0)\n", size - total_written);
+                }
             } else {
                 fprintf(out, "%s 0\n", directive);
                 if (size > 8) {
-                     fprintf(out, "DB %d DUP(0)\n", size - (size > 1 ? (size > 4 ? 8 : 4) : 1)); // This logic was simplified before, let's just make it zero fill
+                     fprintf(out, "DB %d DUP(0)\n", size - (size > 1 ? (size > 4 ? 8 : 4) : 1));
                 }
             }
             fprintf(out, "_DATA ENDS\n");
@@ -377,6 +446,31 @@ static void gen_global_decl(ASTNode *node) {
                  int size = node->resolved_type ? node->resolved_type->size : 4;
                  if (size == 4) fprintf(out, "    .float %f\n", init_att->data.float_val.value);
                  else fprintf(out, "    .double %f\n", init_att->data.float_val.value);
+             } else if (init_att && init_att->type == AST_INIT_LIST) {
+                 /* Array / struct initializer list */
+                 int elem_size = 1;
+                 if (node->resolved_type && node->resolved_type->kind == TYPE_ARRAY && node->resolved_type->data.ptr_to) {
+                     elem_size = node->resolved_type->data.ptr_to->size;
+                 }
+                 size_t ai;
+                 int total_written = 0;
+                 for (ai = 0; ai < init_att->children_count; ai++) {
+                     ASTNode *elem = init_att->children[ai];
+                     if (elem && elem->type == AST_INTEGER) {
+                         if (elem_size == 1) fprintf(out, "    .byte %d\n", elem->data.integer.value);
+                         else if (elem_size == 4) fprintf(out, "    .long %d\n", elem->data.integer.value);
+                         else if (elem_size == 8) fprintf(out, "    .quad %d\n", elem->data.integer.value);
+                         else fprintf(out, "    .long %d\n", elem->data.integer.value);
+                     } else if (elem && elem->type == AST_FLOAT) {
+                         if (elem_size == 4) fprintf(out, "    .float %f\n", elem->data.float_val.value);
+                         else fprintf(out, "    .double %f\n", elem->data.float_val.value);
+                     } else {
+                         int zi; for (zi = 0; zi < elem_size; zi++) fprintf(out, "    .byte 0\n");
+                     }
+                     total_written += elem_size;
+                 }
+                 { int zsize = node->resolved_type ? node->resolved_type->size : 4;
+                   if (total_written < zsize) fprintf(out, "    .zero %d\n", zsize - total_written); }
              } else {
                  int size = node->resolved_type ? node->resolved_type->size : 4;
                  fprintf(out, "    .zero %d\n", size);
@@ -1475,38 +1569,88 @@ static void gen_statement(ASTNode *node) {
             if (obj_writer) {
                 emit_label_def(slabel);
                 int size = node->resolved_type ? node->resolved_type->size : 8;
-                int val = 0;
                 ASTNode *vinit1 = node->data.var_decl.initializer;
-                if (vinit1 && vinit1->type == AST_INTEGER) {
-                    val = vinit1->data.integer.value;
+                if (vinit1 && vinit1->type == AST_INIT_LIST) {
+                    int elem_size = 1;
+                    if (node->resolved_type && node->resolved_type->kind == TYPE_ARRAY && node->resolved_type->data.ptr_to) {
+                        elem_size = node->resolved_type->data.ptr_to->size;
+                    }
+                    size_t vi; int tw = 0;
+                    for (vi = 0; vi < vinit1->children_count; vi++) {
+                        ASTNode *elem = vinit1->children[vi];
+                        if (elem && elem->type == AST_INTEGER) {
+                            if (elem_size == 1) { uint8_t b = (uint8_t)elem->data.integer.value; buffer_write_byte(&obj_writer->data_section, b); }
+                            else if (elem_size == 2) { uint16_t w = (uint16_t)elem->data.integer.value; buffer_write_word(&obj_writer->data_section, w); }
+                            else if (elem_size == 4) { int32_t d = (int32_t)elem->data.integer.value; buffer_write_dword(&obj_writer->data_section, (uint32_t)d); }
+                            else { int64_t q = (int64_t)elem->data.integer.value; buffer_write_qword(&obj_writer->data_section, (uint64_t)q); }
+                        } else { int zi; for (zi = 0; zi < elem_size; zi++) buffer_write_byte(&obj_writer->data_section, 0); }
+                        tw += elem_size;
+                    }
+                    while (tw < size) { buffer_write_byte(&obj_writer->data_section, 0); tw++; }
+                } else {
+                    int val = 0;
+                    if (vinit1 && vinit1->type == AST_INTEGER) {
+                        val = vinit1->data.integer.value;
+                    }
+                    buffer_write_bytes(&obj_writer->data_section, &val, size);
                 }
-                buffer_write_bytes(&obj_writer->data_section, &val, size);
             } else {
                 if (current_syntax == SYNTAX_INTEL) {
                     fprintf(out, "_TEXT ENDS\n_DATA SEGMENT\n");
                     emit_label_def(slabel);
                     int size = node->resolved_type ? node->resolved_type->size : 8;
-                    int val = 0;
                     ASTNode *vinit2 = node->data.var_decl.initializer;
-                    if (vinit2 && vinit2->type == AST_INTEGER) {
-                        val = vinit2->data.integer.value;
+                    if (vinit2 && vinit2->type == AST_INIT_LIST) {
+                        int elem_size = 1;
+                        if (node->resolved_type && node->resolved_type->kind == TYPE_ARRAY && node->resolved_type->data.ptr_to)
+                            elem_size = node->resolved_type->data.ptr_to->size;
+                        const char *edir = "DB";
+                        if (elem_size == 4) edir = "DD"; else if (elem_size >= 8) edir = "DQ";
+                        size_t vi; int tw = 0;
+                        for (vi = 0; vi < vinit2->children_count; vi++) {
+                            ASTNode *elem = vinit2->children[vi];
+                            if (elem && elem->type == AST_INTEGER) fprintf(out, "%s %d\n", edir, elem->data.integer.value);
+                            else fprintf(out, "%s 0\n", edir);
+                            tw += elem_size;
+                        }
+                        if (tw < size) fprintf(out, "DB %d DUP(0)\n", size - tw);
+                    } else {
+                        int val = 0;
+                        if (vinit2 && vinit2->type == AST_INTEGER) val = vinit2->data.integer.value;
+                        if (size == 1) fprintf(out, "DB %d\n", val);
+                        else if (size == 4) fprintf(out, "DD %d\n", val);
+                        else fprintf(out, "DQ %d\n", val);
                     }
-                    if (size == 1) fprintf(out, "DB %d\n", val);
-                    else if (size == 4) fprintf(out, "DD %d\n", val);
-                    else fprintf(out, "DQ %d\n", val);
                     fprintf(out, "_DATA ENDS\n_TEXT SEGMENT\n");
                 } else {
                     fprintf(out, ".data\n");
                     emit_label_def(slabel);
                     int size = node->resolved_type ? node->resolved_type->size : 8;
-                    int val = 0;
                     ASTNode *vinit3 = node->data.var_decl.initializer;
-                    if (vinit3 && vinit3->type == AST_INTEGER) {
-                        val = vinit3->data.integer.value;
+                    if (vinit3 && vinit3->type == AST_INIT_LIST) {
+                        int elem_size = 1;
+                        if (node->resolved_type && node->resolved_type->kind == TYPE_ARRAY && node->resolved_type->data.ptr_to)
+                            elem_size = node->resolved_type->data.ptr_to->size;
+                        size_t vi; int tw = 0;
+                        for (vi = 0; vi < vinit3->children_count; vi++) {
+                            ASTNode *elem = vinit3->children[vi];
+                            if (elem && elem->type == AST_INTEGER) {
+                                if (elem_size == 1) fprintf(out, "    .byte %d\n", elem->data.integer.value);
+                                else if (elem_size == 4) fprintf(out, "    .long %d\n", elem->data.integer.value);
+                                else fprintf(out, "    .quad %d\n", elem->data.integer.value);
+                            } else {
+                                int zi; for (zi = 0; zi < elem_size; zi++) fprintf(out, "    .byte 0\n");
+                            }
+                            tw += elem_size;
+                        }
+                        if (tw < size) fprintf(out, "    .zero %d\n", size - tw);
+                    } else {
+                        int val = 0;
+                        if (vinit3 && vinit3->type == AST_INTEGER) val = vinit3->data.integer.value;
+                        if (size == 1) fprintf(out, ".byte %d\n", val);
+                        else if (size == 4) fprintf(out, ".long %d\n", val);
+                        else fprintf(out, ".quad %d\n", val);
                     }
-                    if (size == 1) fprintf(out, ".byte %d\n", val);
-                    else if (size == 4) fprintf(out, ".long %d\n", val);
-                    else fprintf(out, ".quad %d\n", val);
                     fprintf(out, ".text\n");
                 }
             }

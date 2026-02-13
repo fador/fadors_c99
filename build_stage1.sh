@@ -41,6 +41,7 @@ SOURCES=(
     src/encoder.c
     src/coff_writer.c
     src/elf_writer.c
+    src/linker.c
     src/main.c
 )
 

@@ -7,6 +7,7 @@
 #include "preprocessor.h"
 #include "coff_writer.h"
 #include "elf_writer.h"
+#include "linker.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -74,13 +75,18 @@ static void print_usage(const char *progname) {
     printf("  -c, --obj    Stop after generating object file\n");
     printf("  -o <file>    Output file name\n");
     printf("  --target=linux|windows   Target platform (default: host)\n");
-    printf("  --masm       Use Intel/MASM syntax (implies --target=windows)\n\n");
+    printf("  --masm       Use Intel/MASM syntax (implies --target=windows)\n");
+    printf("  -l<name>     Link against lib<name>.a\n");
+    printf("  -L<path>     Add library search directory\n");
+    printf("  --nostdlib   Don't auto-link libc\n\n");
     printf("If only a .c file is given, the full pipeline runs (compile -> assemble -> link).\n");
 }
 
 // ---------- CC mode: compile C source ----------
 static int do_cc(const char *source_filename, const char *output_name,
-                 StopAfter stop, TargetPlatform target, int use_masm) {
+                 StopAfter stop, TargetPlatform target, int use_masm,
+                 int lib_count, const char **libraries,
+                 int libpath_count, const char **libpaths) {
     FILE *f = fopen(source_filename, "rb");
     if (!f) {
         printf("Could not open file %s\n", source_filename);
@@ -117,16 +123,22 @@ static int do_cc(const char *source_filename, const char *output_name,
 
     codegen_set_target(target);
 
-    if (stop == STOP_OBJ) {
-        // Direct object generation (binary encoder)
+    if (stop == STOP_OBJ || (stop == STOP_FULL && target == TARGET_LINUX)) {
+        /* Direct binary object generation (binary encoder).
+         * For STOP_FULL on Linux we also continue to link below. */
         char obj_filename[260];
-        if (output_name) {
+        char exe_filename[260];
+
+        strncpy(obj_filename, out_base, 255);
+        obj_filename[255] = '\0';
+        if (target == TARGET_WINDOWS)
+            strcat(obj_filename, ".obj");
+        else
+            strcat(obj_filename, ".o");
+
+        if (stop == STOP_OBJ && output_name) {
             strncpy(obj_filename, output_name, 259);
-        } else {
-            if (target == TARGET_WINDOWS)
-                sprintf(obj_filename, "%s.obj", out_base);
-            else
-                sprintf(obj_filename, "%s.o", out_base);
+            obj_filename[259] = '\0';
         }
 
         printf("Generating OBJ to %s...\n", obj_filename); fflush(stdout);
@@ -143,6 +155,28 @@ static int do_cc(const char *source_filename, const char *output_name,
         coff_writer_free(current_writer);
         free(current_writer);
         printf("Generated Object: %s\n", obj_filename);
+
+        if (stop == STOP_OBJ)
+            return 0;
+
+        /* STOP_FULL + TARGET_LINUX: link with custom linker */
+        if (output_name) {
+            strncpy(exe_filename, output_name, 259);
+            exe_filename[259] = '\0';
+        } else {
+            strcpy(exe_filename, out_base);
+        }
+
+        Linker *lnk = linker_new();
+        linker_add_object_file(lnk, obj_filename);
+        { int li; for (li = 0; li < libpath_count; li++)
+            linker_add_lib_path(lnk, libpaths[li]); }
+        { int li; for (li = 0; li < lib_count; li++)
+            linker_add_library(lnk, libraries[li]); }
+        int rc = linker_link(lnk, exe_filename);
+        linker_free(lnk);
+        if (rc != 0) { printf("Error: Linking failed.\n"); return 1; }
+        printf("Compiled to: %s\n", exe_filename);
         return 0;
     }
 
@@ -181,7 +215,7 @@ static int do_cc(const char *source_filename, const char *output_name,
     if (stop == STOP_ASM)
         return 0;
 
-    // Full pipeline: assemble + link
+    // Full pipeline: assemble + link (MASM or external as+gcc)
     char obj_filename[260];
     char exe_filename[260];
     char cmd[2048];
@@ -254,9 +288,11 @@ static int do_as(const char *input_file, const char *output_name,
     return 0;
 }
 
-// ---------- LINK mode: link objects to executable (stub) ----------
-static int do_link(int obj_count, char **obj_files, const char *output_name,
-                   TargetPlatform target) {
+// ---------- LINK mode: link objects to executable ----------
+static int do_link(int obj_count, const char **obj_files, const char *output_name,
+                   TargetPlatform target,
+                   int lib_count, const char **libraries,
+                   int libpath_count, const char **libpaths) {
     char cmd[4096];
     char exe_filename[260];
 
@@ -269,7 +305,23 @@ static int do_link(int obj_count, char **obj_files, const char *output_name,
             strcpy(exe_filename, "a.out");
     }
 
-    if (target == TARGET_WINDOWS) {
+    if (target == TARGET_LINUX) {
+        /* Use our custom ELF linker */
+        Linker *lnk = linker_new();
+        int i;
+        for (i = 0; i < obj_count; i++)
+            linker_add_object_file(lnk, obj_files[i]);
+        for (i = 0; i < libpath_count; i++)
+            linker_add_lib_path(lnk, libpaths[i]);
+        for (i = 0; i < lib_count; i++)
+            linker_add_library(lnk, libraries[i]);
+        int rc = linker_link(lnk, exe_filename);
+        linker_free(lnk);
+        return rc;
+    }
+
+    /* Windows target: external linker */
+    {
         const char *linker = getenv("FADORS_LINKER");
         if (!linker) linker = "link";
         const char *lfmt = strchr(linker, ' ') ? "\"%s\"" : "%s";
@@ -277,13 +329,9 @@ static int do_link(int obj_count, char **obj_files, const char *output_name,
 
         int pos = sprintf(cmd, "%s /nologo /STACK:8000000 /subsystem:console /out:\"%s\"",
                           lcmd, exe_filename);
-        for (int i = 0; i < obj_count; i++)
-            pos += sprintf(cmd + pos, " \"%s\"", obj_files[i]);
+        { int i; for (i = 0; i < obj_count; i++)
+            pos += sprintf(cmd + pos, " \"%s\"", obj_files[i]); }
         pos += sprintf(cmd + pos, " kernel32.lib libcmt.lib legacy_stdio_definitions.lib");
-    } else {
-        int pos = sprintf(cmd, "gcc -no-pie -o \"%s\"", exe_filename);
-        for (int i = 0; i < obj_count; i++)
-            pos += sprintf(cmd + pos, " \"%s\"", obj_files[i]);
     }
 
     if (run_command(cmd) != 0) {
@@ -316,6 +364,12 @@ int main(int argc, char **argv) {
     // Collect positional (non-option) arguments
     const char *input_files[64];
     int input_count = 0;
+
+    // Libraries and library paths
+    const char *libraries[64];
+    int lib_count = 0;
+    const char *libpaths[64];
+    int libpath_count = 0;
 
     for (int i = 1; i < argc; i++) {
         // Mode selectors
@@ -359,6 +413,18 @@ int main(int argc, char **argv) {
             print_usage(argv[0]);
             return 0;
         }
+        // -l<name>  library
+        if (strncmp(argv[i], "-l", 2) == 0 && argv[i][2] != '\0') {
+            if (lib_count < 64)
+                libraries[lib_count++] = argv[i] + 2;
+            continue;
+        }
+        // -L<path>  library search path
+        if (strncmp(argv[i], "-L", 2) == 0 && argv[i][2] != '\0') {
+            if (libpath_count < 64)
+                libpaths[libpath_count++] = argv[i] + 2;
+            continue;
+        }
         // Positional argument (input file)
         if (input_count < 64)
             input_files[input_count++] = argv[i];
@@ -372,7 +438,7 @@ int main(int argc, char **argv) {
     // Auto-detect mode from first input file extension
     if (mode == MODE_AUTO) {
         const char *ext = file_extension(input_files[0]);
-        if (strcmp(ext, ".c") == 0 || strcmp(ext, ".C") == 0)
+        if (strcmp(ext, ".c") == 0 || strcmp(ext, ".C") == 0 || strcmp(ext, ".cc") == 0 || strcmp(ext, ".CC") == 0)
             mode = MODE_CC;
         else if (strcmp(ext, ".s") == 0 || strcmp(ext, ".S") == 0 ||
                  strcmp(ext, ".asm") == 0 || strcmp(ext, ".ASM") == 0)
@@ -391,13 +457,15 @@ int main(int argc, char **argv) {
 
     switch (mode) {
     case MODE_CC:
-        return do_cc(input_files[0], output_name, stop, target, use_masm);
+        return do_cc(input_files[0], output_name, stop, target, use_masm,
+                     lib_count, libraries, libpath_count, libpaths);
 
     case MODE_AS:
         return do_as(input_files[0], output_name, target);
 
     case MODE_LINK:
-        return do_link(input_count, (char **)input_files, output_name, target);
+        return do_link(input_count, input_files, output_name, target,
+                       lib_count, libraries, libpath_count, libpaths);
 
     default:
         printf("Error: Could not determine mode.\n");

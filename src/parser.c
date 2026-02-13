@@ -1173,24 +1173,33 @@ static ASTNode *parse_statement(Parser *parser) {
                     {
                         int dims[16];
                         int ndims = 0;
+                        int has_empty_brackets = 0;
                         while (parser->current_token.type == TOKEN_LBRACKET) {
                             parser_advance(parser);
                             if (parser->current_token.type != TOKEN_RBRACKET) {
                                 ASTNode *size_expr = parse_expression(parser);
                                 dims[ndims++] = eval_constant_expression(size_expr);
+                            } else {
+                                has_empty_brackets = 1;
                             }
                             parser_expect(parser, TOKEN_RBRACKET);
                         }
                         for (int _di = ndims - 1; _di >= 0; _di--) {
                             node->resolved_type = type_array(node->resolved_type, dims[_di]);
                         }
-                    }
                     
                     if (parser->current_token.type == TOKEN_EQUAL) {
                         parser_advance(parser);
                         node->data.var_decl.initializer = parse_initializer(parser);
+                        /* Infer array size from init list for type name[] = { ... } */
+                        if (has_empty_brackets && node->data.var_decl.initializer &&
+                            node->data.var_decl.initializer->type == AST_INIT_LIST) {
+                            int count = (int)node->data.var_decl.initializer->children_count;
+                            node->resolved_type = type_array(node->resolved_type, count);
+                        }
                     } else {
                         node->data.var_decl.initializer = NULL;
+                    }
                     }
                     
                     // Handle multi-variable: struct Foo a, b;
@@ -1280,16 +1289,35 @@ static ASTNode *parse_statement(Parser *parser) {
             {
                 int dims[16];
                 int ndims = 0;
+                int has_empty_brackets = 0;
                 while (parser->current_token.type == TOKEN_LBRACKET) {
                     parser_advance(parser);
                     if (parser->current_token.type != TOKEN_RBRACKET) {
                         ASTNode *size_expr = parse_expression(parser);
                         dims[ndims++] = eval_constant_expression(size_expr);
+                    } else {
+                        has_empty_brackets = 1;
                     }
                     parser_expect(parser, TOKEN_RBRACKET);
                 }
                 for (int _di = ndims - 1; _di >= 0; _di--) {
                     node->resolved_type = type_array(node->resolved_type, dims[_di]);
+                }
+
+                /* Infer array size from init list for type name[] = { ... } */
+                if (has_empty_brackets && parser->current_token.type == TOKEN_EQUAL) {
+                    parser_advance(parser);
+                    node->data.var_decl.initializer = parse_initializer(parser);
+                    if (node->data.var_decl.initializer &&
+                        node->data.var_decl.initializer->type == AST_INIT_LIST) {
+                        int count = (int)node->data.var_decl.initializer->children_count;
+                        node->resolved_type = type_array(node->resolved_type, count);
+                    }
+                } else if (parser->current_token.type == TOKEN_EQUAL) {
+                    parser_advance(parser);
+                    node->data.var_decl.initializer = parse_initializer(parser);
+                } else {
+                    node->data.var_decl.initializer = NULL;
                 }
             }
             if (parser->current_token.type == TOKEN_LPAREN) {
@@ -1309,13 +1337,6 @@ static ASTNode *parse_statement(Parser *parser) {
             }
 
             add_local(parser, node->data.var_decl.name, node->resolved_type);
-
-            if (parser->current_token.type == TOKEN_EQUAL) {
-                parser_advance(parser);
-                node->data.var_decl.initializer = parse_initializer(parser);
-            } else {
-                node->data.var_decl.initializer = NULL;
-            }
             
             // Handle multi-variable declarations: int a, b, c;
             if (parser->current_token.type == TOKEN_COMMA) {
@@ -1615,31 +1636,40 @@ static ASTNode *parse_external_declaration(Parser *parser) {
             node->data.var_decl.is_static = is_static;
             node->data.var_decl.is_extern = is_extern;
             node->data.var_decl.name = name;
-            // Array support: int a[10]; or a[4][8];
+            // Array support: int a[10]; or a[4][8]; or a[] = {...};
             {
                 int dims[16];
                 int ndims = 0;
+                int has_empty_brackets = 0;
                 while (parser->current_token.type == TOKEN_LBRACKET) {
                     parser_advance(parser);
                     if (parser->current_token.type != TOKEN_RBRACKET) {
                         ASTNode *size_expr = parse_expression(parser);
                         dims[ndims++] = eval_constant_expression(size_expr);
+                    } else {
+                        has_empty_brackets = 1;
                     }
                     parser_expect(parser, TOKEN_RBRACKET);
                 }
                 for (int _di = ndims - 1; _di >= 0; _di--) {
                     node->resolved_type = type_array(node->resolved_type, dims[_di]);
                 }
+
+                if (parser->current_token.type == TOKEN_EQUAL) {
+                    parser_advance(parser);
+                    node->data.var_decl.initializer = parse_initializer(parser);
+                    /* Infer array size from init list for type name[] = { ... } */
+                    if (has_empty_brackets && node->data.var_decl.initializer &&
+                        node->data.var_decl.initializer->type == AST_INIT_LIST) {
+                        int count = (int)node->data.var_decl.initializer->children_count;
+                        node->resolved_type = type_array(node->resolved_type, count);
+                    }
+                } else {
+                    node->data.var_decl.initializer = NULL;
+                }
             }
 
             add_global(parser, name, node->resolved_type);
-
-            if (parser->current_token.type == TOKEN_EQUAL) {
-                parser_advance(parser);
-                node->data.var_decl.initializer = parse_initializer(parser);
-            } else {
-                node->data.var_decl.initializer = NULL;
-            }
             
             // Handle multi-variable declarations: int a, b;
             while (parser->current_token.type == TOKEN_COMMA) {
