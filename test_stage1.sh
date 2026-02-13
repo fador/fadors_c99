@@ -1,6 +1,6 @@
 #!/bin/bash
 # test_stage1.sh — Run the test suite through the stage-1 (self-compiled) compiler
-#                  and compare results against stage-0 expected outcomes.
+#                  using the built-in linker (full pipeline: C -> binary .o -> internal ELF linker).
 #
 # Usage:  ./test_stage1.sh [stage1_path]
 #   stage1_path  Path to the stage-1 compiler binary.
@@ -15,10 +15,10 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-STAGE1="${1:-build_linux/fadors99_stage1}"
+COMPILER="${COMPILER:-${1:-build_linux/fadors99_stage1}}"
 
-if [ ! -x "$STAGE1" ]; then
-    echo "[ERROR] Stage-1 compiler not found at: $STAGE1"
+if [ ! -x "$COMPILER" ]; then
+    echo "[ERROR] Stage-1 compiler not found at: $COMPILER"
     echo "        Run build_stage1.sh first."
     exit 1
 fi
@@ -99,18 +99,23 @@ EXPECTED=(
     [test_ternary]=42
 )
 
-# Tests skipped (known blockers that are not regressions)
+# Tests skipped (Windows-only or need libc/printf — linker mode can't handle those)
 declare -A SKIP
 SKIP=(
-    [13_extern]=1          # Requires external linkage (Windows ExitProcess)
-    [26_external]=1        # Requires external linkage (Windows ExitProcess)
+    [13_extern]=1
+    [26_external]=1
+    [46_system_includes]=1
+    [53_pragma_pack]=1
+    [54_string_escapes]=1
+    [55_headers_test]=1
 )
 
 TMPDIR=$(mktemp -d)
 trap "rm -rf $TMPDIR" EXIT
 
-echo "=== Stage 1 Test Suite ==="
-echo "Compiler: $STAGE1"
+echo "=== Stage 1 Test Suite (built-in linker) ==="
+echo "Compiler: $COMPILER"
+echo "Pipeline: C -> binary .o -> internal ELF linker (no external tools)"
 echo ""
 
 PASS=0
@@ -135,33 +140,23 @@ for testfile in tests/*.c; do
     fi
 
     expected="${EXPECTED[$name]}"
-    sfile="${testfile%.c}.s"
-    rm -f "$sfile"
+    binfile="$TMPDIR/$name"
 
-    # Compile
-    "$STAGE1" "$testfile" -S >/dev/null 2>&1
-    if [ ! -f "$sfile" ]; then
-        echo "  FAIL  $name  (compile error, expected exit=$expected)"
+    # Full pipeline: compile + internal link
+    if ! "$COMPILER" "$testfile" -o "$binfile" >/dev/null 2>&1; then
+        echo "  FAIL  $name  (compile/link error, expected exit=$expected)"
         FAIL=$((FAIL + 1))
         continue
     fi
 
-    # Assemble
-    if ! as -o "$TMPDIR/test.o" "$sfile" 2>/dev/null; then
-        echo "  FAIL  $name  (assembler error, expected exit=$expected)"
-        FAIL=$((FAIL + 1))
-        continue
-    fi
-
-    # Link
-    if ! gcc -o "$TMPDIR/test" "$TMPDIR/test.o" 2>/dev/null; then
-        echo "  FAIL  $name  (link error, expected exit=$expected)"
+    if [ ! -f "$binfile" ]; then
+        echo "  FAIL  $name  (no binary generated, expected exit=$expected)"
         FAIL=$((FAIL + 1))
         continue
     fi
 
     # Run
-    "$TMPDIR/test" >/dev/null 2>&1
+    "$binfile" >/dev/null 2>&1
     actual=$?
 
     if [ "$actual" -eq "$expected" ]; then

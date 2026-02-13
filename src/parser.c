@@ -365,8 +365,8 @@ static ASTNode *parse_primary(Parser *parser) {
                 node->data.integer.value = (unsigned char)buffer[1];
             }
         } else {
-            // Decimal or hex integer (strtoul handles 0x prefix and large unsigned values)
-            node->data.integer.value = (int)strtoul(buffer, NULL, 0);
+            // Decimal or hex integer (strtoull handles 0x prefix, LL suffixes and large values)
+            node->data.integer.value = (long long)strtoull(buffer, NULL, 0);
         }
         parser_advance(parser);
         return node;

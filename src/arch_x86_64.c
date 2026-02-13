@@ -54,7 +54,7 @@ static Operand *op_reg(const char *reg) {
     Operand *op = &_op_pool[_op_idx++ & 15];
     op->type = OP_REG; op->data.reg = reg; return op;
 }
-static Operand *op_imm(int imm) {
+static Operand *op_imm(long long imm) {
     Operand *op = &_op_pool[_op_idx++ & 15];
     op->type = OP_IMM; op->data.imm = imm; return op;
 }
@@ -507,8 +507,8 @@ static void print_operand(Operand *op) {
         if (current_syntax == SYNTAX_ATT) fprintf(out, "%%%s", op->data.reg);
         else fprintf(out, "%s", op->data.reg);
     } else if (op->type == OP_IMM) {
-        if (current_syntax == SYNTAX_ATT) fprintf(out, "$%d", op->data.imm);
-        else fprintf(out, "%d", op->data.imm);
+        if (current_syntax == SYNTAX_ATT) fprintf(out, "$%lld", op->data.imm);
+        else fprintf(out, "%lld", op->data.imm);
     } else if (op->type == OP_MEM) {
         if (current_syntax == SYNTAX_ATT) {
             if (op->data.mem.offset != 0) fprintf(out, "%d", op->data.mem.offset);
@@ -1339,6 +1339,14 @@ static void gen_expression(ASTNode *node) {
     } else if (node->type == AST_ADDR_OF) {
         gen_addr(node->data.unary.expression);
     } else if (node->type == AST_NEG) {
+        /* Constant-fold negation of integer literals to avoid double-negation
+           when the literal overflows int32 in op_imm */
+        if (node->data.unary.expression && node->data.unary.expression->type == AST_INTEGER) {
+            long long v = -(long long)node->data.unary.expression->data.integer.value;
+            emit_inst2("mov", op_imm(v), op_reg("rax"));
+            node->resolved_type = type_int();
+            return;
+        }
         gen_expression(node->data.unary.expression);
         Type *t = get_expr_type(node->data.unary.expression);
         if (is_float_type(t)) {

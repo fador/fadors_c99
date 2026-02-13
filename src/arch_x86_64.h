@@ -17,7 +17,7 @@ typedef struct {
     OperandType type;
     union {
         const char *reg;
-        int imm;
+        long long imm;
         struct {
             const char *base;
             int offset;

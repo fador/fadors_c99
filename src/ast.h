@@ -60,7 +60,7 @@ typedef struct ASTNode {
             struct ASTNode *body;
         } function;
         struct {
-            int value;
+            long long value;
         } integer;
         struct {
             double value;
