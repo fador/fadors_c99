@@ -40,6 +40,7 @@ SOURCES=(
     src/arch_x86_64.c
     src/encoder.c
     src/coff_writer.c
+    src/elf_writer.c
     src/main.c
 )
 

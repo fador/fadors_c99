@@ -482,6 +482,29 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             emit_reloc(buf, src->data.label, (uint32_t)buf->size);
             buffer_write_dword(buf, 0); // COFF REL32 addend = 0
         }
+    } else if (strcmp(mnemonic, "movslq") == 0) {
+        /* MOVSXD: sign-extend dword (32-bit) to qword (64-bit).  REX.W + 0x63 /r */
+        if (src->type == OP_MEM && dest->type == OP_REG) {
+            int s = get_reg_id(src->data.mem.base);
+            int d = get_reg_id(dest->data.reg);
+            emit_rex(buf, 1, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x63);
+            if (src->data.mem.offset == 0) emit_modrm(buf, 0, d, s);
+            else { emit_modrm(buf, 2, d, s); buffer_write_dword(buf, src->data.mem.offset); }
+        } else if (src->type == OP_REG && dest->type == OP_REG) {
+            int s = get_reg_id(src->data.reg);
+            int d = get_reg_id(dest->data.reg);
+            emit_rex(buf, 1, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x63);
+            emit_modrm(buf, 3, d, s);
+        } else if (src->type == OP_LABEL && dest->type == OP_REG) {
+            int d = get_reg_id(dest->data.reg);
+            emit_rex(buf, 1, d >= 8, 0, 0);
+            buffer_write_byte(buf, 0x63);
+            emit_modrm(buf, 0, d, 5); /* RIP-relative */
+            emit_reloc(buf, src->data.label, (uint32_t)buf->size);
+            buffer_write_dword(buf, 0);
+        }
     } else if (strcmp(mnemonic, "xor") == 0 || strcmp(mnemonic, "and") == 0 || strcmp(mnemonic, "or") == 0 || strcmp(mnemonic, "test") == 0 ||
                strcmp(mnemonic, "xorl") == 0 || strcmp(mnemonic, "andl") == 0 || strcmp(mnemonic, "orl") == 0) {
         int w = (mnemonic[strlen(mnemonic)-1] != 'l'); // 64-bit unless suffix 'l'

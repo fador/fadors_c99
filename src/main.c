@@ -6,6 +6,9 @@
 #include "codegen.h"
 #include "preprocessor.h"
 #include "coff_writer.h"
+#ifndef _WIN32
+#include "elf_writer.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -148,10 +151,12 @@ int main(int argc, char **argv) {
     
     if (use_obj) {
         char obj_filename[260];
-        sprintf(obj_filename, "%s.obj", out_base);
 #ifdef _WIN32
-        // Normalize paths for Windows
+        sprintf(obj_filename, "%s.obj", out_base);
+        /* Normalize paths for Windows */
         for (char *p = obj_filename; *p; p++) if (*p == '/') *p = '\\';
+#else
+        sprintf(obj_filename, "%s.o", out_base);
 #endif
 
         printf("Generating OBJ to %s...\n", obj_filename); fflush(stdout);
@@ -161,7 +166,11 @@ int main(int argc, char **argv) {
         codegen_init(NULL);
         codegen_generate(program);
         printf("Writing OBJ...\n"); fflush(stdout);
+#ifdef _WIN32
         coff_writer_write(current_writer, obj_filename);
+#else
+        elf_writer_write(current_writer, obj_filename);
+#endif
         coff_writer_free(current_writer);
         free(current_writer);
         printf("OBJ complete.\n");
@@ -188,7 +197,7 @@ int main(int argc, char **argv) {
 
             sprintf(cmd, "%s /nologo /STACK:8000000 /subsystem:console /out:\"%s\" \"%s\" kernel32.lib libcmt.lib legacy_stdio_definitions.lib", linker_cmd, exe_filename, obj_filename);
 #else
-            sprintf(cmd, "gcc -o \"%s\" \"%s\" -lc", exe_filename, obj_filename);
+            sprintf(cmd, "gcc -no-pie -o \"%s\" \"%s\"", exe_filename, obj_filename);
 #endif
             if (run_command(cmd) != 0) {
                 printf("Error: Linking failed.\n");

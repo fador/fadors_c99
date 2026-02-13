@@ -25,6 +25,7 @@ set(SOURCES
     src/buffer.c
     src/encoder.c
     src/coff_writer.c
+    src/elf_writer.c
 )
 
 add_executable(fadors99 ${SOURCES})

@@ -3,3 +3,5 @@
 *.obj
 *.asm
 *.exe
+/build_linux
+/stage1
