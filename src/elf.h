@@ -57,6 +57,8 @@
 /* Program header types */
 #define ELF_PT_NULL       0
 #define ELF_PT_LOAD       1
+#define ELF_PT_DYNAMIC    2
+#define ELF_PT_INTERP     3
 
 /* Segment permission flags */
 #define ELF_PF_X          1   /* Execute */
@@ -78,6 +80,7 @@
 #define ELF_R_X86_64_64     1   /* S + A     (absolute 64-bit) */
 #define ELF_R_X86_64_PC32   2   /* S + A - P (PC-relative 32-bit) */
 #define ELF_R_X86_64_PLT32  4   /* L + A - P (PLT-relative 32-bit) */
+#define ELF_R_X86_64_JUMP_SLOT 7  /* GOT entry for lazy PLT binding   */
 #define ELF_R_X86_64_32    10   /* S + A     (absolute 32-bit, zero-ext) */
 #define ELF_R_X86_64_32S   11   /* S + A     (absolute 32-bit, sign-ext) */
 

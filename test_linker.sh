@@ -94,15 +94,11 @@ EXPECTED=(
     [test_ternary]=42
 )
 
-# Tests skipped (Windows-only or need libc/printf — use -S + gcc for those)
+# Tests skipped (Windows-only or require features not yet supported)
 declare -A SKIP
 SKIP=(
     [13_extern]=1
     [26_external]=1
-    [46_system_includes]=1
-    [53_pragma_pack]=1
-    [54_string_escapes]=1
-    [55_headers_test]=1
 )
 
 TMPDIR=$(mktemp -d)
