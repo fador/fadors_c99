@@ -1933,8 +1933,82 @@ static void gen_statement(ASTNode *node) {
     debug_record_line(node);
     if (node->type == AST_RETURN) {
         if (node->data.return_stmt.expression) {
-            gen_expression(node->data.return_stmt.expression);
-            Type *expr_type = get_expr_type(node->data.return_stmt.expression);
+            ASTNode *ret_expr = node->data.return_stmt.expression;
+
+            /* ---- Tail call optimization (-O2+) ----
+             * Pattern: return f(args...)
+             * Replace: call f + epilogue  →  leave + jmp f
+             * Constraints:
+             *   - All args must fit in registers (no stack args)
+             *   - Return types must be register-compatible (no int<->float conversion)
+             */
+            if (g_compiler_options.opt_level >= OPT_O2 && ret_expr->type == AST_CALL) {
+                int num_args = (int)ret_expr->children_count;
+                int max_reg = g_max_reg_args;
+
+                if (num_args <= max_reg) {
+                    /* Check return type compatibility */
+                    Type *call_ret_type = get_expr_type(ret_expr);
+                    int can_tco = 1;
+                    if (current_func_return_type && call_ret_type) {
+                        /* int <-> float mismatch: different return register */
+                        if (is_float_type(current_func_return_type) != is_float_type(call_ret_type)) {
+                            can_tco = 0;
+                        }
+                        /* float <-> double mismatch: needs conversion */
+                        else if (is_float_type(current_func_return_type) && is_float_type(call_ret_type)) {
+                            if (current_func_return_type->kind != call_ret_type->kind) {
+                                can_tco = 0;
+                            }
+                        }
+                    }
+
+                    if (can_tco) {
+                        const char **arg_regs = g_arg_regs;
+                        const char **xmm_arg_regs = g_xmm_arg_regs;
+
+                        /* Evaluate all args (reverse order) and push to stack */
+                        for (int i = num_args - 1; i >= 0; i--) {
+                            gen_expression(ret_expr->children[i]);
+                            Type *arg_type = get_expr_type(ret_expr->children[i]);
+                            if (is_float_type(arg_type)) {
+                                emit_push_xmm("xmm0");
+                            } else {
+                                emit_inst1("pushq", op_reg("rax"));
+                            }
+                        }
+
+                        /* Pop args into correct argument registers */
+                        for (int i = 0; i < num_args; i++) {
+                            Type *arg_type = get_expr_type(ret_expr->children[i]);
+                            if (is_float_type(arg_type)) {
+                                emit_pop_xmm(xmm_arg_regs[i]);
+                            } else {
+                                emit_inst1("popq", op_reg(arg_regs[i]));
+                            }
+                        }
+
+                        /* System V ABI: set al = number of XMM args (for variadics) */
+                        if (!g_use_shadow_space) {
+                            int xmm_count = 0;
+                            for (int i = 0; i < num_args && i < max_reg; i++) {
+                                Type *at = get_expr_type(ret_expr->children[i]);
+                                if (is_float_type(at)) xmm_count++;
+                            }
+                            emit_inst2("mov", op_imm(xmm_count), op_reg("eax"));
+                        }
+
+                        /* Tear down current stack frame and jump to target */
+                        emit_inst0("leave");
+                        emit_inst1("jmp", op_label(ret_expr->data.call.name));
+                        return; /* done — skip normal return path */
+                    }
+                }
+            }
+            /* ---- End tail call optimization ---- */
+
+            gen_expression(ret_expr);
+            Type *expr_type = get_expr_type(ret_expr);
             
             // Convert to function return type if needed
             if (current_func_return_type && expr_type) {

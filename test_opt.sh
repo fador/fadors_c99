@@ -392,6 +392,115 @@ int main() {
 EOF
 check_exit "br_for_loop" "$TMPDIR/br5.c" 55 "-O1"
 
+# ---- 10. Tail Call Optimization (-O2) ----
+echo ""
+echo "--- Tail Call Optimization ---"
+
+# Test: simple tail call to another function
+cat > "$TMPDIR/tco1.c" << 'EOF'
+int helper(int x) {
+    return x + 1;
+}
+int tail_caller(int a) {
+    return helper(a + 5);
+}
+int main() {
+    return tail_caller(3);
+}
+EOF
+check_exit "tco_simple" "$TMPDIR/tco1.c" 9 "-O2"
+
+# Verify jmp is used instead of call at -O2
+"$CC" -O2 -S -o "$TMPDIR/tco1.s" "$TMPDIR/tco1.c" 2>/dev/null
+if grep -q "jmp helper" "$TMPDIR/tco1.s"; then
+    pass "tco_simple_asm: jmp helper found"
+else
+    fail "tco_simple_asm: expected jmp helper in output"
+fi
+
+# Verify call is used at -O1 (no TCO)
+"$CC" -O1 -S -o "$TMPDIR/tco1_o1.s" "$TMPDIR/tco1.c" 2>/dev/null
+if grep -q "call helper" "$TMPDIR/tco1_o1.s"; then
+    pass "tco_no_tco_O1: call helper at -O1"
+else
+    fail "tco_no_tco_O1: expected call helper at -O1"
+fi
+
+# Test: self-recursive tail call (factorial with accumulator)
+cat > "$TMPDIR/tco2.c" << 'EOF'
+int factorial(int n, int acc) {
+    if (n <= 1) return acc;
+    return factorial(n - 1, n * acc);
+}
+int main() {
+    return factorial(5, 1);
+}
+EOF
+check_exit "tco_recursive" "$TMPDIR/tco2.c" 120 "-O2"
+
+# Verify self-recursive jmp
+"$CC" -O2 -S -o "$TMPDIR/tco2.s" "$TMPDIR/tco2.c" 2>/dev/null
+if grep -q "jmp factorial" "$TMPDIR/tco2.s"; then
+    pass "tco_recursive_asm: jmp factorial found"
+else
+    fail "tco_recursive_asm: expected jmp factorial in output"
+fi
+
+# Test: tail call with multiple args
+cat > "$TMPDIR/tco3.c" << 'EOF'
+int add3(int a, int b, int c) {
+    return a + b + c;
+}
+int wrapper(int x) {
+    return add3(x, x + 1, x + 2);
+}
+int main() {
+    return wrapper(10);
+}
+EOF
+check_exit "tco_multi_args" "$TMPDIR/tco3.c" 33 "-O2"
+
+# Test: non-tail call (expression after call) should NOT be optimized
+cat > "$TMPDIR/tco4.c" << 'EOF'
+int square(int x) {
+    return x * x;
+}
+int not_tail(int a) {
+    return square(a) + 1;
+}
+int main() {
+    return not_tail(5);
+}
+EOF
+check_exit "tco_non_tail" "$TMPDIR/tco4.c" 26 "-O2"
+
+# Verify non-tail call still uses "call" not "jmp"
+"$CC" -O2 -S -o "$TMPDIR/tco4.s" "$TMPDIR/tco4.c" 2>/dev/null
+if grep -q "call square" "$TMPDIR/tco4.s"; then
+    pass "tco_non_tail_asm: call square (not optimized)"
+else
+    fail "tco_non_tail_asm: expected call square"
+fi
+
+# Test: chain of tail calls
+cat > "$TMPDIR/tco5.c" << 'EOF'
+int step3(int x) { return x; }
+int step2(int x) { return step3(x + 10); }
+int step1(int x) { return step2(x + 20); }
+int main() { return step1(5); }
+EOF
+check_exit "tco_chain" "$TMPDIR/tco5.c" 35 "-O2"
+
+# Test: O2 constant propagation + tail call combined
+cat > "$TMPDIR/tco6.c" << 'EOF'
+int identity(int x) { return x; }
+int main() {
+    int a = 42;
+    return identity(a);
+}
+EOF
+check_exit "tco_with_constprop" "$TMPDIR/tco6.c" 42 "-O2"
+
 # ---- Summary ----
 echo ""
 echo "=== Results ==="
