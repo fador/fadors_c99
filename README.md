@@ -82,7 +82,19 @@ Options:
   -l<name>               Link against lib<name>.a
   -L<path>               Add library search directory
   -D<name>[=<value>]     Preprocessor define
+  --nostdlib             Don't auto-link libc
   -h, --help             Print usage
+
+Optimization:
+  -O0                    No optimization (default)
+  -O1                    Basic optimizations
+  -O2                    Standard optimizations
+  -O3                    Aggressive optimizations
+  -Os                    Optimize for code size
+  -Og                    Optimize for debugging experience
+
+Debug:
+  -g                     Emit debug symbols (DWARF on Linux, CodeView on Windows)
 ```
 
 ### Compile to Executable
@@ -165,6 +177,28 @@ Assembles a file with `fadors99`, links it manually, and executes it. Useful for
 ./verify_obj.bat tests/01_return.c
 ```
 
+### Benchmark Suite
+Measures output binary performance at each optimization level and compares against GCC.
+
+```bash
+./bench.sh                    # Run all benchmarks (default: 3 reps)
+REPS=5 ./bench.sh             # More repetitions for stability
+./bench.sh build_linux/fadors99_stage1  # Benchmark stage-1 compiler output
+```
+
+Benchmark programs in `tests/bench_*.c` exercise: tight loops, nested function calls, array traversal, branch-heavy code (Collatz), and struct field access.
+
+### Valgrind Memory Check
+Runs the compiler itself under Valgrind to detect memory errors (leaks, use-after-free, uninitialized reads, buffer overflows).
+
+```bash
+./test_valgrind.sh                          # Full check
+./test_valgrind.sh build_linux/fadors99     # Specify compiler path
+
+# Manual single-file check:
+valgrind --leak-check=full --track-origins=yes ./build_linux/fadors99 tests/01_return.c -o /tmp/test
+```
+
 ## Development Roadmap
 
 ### Current Focus: Optimizations & Debug Symbols
@@ -240,13 +274,13 @@ Discovered by attempting to compile `types.c`, `buffer.c`, `lexer.c` with the co
 
 This section outlines the implementation plan for compiler optimization flags (`-O1`, `-O2`, `-O3`) and debug symbol generation (`-g`). These are standard compiler CLI options that control the trade-off between compilation speed, output binary performance, and debuggability.
 
-### Phase 1: Infrastructure — CLI Flags & Compiler State
+### Phase 1: Infrastructure — CLI Flags & Compiler State ✅
 
 **Goal**: Parse `-O0`/`-O1`/`-O2`/`-O3` and `-g` flags, propagate settings through the compilation pipeline.
 
-- [ ] **CLI parsing**: Add `-O0`, `-O1`, `-O2`, `-O3`, `-Og`, `-Os`, and `-g` flag handling in `main.c`.
-- [ ] **Compiler options struct**: Add `opt_level` (0–3) and `debug_info` (bool) fields to a global/passed-through options struct.
-- [ ] **Pass options to codegen**: Thread optimization level and debug flag through `codegen_init()` or equivalent entry points.
+- [x] **CLI parsing**: Add `-O0`, `-O1`, `-O2`, `-O3`, `-Og`, `-Os`, and `-g` flag handling in `main.c`.
+- [x] **Compiler options struct**: Add `opt_level` (0–3) and `debug_info` (bool) fields to a global `CompilerOptions` struct in `codegen.h`.
+- [x] **Pass options to codegen**: `g_compiler_options` is globally accessible from all pipeline stages via `codegen.h`.
 
 ### Phase 2: `-g` — Debug Symbol Generation (DWARF / CodeView)
 

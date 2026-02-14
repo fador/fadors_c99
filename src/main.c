@@ -80,7 +80,17 @@ static void print_usage(const char *progname) {
     printf("  --masm       Use Intel/MASM syntax (implies --target=windows)\n");
     printf("  -l<name>     Link against lib<name>.a\n");
     printf("  -L<path>     Add library search directory\n");
+    printf("  -D<name>[=<value>]  Preprocessor define\n");
     printf("  --nostdlib   Don't auto-link libc\n\n");
+    printf("Optimization:\n");
+    printf("  -O0          No optimization (default)\n");
+    printf("  -O1          Basic optimizations\n");
+    printf("  -O2          Standard optimizations\n");
+    printf("  -O3          Aggressive optimizations\n");
+    printf("  -Os          Optimize for code size\n");
+    printf("  -Og          Optimize for debugging experience\n\n");
+    printf("Debug:\n");
+    printf("  -g           Emit debug symbols (DWARF on Linux, CodeView on Windows)\n\n");
     printf("If only a .c file is given, the full pipeline runs (compile -> assemble -> link).\n");
 }
 
@@ -90,6 +100,16 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
                             int define_count, const char **define_names,
                             const char **define_values) {
     int i;
+
+    /* Log optimization and debug settings */
+    if (g_compiler_options.opt_level != OPT_O0) {
+        const char *opt_names[] = {"O0", "O1", "O2", "O3", "Os", "Og"};
+        printf("  [opt] -%s enabled\n", opt_names[g_compiler_options.opt_level]);
+    }
+    if (g_compiler_options.debug_info) {
+        printf("  [dbg] Debug symbols enabled (-g)\n");
+    }
+
     /* Reset preprocessor for this compilation unit */
     preprocess_reset();
     if (target == TARGET_WINDOWS) {
@@ -495,6 +515,29 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]);
             return 0;
+        }
+        // Optimization flags
+        if (strcmp(argv[i], "-O0") == 0) {
+            g_compiler_options.opt_level = OPT_O0; continue;
+        }
+        if (strcmp(argv[i], "-O1") == 0) {
+            g_compiler_options.opt_level = OPT_O1; continue;
+        }
+        if (strcmp(argv[i], "-O2") == 0) {
+            g_compiler_options.opt_level = OPT_O2; continue;
+        }
+        if (strcmp(argv[i], "-O3") == 0) {
+            g_compiler_options.opt_level = OPT_O3; continue;
+        }
+        if (strcmp(argv[i], "-Os") == 0) {
+            g_compiler_options.opt_level = OPT_Os; continue;
+        }
+        if (strcmp(argv[i], "-Og") == 0) {
+            g_compiler_options.opt_level = OPT_Og; continue;
+        }
+        // Debug symbols flag
+        if (strcmp(argv[i], "-g") == 0) {
+            g_compiler_options.debug_info = 1; continue;
         }
         // -l<name>  library
         if (strncmp(argv[i], "-l", 2) == 0 && argv[i][2] != '\0') {
