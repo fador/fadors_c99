@@ -587,6 +587,106 @@ else
     fail "inline_no_multi_asm: compute was unexpectedly inlined"
 fi
 
+# ---- 12. Inline Hinting (GCC/MSVC style) ----
+echo ""
+echo "--- Inline Hinting ---"
+
+# Test: __forceinline at -O0 should inline
+cat > "$TMPDIR/hint1.c" << 'EOF'
+__forceinline int square(int x) { return x * x; }
+int main() {
+    return square(7);
+}
+EOF
+check_exit "forceinline_O0" "$TMPDIR/hint1.c" 49 "-O0"
+
+# Verify __forceinline eliminates call at -O0
+"$CC" -O0 -S -o "$TMPDIR/hint1.s" "$TMPDIR/hint1.c" 2>/dev/null
+if ! grep -q "call square" "$TMPDIR/hint1.s"; then
+    pass "forceinline_O0_asm: square inlined at -O0"
+else
+    fail "forceinline_O0_asm: square not inlined at -O0"
+fi
+
+# Test: __attribute__((always_inline)) at -O0
+cat > "$TMPDIR/hint2.c" << 'EOF'
+__attribute__((always_inline)) int cube(int x) { return x * x * x; }
+int main() {
+    return cube(3);
+}
+EOF
+check_exit "always_inline_O0" "$TMPDIR/hint2.c" 27 "-O0"
+
+# Test: __attribute__((noinline)) at -O2 should prevent inlining
+cat > "$TMPDIR/hint3.c" << 'EOF'
+__attribute__((noinline)) int add_one(int x) { return x + 1; }
+int main() {
+    return add_one(41);
+}
+EOF
+check_exit "noinline_O2" "$TMPDIR/hint3.c" 42 "-O2"
+
+# Verify noinline keeps call/jmp
+"$CC" -O2 -S -o "$TMPDIR/hint3.s" "$TMPDIR/hint3.c" 2>/dev/null
+if grep -q "call add_one\|jmp add_one" "$TMPDIR/hint3.s"; then
+    pass "noinline_O2_asm: add_one not inlined"
+else
+    fail "noinline_O2_asm: add_one was inlined despite noinline"
+fi
+
+# Test: __declspec(noinline) at -O2
+cat > "$TMPDIR/hint4.c" << 'EOF'
+__declspec(noinline) int double_val(int x) { return x + x; }
+int main() {
+    return double_val(21);
+}
+EOF
+check_exit "declspec_noinline" "$TMPDIR/hint4.c" 42 "-O2"
+
+# Verify __declspec(noinline) keeps call/jmp
+"$CC" -O2 -S -o "$TMPDIR/hint4.s" "$TMPDIR/hint4.c" 2>/dev/null
+if grep -q "call double_val\|jmp double_val" "$TMPDIR/hint4.s"; then
+    pass "declspec_noinline_asm: double_val not inlined"
+else
+    fail "declspec_noinline_asm: double_val inlined despite __declspec(noinline)"
+fi
+
+# Test: __inline at -O1 should inline (hint=1)
+cat > "$TMPDIR/hint5.c" << 'EOF'
+__inline int triple(int x) { return x + x + x; }
+int plain(int x) { return x + 1; }
+int main() {
+    return triple(5) + plain(3);
+}
+EOF
+check_exit "inline_hint_O1" "$TMPDIR/hint5.c" 19 "-O1"
+
+# Verify __inline inlined but plain not at -O1
+"$CC" -O1 -S -o "$TMPDIR/hint5.s" "$TMPDIR/hint5.c" 2>/dev/null
+if grep -q "call plain" "$TMPDIR/hint5.s" && ! grep -q "call triple" "$TMPDIR/hint5.s"; then
+    pass "inline_hint_O1_asm: triple inlined, plain called"
+else
+    fail "inline_hint_O1_asm: unexpected inline behavior"
+fi
+
+# Test: __inline__ (GCC alternate) at -O1
+cat > "$TMPDIR/hint6.c" << 'EOF'
+__inline__ int negate(int x) { return 0 - x; }
+int main() {
+    return negate(0 - 42);
+}
+EOF
+check_exit "gcc_inline_O1" "$TMPDIR/hint6.c" 42 "-O1"
+
+# Test: post-parameter __attribute__((always_inline)) on definition
+cat > "$TMPDIR/hint7.c" << 'EOF'
+int square(int x) __attribute__((always_inline)) { return x * x; }
+int main() {
+    return square(8);
+}
+EOF
+check_exit "postattr_always_inline" "$TMPDIR/hint7.c" 64 "-O0"
+
 # ---- Summary ----
 echo ""
 echo "=== Results ==="

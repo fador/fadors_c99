@@ -869,6 +869,7 @@ typedef struct {
     ASTNode   *return_expr;   /* the expression in "return expr;" */
     int        param_count;
     const char *param_names[MAX_INLINE_PARAMS];
+    int        inline_hint;   /* from AST: 0=none, 1=inline, 2=always_inline, -1=noinline */
 } InlineCandidate;
 
 static InlineCandidate g_inline_cands[MAX_INLINE_CANDIDATES];
@@ -1016,6 +1017,9 @@ static void find_inline_candidates(ASTNode *program) {
         ASTNode *fn = program->children[i];
         if (fn->type != AST_FUNCTION || !fn->data.function.body) continue;
 
+        /* __attribute__((noinline)) / __declspec(noinline) — never inline */
+        if (fn->data.function.inline_hint == -1) continue;
+
         ASTNode *body = fn->data.function.body;
         if (body->type != AST_BLOCK || body->children_count != 1) continue;
 
@@ -1029,6 +1033,7 @@ static void find_inline_candidates(ASTNode *program) {
         c->name        = fn->data.function.name;
         c->return_expr = stmt->data.return_stmt.expression;
         c->param_count = (int)fn->children_count;
+        c->inline_hint = fn->data.function.inline_hint;
         for (int j = 0; j < c->param_count; j++) {
             c->param_names[j] = fn->children[j]->data.var_decl.name;
         }
@@ -1181,8 +1186,37 @@ static void inline_stmt(ASTNode *stmt) {
 /* Top-level entry point                                              */
 /* ------------------------------------------------------------------ */
 ASTNode *optimize(ASTNode *program, OptLevel level) {
-    if (level < OPT_O1) return program;  /* -O0: no optimization */
     if (!program) return program;
+
+    /* __forceinline / __attribute__((always_inline)) must be processed even at -O0 */
+    {
+        find_inline_candidates(program);
+        if (g_inline_cand_count > 0) {
+            /* At -O0: only always_inline (hint==2).
+             * At -O1: inline + always_inline (hint>=1).
+             * At -O2+: all eligible (hint>=0). */
+            int min_hint = (level >= OPT_O2) ? 0 : (level >= OPT_O1) ? 1 : 2;
+            /* Remove candidates below threshold */
+            for (int ci = 0; ci < g_inline_cand_count; ci++) {
+                if (g_inline_cands[ci].inline_hint < min_hint) {
+                    for (int cj = ci; cj < g_inline_cand_count - 1; cj++)
+                        g_inline_cands[cj] = g_inline_cands[cj + 1];
+                    g_inline_cand_count--;
+                    ci--;
+                }
+            }
+            if (g_inline_cand_count > 0) {
+                for (size_t i = 0; i < program->children_count; i++) {
+                    ASTNode *child = program->children[i];
+                    if (child->type == AST_FUNCTION && child->data.function.body) {
+                        inline_stmt(child->data.function.body);
+                    }
+                }
+            }
+        }
+    }
+
+    if (level < OPT_O1) return program;  /* -O0: no further optimization */
 
     /* -O1: AST-level optimizations (constant folding, DCE, strength reduction, algebraic) */
     for (size_t i = 0; i < program->children_count; i++) {
@@ -1195,19 +1229,6 @@ ASTNode *optimize(ASTNode *program, OptLevel level) {
         /* Global variable initializers */
         if (child->type == AST_VAR_DECL && child->data.var_decl.initializer) {
             child->data.var_decl.initializer = opt_expr(child->data.var_decl.initializer);
-        }
-    }
-
-    /* -O2: Function inlining (before propagation so inlined code benefits) */
-    if (level >= OPT_O2) {
-        find_inline_candidates(program);
-        if (g_inline_cand_count > 0) {
-            for (size_t i = 0; i < program->children_count; i++) {
-                ASTNode *child = program->children[i];
-                if (child->type == AST_FUNCTION && child->data.function.body) {
-                    inline_stmt(child->data.function.body);
-                }
-            }
         }
     }
 

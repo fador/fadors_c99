@@ -40,6 +40,9 @@ typedef enum {
     TOKEN_KEYWORD_AUTO,
     TOKEN_KEYWORD_REGISTER,
     TOKEN_KEYWORD_SHORT,
+    TOKEN_KEYWORD_FORCEINLINE,  // __forceinline (MSVC)
+    TOKEN_KEYWORD_ATTRIBUTE,    // __attribute__ (GCC)
+    TOKEN_KEYWORD_DECLSPEC,     // __declspec (MSVC)
     
     // Operators
     TOKEN_LPAREN,       // (

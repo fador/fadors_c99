@@ -1254,14 +1254,15 @@ static ASTNode *parse_statement(Parser *parser) {
         int is_typedef = 0;
         int is_extern = 0;
         int is_static = 0;
-        // int is_inline = 0; // Not used yet
-        // int is_restrict = 0; // Not used yet
-        // int is_volatile = 0; // Not used yet
+        int inline_hint = 0; // 0=none, 1=inline, 2=always_inline/__forceinline, -1=noinline
         
         while (parser->current_token.type == TOKEN_KEYWORD_TYPEDEF ||
                parser->current_token.type == TOKEN_KEYWORD_EXTERN || 
                parser->current_token.type == TOKEN_KEYWORD_STATIC ||
                parser->current_token.type == TOKEN_KEYWORD_INLINE ||
+               parser->current_token.type == TOKEN_KEYWORD_FORCEINLINE ||
+               parser->current_token.type == TOKEN_KEYWORD_ATTRIBUTE ||
+               parser->current_token.type == TOKEN_KEYWORD_DECLSPEC ||
                parser->current_token.type == TOKEN_KEYWORD_RESTRICT ||
                parser->current_token.type == TOKEN_KEYWORD_VOLATILE ||
                parser->current_token.type == TOKEN_KEYWORD_REGISTER || 
@@ -1270,9 +1271,66 @@ static ASTNode *parse_statement(Parser *parser) {
             if (parser->current_token.type == TOKEN_KEYWORD_TYPEDEF) is_typedef = 1;
             else if (parser->current_token.type == TOKEN_KEYWORD_EXTERN) is_extern = 1;
             else if (parser->current_token.type == TOKEN_KEYWORD_STATIC) is_static = 1;
-            // else if (parser->current_token.type == TOKEN_KEYWORD_INLINE) is_inline = 1;
-            // else if (parser->current_token.type == TOKEN_KEYWORD_RESTRICT) is_restrict = 1;
-            // else if (parser->current_token.type == TOKEN_KEYWORD_VOLATILE) is_volatile = 1;
+            else if (parser->current_token.type == TOKEN_KEYWORD_INLINE) {
+                if (inline_hint == 0) inline_hint = 1;
+            }
+            else if (parser->current_token.type == TOKEN_KEYWORD_FORCEINLINE) {
+                inline_hint = 2; /* __forceinline = always inline */
+            }
+            else if (parser->current_token.type == TOKEN_KEYWORD_ATTRIBUTE) {
+                /* Parse __attribute__((attr, ...)) */
+                parser_advance(parser); /* consume __attribute__ */
+                if (parser->current_token.type == TOKEN_LPAREN) {
+                    parser_advance(parser); /* first ( */
+                    if (parser->current_token.type == TOKEN_LPAREN) {
+                        parser_advance(parser); /* second ( */
+                        /* Parse attribute list */
+                        while (parser->current_token.type != TOKEN_RPAREN &&
+                               parser->current_token.type != TOKEN_EOF) {
+                            if (parser->current_token.type == TOKEN_IDENTIFIER) {
+                                if (parser->current_token.length == 13 &&
+                                    strncmp(parser->current_token.start, "always_inline", 13) == 0) {
+                                    inline_hint = 2;
+                                } else if (parser->current_token.length == 8 &&
+                                           strncmp(parser->current_token.start, "noinline", 8) == 0) {
+                                    inline_hint = -1;
+                                } else if (parser->current_token.length == 15 &&
+                                           strncmp(parser->current_token.start, "__always_inline__", 15) == 0) {
+                                    inline_hint = 2;
+                                } else if (parser->current_token.length == 12 &&
+                                           strncmp(parser->current_token.start, "__noinline__", 12) == 0) {
+                                    inline_hint = -1;
+                                }
+                            }
+                            parser_advance(parser);
+                            if (parser->current_token.type == TOKEN_COMMA)
+                                parser_advance(parser);
+                        }
+                        if (parser->current_token.type == TOKEN_RPAREN) parser_advance(parser); /* inner ) */
+                    }
+                    if (parser->current_token.type == TOKEN_RPAREN) parser_advance(parser); /* outer ) */
+                }
+                continue; /* already advanced past __attribute__(...) */
+            }
+            else if (parser->current_token.type == TOKEN_KEYWORD_DECLSPEC) {
+                /* Parse __declspec(attr) */
+                parser_advance(parser); /* consume __declspec */
+                if (parser->current_token.type == TOKEN_LPAREN) {
+                    parser_advance(parser); /* ( */
+                    while (parser->current_token.type != TOKEN_RPAREN &&
+                           parser->current_token.type != TOKEN_EOF) {
+                        if (parser->current_token.type == TOKEN_IDENTIFIER) {
+                            if (parser->current_token.length == 8 &&
+                                strncmp(parser->current_token.start, "noinline", 8) == 0) {
+                                inline_hint = -1;
+                            }
+                        }
+                        parser_advance(parser);
+                    }
+                    if (parser->current_token.type == TOKEN_RPAREN) parser_advance(parser); /* ) */
+                }
+                continue; /* already advanced */
+            }
             
             parser_advance(parser);
         }
@@ -1548,11 +1606,64 @@ ASTNode *parse_block(Parser *parser) {
 static ASTNode *parse_external_declaration(Parser *parser) {
     int is_static = 0;
     int is_extern = 0;
+    int inline_hint = 0; // 0=none, 1=inline, 2=always_inline/__forceinline, -1=noinline
     while (parser->current_token.type == TOKEN_KEYWORD_EXTERN || 
            parser->current_token.type == TOKEN_KEYWORD_STATIC ||
-           parser->current_token.type == TOKEN_KEYWORD_CONST) {
+           parser->current_token.type == TOKEN_KEYWORD_CONST ||
+           parser->current_token.type == TOKEN_KEYWORD_INLINE ||
+           parser->current_token.type == TOKEN_KEYWORD_FORCEINLINE ||
+           parser->current_token.type == TOKEN_KEYWORD_ATTRIBUTE ||
+           parser->current_token.type == TOKEN_KEYWORD_DECLSPEC) {
         if (parser->current_token.type == TOKEN_KEYWORD_STATIC) is_static = 1;
         else if (parser->current_token.type == TOKEN_KEYWORD_EXTERN) is_extern = 1;
+        else if (parser->current_token.type == TOKEN_KEYWORD_INLINE) {
+            if (inline_hint == 0) inline_hint = 1;
+        }
+        else if (parser->current_token.type == TOKEN_KEYWORD_FORCEINLINE) {
+            inline_hint = 2;
+        }
+        else if (parser->current_token.type == TOKEN_KEYWORD_ATTRIBUTE) {
+            /* Parse __attribute__((attr, ...)) */
+            parser_advance(parser);
+            if (parser->current_token.type == TOKEN_LPAREN) {
+                parser_advance(parser);
+                if (parser->current_token.type == TOKEN_LPAREN) {
+                    parser_advance(parser);
+                    while (parser->current_token.type != TOKEN_RPAREN &&
+                           parser->current_token.type != TOKEN_EOF) {
+                        if (parser->current_token.type == TOKEN_IDENTIFIER) {
+                            if (parser->current_token.length == 13 &&
+                                strncmp(parser->current_token.start, "always_inline", 13) == 0)
+                                inline_hint = 2;
+                            else if (parser->current_token.length == 8 &&
+                                     strncmp(parser->current_token.start, "noinline", 8) == 0)
+                                inline_hint = -1;
+                        }
+                        parser_advance(parser);
+                        if (parser->current_token.type == TOKEN_COMMA) parser_advance(parser);
+                    }
+                    if (parser->current_token.type == TOKEN_RPAREN) parser_advance(parser);
+                }
+                if (parser->current_token.type == TOKEN_RPAREN) parser_advance(parser);
+            }
+            continue;
+        }
+        else if (parser->current_token.type == TOKEN_KEYWORD_DECLSPEC) {
+            parser_advance(parser);
+            if (parser->current_token.type == TOKEN_LPAREN) {
+                parser_advance(parser);
+                while (parser->current_token.type != TOKEN_RPAREN &&
+                       parser->current_token.type != TOKEN_EOF) {
+                    if (parser->current_token.type == TOKEN_IDENTIFIER &&
+                        parser->current_token.length == 8 &&
+                        strncmp(parser->current_token.start, "noinline", 8) == 0)
+                        inline_hint = -1;
+                    parser_advance(parser);
+                }
+                if (parser->current_token.type == TOKEN_RPAREN) parser_advance(parser);
+            }
+            continue;
+        }
         parser_advance(parser);
     }
     
@@ -1578,6 +1689,7 @@ static ASTNode *parse_external_declaration(Parser *parser) {
             node = parser_create_node(parser, AST_FUNCTION);
             node->resolved_type = type;
             node->data.function.name = name;
+            node->data.function.inline_hint = inline_hint;
             
             parser_advance(parser); // Consume '('
             while (parser->current_token.type != TOKEN_RPAREN && parser->current_token.type != TOKEN_EOF) {
@@ -1629,6 +1741,32 @@ static ASTNode *parse_external_declaration(Parser *parser) {
             }
             parser_expect(parser, TOKEN_RPAREN);
             
+            /* Handle __attribute__((...)) after parameter list (GCC style) */
+            if (parser->current_token.type == TOKEN_KEYWORD_ATTRIBUTE) {
+                parser_advance(parser);
+                if (parser->current_token.type == TOKEN_LPAREN) {
+                    parser_advance(parser);
+                    if (parser->current_token.type == TOKEN_LPAREN) {
+                        parser_advance(parser);
+                        while (parser->current_token.type != TOKEN_RPAREN &&
+                               parser->current_token.type != TOKEN_EOF) {
+                            if (parser->current_token.type == TOKEN_IDENTIFIER) {
+                                if (parser->current_token.length == 13 &&
+                                    strncmp(parser->current_token.start, "always_inline", 13) == 0)
+                                    node->data.function.inline_hint = 2;
+                                else if (parser->current_token.length == 8 &&
+                                         strncmp(parser->current_token.start, "noinline", 8) == 0)
+                                    node->data.function.inline_hint = -1;
+                            }
+                            parser_advance(parser);
+                            if (parser->current_token.type == TOKEN_COMMA) parser_advance(parser);
+                        }
+                        if (parser->current_token.type == TOKEN_RPAREN) parser_advance(parser);
+                    }
+                    if (parser->current_token.type == TOKEN_RPAREN) parser_advance(parser);
+                }
+            }
+
             if (parser->current_token.type == TOKEN_SEMICOLON) {
                 parser_advance(parser);
                 node->data.function.body = NULL;

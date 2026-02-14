@@ -24,7 +24,7 @@ A self-hosting C99-standard compliant compiler written in C99, targeting x86_64 
 - **Pointers**: Full pointer arithmetic (scaled by type size), pointer difference, address-of (`&`), dereference (`*`), chained pointer/member access.
 - **Arrays**: 1D and 2D arrays, subscript operator, initializer lists (local and global).
 - **Literals**: Integer (decimal, hex `0x`), float (with exponent, `f`/`F` suffix), integer suffixes (`U`, `L`, `UL`, `ULL`), string literals with full escape sequences (`\n`, `\t`, `\"`, `\\`, `\0`, `\'`), character literals.
-- **Storage Classes / Qualifiers**: `static` (global and local), `extern`, `const`, `volatile`, `inline`, `restrict`, `auto`, `register`.
+- **Storage Classes / Qualifiers**: `static` (global and local), `extern`, `const`, `volatile`, `inline`, `restrict`, `auto`, `register`. GCC/MSVC extensions: `__inline`, `__inline__`, `__forceinline`, `__attribute__((always_inline))`, `__attribute__((noinline))`, `__declspec(noinline)`.
 - **Variadic Functions**: `...` in declarations (ABI-compliant calling convention).
 
 ### Backends / Code Generation
@@ -339,6 +339,7 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [x] **Dead store elimination**: Detect assignments to variables that are overwritten before being read. Remove the dead store (converted to no-op). Preserves stores with side effects. Only eliminates assignment statements, not variable declarations (which are still needed for stack allocation).
 - [x] **Tail call optimization**: Detect `return f(args)` pattern and convert `call f; leave; ret` to `leave; jmp f` when all args fit in registers and return types are register-compatible. Eliminates stack frame overhead for tail-position calls. Works for both self-recursive and cross-function tail calls.
 - [x] **Function inlining** (small functions): Inline single-return-expression functions at call sites when arguments have no side effects. Replaces `AST_CALL` with clone of callee's return expression, substituting parameters with actual arguments. Combined with constant folding, enables full compile-time evaluation (e.g., `add(square(3), square(4))` → `25`).
+- [x] **Inline hinting**: GCC and MSVC style inline hints control inlining behavior across optimization levels. `__forceinline` and `__attribute__((always_inline))` force inlining even at `-O0`. `inline`, `__inline`, `__inline__` enable inlining at `-O1+`. `__attribute__((noinline))` and `__declspec(noinline)` suppress inlining at all levels. Supports both pre-return-type and post-parameter-list `__attribute__` syntax.
 
 #### Phase 4b: IR / CFG Construction (future)
 - [ ] **Basic block identification**: Split function bodies into basic blocks at branch targets and after jumps/returns.

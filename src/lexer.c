@@ -95,7 +95,14 @@ static TokenType identifier_type(const char *start, size_t length) {
     if (check_keyword(start, length, "do", TOKEN_KEYWORD_DO) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_DO;
     if (check_keyword(start, length, "continue", TOKEN_KEYWORD_CONTINUE) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_CONTINUE;
     if (check_keyword(start, length, "inline", TOKEN_KEYWORD_INLINE) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_INLINE;
+    if (check_keyword(start, length, "__inline", TOKEN_KEYWORD_INLINE) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_INLINE;
+    if (check_keyword(start, length, "__inline__", TOKEN_KEYWORD_INLINE) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_INLINE;
+    if (check_keyword(start, length, "__forceinline", TOKEN_KEYWORD_FORCEINLINE) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_FORCEINLINE;
+    if (check_keyword(start, length, "__attribute__", TOKEN_KEYWORD_ATTRIBUTE) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_ATTRIBUTE;
+    if (check_keyword(start, length, "__declspec", TOKEN_KEYWORD_DECLSPEC) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_DECLSPEC;
     if (check_keyword(start, length, "restrict", TOKEN_KEYWORD_RESTRICT) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_RESTRICT;
+    if (check_keyword(start, length, "__restrict", TOKEN_KEYWORD_RESTRICT) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_RESTRICT;
+    if (check_keyword(start, length, "__restrict__", TOKEN_KEYWORD_RESTRICT) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_RESTRICT;
     if (check_keyword(start, length, "volatile", TOKEN_KEYWORD_VOLATILE) != TOKEN_IDENTIFIER) return TOKEN_KEYWORD_VOLATILE;
     if (check_keyword(start, length, "__pragma_pack_push", TOKEN_PRAGMA_PACK_PUSH) != TOKEN_IDENTIFIER) return TOKEN_PRAGMA_PACK_PUSH;
     if (check_keyword(start, length, "__pragma_pack_pop", TOKEN_PRAGMA_PACK_POP) != TOKEN_IDENTIFIER) return TOKEN_PRAGMA_PACK_POP;

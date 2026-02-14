@@ -59,6 +59,7 @@ typedef struct ASTNode {
         struct {
             char *name;
             struct ASTNode *body;
+            int inline_hint;  // 0=none, 1=inline, 2=always_inline/__forceinline, -1=noinline
         } function;
         struct {
             long long value;
