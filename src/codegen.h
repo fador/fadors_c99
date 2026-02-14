@@ -30,6 +30,7 @@ typedef enum {
 typedef struct {
     OptLevel opt_level;     // Optimization level (default: OPT_O0)
     int debug_info;         // 1 if -g was specified (emit debug symbols)
+    int avx_level;          // 0 = SSE only, 1 = -mavx (AVX), 2 = -mavx2 (AVX2)
 } CompilerOptions;
 
 // Global compiler options (set once from CLI, read by all pipeline stages)

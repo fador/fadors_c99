@@ -40,6 +40,8 @@ int get_reg_id(const char *reg) {
     if (strcmp(reg, "r15") == 0 || strcmp(reg, "r15d") == 0 || strcmp(reg, "r15w") == 0 || strcmp(reg, "r15b") == 0) return 15;
     // XMM registers
     if (strncmp(reg, "xmm", 3) == 0) return atoi(reg + 3);
+    // YMM registers (same encoding as XMM, distinguished by VEX.L)
+    if (strncmp(reg, "ymm", 3) == 0) return atoi(reg + 3);
     return -1;
 }
 
@@ -63,6 +65,61 @@ static void emit_modrm(Buffer *buf, int mod, int reg, int rm) {
     }
 }
 
+/* ---- VEX prefix encoding for AVX/AVX2 instructions ---- */
+/* 2-byte VEX: C5 [R vvvv L pp]
+ *   R    = inverted REX.R (1 = no extension, 0 = extend ModRM.reg)
+ *   vvvv = inverted second source register (1111 = unused)
+ *   L    = 0 for 128-bit (xmm), 1 for 256-bit (ymm)
+ *   pp   = 00=none, 01=66, 10=F3, 11=F2
+ *
+ * 3-byte VEX: C4 [R X B mmmmm] [W vvvv L pp]
+ *   R,X,B = inverted REX.R, REX.X, REX.B
+ *   mmmmm = 00001=0F, 00010=0F38, 00011=0F3A
+ *   W     = REX.W (0 for most SSE/AVX)
+ */
+static void emit_vex2(Buffer *buf, int R, int vvvv, int L, int pp) {
+    buffer_write_byte(buf, 0xC5);
+    uint8_t byte = 0;
+    byte |= (R ? 0 : 0x80);   /* inverted R */
+    byte |= ((~vvvv & 0x0F) << 3);
+    byte |= (L ? 0x04 : 0);
+    byte |= (pp & 3);
+    buffer_write_byte(buf, byte);
+}
+
+static void emit_vex3(Buffer *buf, int R, int X, int B, int mmmmm,
+                       int W, int vvvv, int L, int pp) {
+    buffer_write_byte(buf, 0xC4);
+    uint8_t b1 = 0;
+    b1 |= (R ? 0 : 0x80);
+    b1 |= (X ? 0 : 0x40);
+    b1 |= (B ? 0 : 0x20);
+    b1 |= (mmmmm & 0x1F);
+    buffer_write_byte(buf, b1);
+    uint8_t b2 = 0;
+    b2 |= (W ? 0x80 : 0);
+    b2 |= ((~vvvv & 0x0F) << 3);
+    b2 |= (L ? 0x04 : 0);
+    b2 |= (pp & 3);
+    buffer_write_byte(buf, b2);
+}
+
+/* Emit VEX prefix — uses 2-byte form when possible, 3-byte otherwise.
+ * reg_id, rm_id: register encoding IDs (for R / B bits).
+ * vvvv: second source register id (15 = unused).
+ * L: 0=128, 1=256. pp: 0=none, 1=66, 2=F3, 3=F2. */
+static void emit_vex(Buffer *buf, int reg_id, int rm_id, int vvvv,
+                      int L, int pp) {
+    int R = (reg_id >= 8) ? 1 : 0;
+    int B = (rm_id  >= 8) ? 1 : 0;
+    /* 2-byte form only if B=0, X=0, W=0, mmmmm=0F(1) */
+    if (!B) {
+        emit_vex2(buf, R, vvvv, L, pp);
+    } else {
+        emit_vex3(buf, R, 0, B, 1 /* 0F */, 0, vvvv, L, pp);
+    }
+}
+
 void encode_inst0(Buffer *buf, const char *mnemonic) {
     if (strcmp(mnemonic, "ret") == 0) {
         buffer_write_byte(buf, 0xC3);
@@ -71,6 +128,10 @@ void encode_inst0(Buffer *buf, const char *mnemonic) {
     } else if (strcmp(mnemonic, "cqo") == 0) {
         emit_rex(buf, 1, 0, 0, 0); // REX.W
         buffer_write_byte(buf, 0x99);
+    } else if (strcmp(mnemonic, "vzeroupper") == 0) {
+        /* VEX.128.0F.WIG 77 — zero upper 128 bits of all YMM registers */
+        emit_vex2(buf, 0, 0, 0, 0);
+        buffer_write_byte(buf, 0x77);
     }
 }
 
@@ -785,6 +846,125 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             buffer_write_byte(buf, 0x0F);
             buffer_write_byte(buf, opcode);
             emit_modrm(buf, 3, d, s);
+        }
+    /* ---- AVX/AVX2 2-operand instructions (VEX-encoded) ---- */
+    } else if (strcmp(mnemonic, "vmovups") == 0) {
+        /* VEX.{128,256}.0F.WIG 10/11 — unaligned packed float move */
+        int is_ymm = 0;
+        if (src->type == OP_REG && strncmp(src->data.reg, "ymm", 3) == 0) is_ymm = 1;
+        if (dest->type == OP_REG && strncmp(dest->data.reg, "ymm", 3) == 0) is_ymm = 1;
+        if (src->type == OP_REG && dest->type == OP_REG) {
+            int s = get_reg_id(src->data.reg);
+            int d = get_reg_id(dest->data.reg);
+            emit_vex(buf, d, s, 0, is_ymm, 0); /* pp=0(none) */
+            buffer_write_byte(buf, 0x10);
+            emit_modrm(buf, 3, d, s);
+        } else if (src->type == OP_MEM && dest->type == OP_REG) {
+            int s = get_reg_id(src->data.mem.base);
+            int d = get_reg_id(dest->data.reg);
+            emit_vex(buf, d, s, 0, is_ymm, 0);
+            buffer_write_byte(buf, 0x10);
+            if ((s & 7) == 5 && src->data.mem.offset == 0) {
+                emit_modrm(buf, 1, d, s); buffer_write_byte(buf, 0);
+            } else if (src->data.mem.offset == 0) {
+                emit_modrm(buf, 0, d, s);
+            } else if (src->data.mem.offset >= -128 && src->data.mem.offset <= 127) {
+                emit_modrm(buf, 1, d, s); buffer_write_byte(buf, (uint8_t)src->data.mem.offset);
+            } else {
+                emit_modrm(buf, 2, d, s); buffer_write_dword(buf, src->data.mem.offset);
+            }
+        } else if (src->type == OP_REG && dest->type == OP_MEM) {
+            int s = get_reg_id(src->data.reg);
+            int d = get_reg_id(dest->data.mem.base);
+            emit_vex(buf, s, d, 0, is_ymm, 0);
+            buffer_write_byte(buf, 0x11);
+            if ((d & 7) == 5 && dest->data.mem.offset == 0) {
+                emit_modrm(buf, 1, s, d); buffer_write_byte(buf, 0);
+            } else if (dest->data.mem.offset == 0) {
+                emit_modrm(buf, 0, s, d);
+            } else if (dest->data.mem.offset >= -128 && dest->data.mem.offset <= 127) {
+                emit_modrm(buf, 1, s, d); buffer_write_byte(buf, (uint8_t)dest->data.mem.offset);
+            } else {
+                emit_modrm(buf, 2, s, d); buffer_write_dword(buf, dest->data.mem.offset);
+            }
+        }
+    } else if (strcmp(mnemonic, "vmovdqu") == 0) {
+        /* VEX.{128,256}.F3.0F.WIG 6F/7F — unaligned packed integer move */
+        int is_ymm = 0;
+        if (src->type == OP_REG && strncmp(src->data.reg, "ymm", 3) == 0) is_ymm = 1;
+        if (dest->type == OP_REG && strncmp(dest->data.reg, "ymm", 3) == 0) is_ymm = 1;
+        if (src->type == OP_REG && dest->type == OP_REG) {
+            int s = get_reg_id(src->data.reg);
+            int d = get_reg_id(dest->data.reg);
+            emit_vex(buf, d, s, 0, is_ymm, 2); /* pp=2(F3) */
+            buffer_write_byte(buf, 0x6F);
+            emit_modrm(buf, 3, d, s);
+        } else if (src->type == OP_MEM && dest->type == OP_REG) {
+            int s = get_reg_id(src->data.mem.base);
+            int d = get_reg_id(dest->data.reg);
+            emit_vex(buf, d, s, 0, is_ymm, 2);
+            buffer_write_byte(buf, 0x6F);
+            if ((s & 7) == 5 && src->data.mem.offset == 0) {
+                emit_modrm(buf, 1, d, s); buffer_write_byte(buf, 0);
+            } else if (src->data.mem.offset == 0) {
+                emit_modrm(buf, 0, d, s);
+            } else if (src->data.mem.offset >= -128 && src->data.mem.offset <= 127) {
+                emit_modrm(buf, 1, d, s); buffer_write_byte(buf, (uint8_t)src->data.mem.offset);
+            } else {
+                emit_modrm(buf, 2, d, s); buffer_write_dword(buf, src->data.mem.offset);
+            }
+        } else if (src->type == OP_REG && dest->type == OP_MEM) {
+            int s = get_reg_id(src->data.reg);
+            int d = get_reg_id(dest->data.mem.base);
+            emit_vex(buf, s, d, 0, is_ymm, 2);
+            buffer_write_byte(buf, 0x7F);
+            if ((d & 7) == 5 && dest->data.mem.offset == 0) {
+                emit_modrm(buf, 1, s, d); buffer_write_byte(buf, 0);
+            } else if (dest->data.mem.offset == 0) {
+                emit_modrm(buf, 0, s, d);
+            } else if (dest->data.mem.offset >= -128 && dest->data.mem.offset <= 127) {
+                emit_modrm(buf, 1, s, d); buffer_write_byte(buf, (uint8_t)dest->data.mem.offset);
+            } else {
+                emit_modrm(buf, 2, s, d); buffer_write_dword(buf, dest->data.mem.offset);
+            }
+        }
+    }
+}
+
+/* ---- 3-operand instruction encoder for AVX/AVX2 ---- */
+/* AVX arithmetic: dest = src2 OP src1  (AT&T order: src1, src2, dest) */
+void encode_inst3(Buffer *buf, const char *mnemonic,
+                  Operand *src1, Operand *src2, Operand *dest) {
+    /* All 3-operand AVX instructions: VEX.NDS.{128,256}.{pp}.0F.WIG opcode /r
+     * dest = ModRM.reg, src2 = VEX.vvvv, src1 = ModRM.r/m */
+    if (strcmp(mnemonic, "vaddps") == 0 || strcmp(mnemonic, "vsubps") == 0 ||
+        strcmp(mnemonic, "vmulps") == 0 || strcmp(mnemonic, "vdivps") == 0) {
+        uint8_t opcode = 0x58; /* vaddps */
+        if (mnemonic[1] == 's') opcode = 0x5C;
+        else if (mnemonic[1] == 'm') opcode = 0x59;
+        else if (mnemonic[1] == 'd') opcode = 0x5E;
+        int is_ymm = 0;
+        if (dest->type == OP_REG && strncmp(dest->data.reg, "ymm", 3) == 0) is_ymm = 1;
+        if (src1->type == OP_REG && dest->type == OP_REG && src2->type == OP_REG) {
+            int s1 = get_reg_id(src1->data.reg);
+            int s2 = get_reg_id(src2->data.reg);
+            int d  = get_reg_id(dest->data.reg);
+            emit_vex(buf, d, s1, s2, is_ymm, 0); /* pp=0(none) for packed single */
+            buffer_write_byte(buf, opcode);
+            emit_modrm(buf, 3, d, s1);
+        }
+    } else if (strcmp(mnemonic, "vpaddd") == 0 || strcmp(mnemonic, "vpsubd") == 0) {
+        /* VEX.NDS.{128,256}.66.0F.WIG FE/FA */
+        uint8_t opcode = (mnemonic[2] == 'a') ? 0xFE : 0xFA;
+        int is_ymm = 0;
+        if (dest->type == OP_REG && strncmp(dest->data.reg, "ymm", 3) == 0) is_ymm = 1;
+        if (src1->type == OP_REG && dest->type == OP_REG && src2->type == OP_REG) {
+            int s1 = get_reg_id(src1->data.reg);
+            int s2 = get_reg_id(src2->data.reg);
+            int d  = get_reg_id(dest->data.reg);
+            emit_vex(buf, d, s1, s2, is_ymm, 1); /* pp=1(66) for packed integer */
+            buffer_write_byte(buf, opcode);
+            emit_modrm(buf, 3, d, s1);
         }
     }
 }

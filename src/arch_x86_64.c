@@ -94,6 +94,7 @@ static void gen_global_decl(ASTNode *node);
 static void emit_inst0(const char *mnemonic);
 static void emit_inst1(const char *mnemonic, Operand *op1);
 static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2);
+static void emit_inst3(const char *mnemonic, Operand *op1, Operand *op2, Operand *op3);
 static Type *get_expr_type(ASTNode *node);
 static int is_float_type(Type *t);
 
@@ -869,6 +870,39 @@ static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
         if (strcmp(mnemonic, "movzbq") == 0 && op1->type == OP_MEM) {
             fprintf(out, "byte ptr ");
         }
+        print_operand(op1);
+    }
+    fprintf(out, "\n");
+}
+
+/* 3-operand AVX instruction: emit_inst3("vaddps", src1, src2, dest) */
+static void emit_inst3(const char *mnemonic, Operand *op1, Operand *op2, Operand *op3) {
+    if (!peep_in_flush && current_section == SECTION_TEXT) {
+        peep_flush_jcc();
+        peep_flush_pair();
+        peep_flush_jmp();
+        if (peep_unreachable) return;
+    }
+
+    if (obj_writer) {
+        encode_inst3(&obj_writer->text_section, mnemonic, op1, op2, op3);
+        return;
+    }
+    /* Text assembly output */
+    fprintf(out, "    %s ", mnemonic);
+    if (current_syntax == SYNTAX_ATT) {
+        /* AT&T: src1, src2, dest */
+        print_operand(op1);
+        fprintf(out, ", ");
+        print_operand(op2);
+        fprintf(out, ", ");
+        print_operand(op3);
+    } else {
+        /* Intel: dest, src2, src1 */
+        print_operand(op3);
+        fprintf(out, ", ");
+        print_operand(op2);
+        fprintf(out, ", ");
         print_operand(op1);
     }
     fprintf(out, "\n");
@@ -1956,25 +1990,56 @@ static void gen_vectorized_loop(ASTNode *node) {
     sprintf(l_scalar_loop, ".L%d", lbl_scalar_loop);
     sprintf(l_done, ".L%d", lbl_done);
 
-    /* Pick move/op mnemonics based on element type */
-    const char *vec_mov  = vi->is_float ? "movups" : "movdqu";
+    /* Determine AVX vs SSE mode from vi->width */
+    int use_avx = (vi->width == 8);  /* width=8 → AVX (256-bit), width=4 → SSE (128-bit) */
+    int vec_elems = vi->width;       /* elements per vector iteration */
+    int vec_bytes = vec_elems * vi->elem_size;  /* bytes per vector: 16 (SSE) or 32 (AVX) */
+
+    /* Register prefix: ymm for AVX, xmm for SSE */
+    const char *vreg0 = use_avx ? "ymm0" : "xmm0";
+    const char *vreg1 = use_avx ? "ymm1" : "xmm1";
+
+    /* Pick move/op mnemonics based on element type and AVX mode */
+    const char *vec_mov  = NULL;
     const char *scl_mov  = vi->is_float ? "movss"  : "mov";
     const char *vec_op   = NULL;
     const char *scl_op   = NULL;
 
-    if (vi->is_float) {
-        switch (vi->op) {
-        case TOKEN_PLUS:  vec_op = "addps"; scl_op = "addss"; break;
-        case TOKEN_MINUS: vec_op = "subps"; scl_op = "subss"; break;
-        case TOKEN_STAR:  vec_op = "mulps"; scl_op = "mulss"; break;
-        case TOKEN_SLASH: vec_op = "divps"; scl_op = "divss"; break;
-        default: return;
+    if (use_avx) {
+        /* AVX: VEX-encoded instructions, 3-operand form for arithmetic */
+        vec_mov = vi->is_float ? "vmovups" : "vmovdqu";
+        if (vi->is_float) {
+            switch (vi->op) {
+            case TOKEN_PLUS:  vec_op = "vaddps"; scl_op = "addss"; break;
+            case TOKEN_MINUS: vec_op = "vsubps"; scl_op = "subss"; break;
+            case TOKEN_STAR:  vec_op = "vmulps"; scl_op = "mulss"; break;
+            case TOKEN_SLASH: vec_op = "vdivps"; scl_op = "divss"; break;
+            default: return;
+            }
+        } else {
+            switch (vi->op) {
+            case TOKEN_PLUS:  vec_op = "vpaddd"; scl_op = "add"; break;
+            case TOKEN_MINUS: vec_op = "vpsubd"; scl_op = "sub"; break;
+            default: return;
+            }
         }
     } else {
-        switch (vi->op) {
-        case TOKEN_PLUS:  vec_op = "paddd"; scl_op = "add"; break;
-        case TOKEN_MINUS: vec_op = "psubd"; scl_op = "sub"; break;
-        default: return;
+        /* SSE: legacy encoding, 2-operand destructive form */
+        vec_mov = vi->is_float ? "movups" : "movdqu";
+        if (vi->is_float) {
+            switch (vi->op) {
+            case TOKEN_PLUS:  vec_op = "addps"; scl_op = "addss"; break;
+            case TOKEN_MINUS: vec_op = "subps"; scl_op = "subss"; break;
+            case TOKEN_STAR:  vec_op = "mulps"; scl_op = "mulss"; break;
+            case TOKEN_SLASH: vec_op = "divps"; scl_op = "divss"; break;
+            default: return;
+            }
+        } else {
+            switch (vi->op) {
+            case TOKEN_PLUS:  vec_op = "paddd"; scl_op = "add"; break;
+            case TOKEN_MINUS: vec_op = "psubd"; scl_op = "sub"; break;
+            default: return;
+            }
         }
     }
 
@@ -2014,32 +2079,44 @@ static void gen_vectorized_loop(ASTNode *node) {
     /* --- Initialize counter --- */
     emit_inst2("xor", op_reg("ecx"), op_reg("ecx"));  /* ecx = 0 */
 
-    int vec_limit = vi->iterations - 3;  /* can do vector if ecx <= limit-1 */
+    int vec_limit = vi->iterations - (vec_elems - 1);  /* last valid counter for vector */
 
-    /* --- Vector loop: process 4 elements per iteration --- */
+    /* --- Vector loop: process vec_elems elements per iteration --- */
     emit_label_def(l_vec);
     emit_inst2("cmp", op_imm(vec_limit), op_reg("ecx"));
     emit_inst1("jg", op_label(l_scalar));
 
-    /* Load 4 elements from src1 and src2 */
-    emit_inst2(vec_mov, op_mem("r14", 0), op_reg("xmm0"));
-    emit_inst2(vec_mov, op_mem("r15", 0), op_reg("xmm1"));
+    /* Load elements from src1 and src2 */
+    emit_inst2(vec_mov, op_mem("r14", 0), op_reg(vreg0));
+    emit_inst2(vec_mov, op_mem("r15", 0), op_reg(vreg1));
 
-    /* Perform packed operation: xmm0 = xmm0 OP xmm1 */
-    emit_inst2(vec_op, op_reg("xmm1"), op_reg("xmm0"));
+    /* Perform packed operation */
+    if (use_avx) {
+        /* AVX 3-operand: vreg0 = vreg1 OP vreg0 → emit_inst3(op, src1, src2, dest) */
+        emit_inst3(vec_op, op_reg(vreg0), op_reg(vreg1), op_reg(vreg0));
+    } else {
+        /* SSE 2-operand: xmm0 = xmm0 OP xmm1 */
+        emit_inst2(vec_op, op_reg(vreg1), op_reg(vreg0));
+    }
 
-    /* Store 4 elements to dst */
-    emit_inst2(vec_mov, op_reg("xmm0"), op_mem("rbx", 0));
+    /* Store elements to dst */
+    emit_inst2(vec_mov, op_reg(vreg0), op_mem("rbx", 0));
 
-    /* Advance pointers by 16 bytes (4 × 4-byte elements) */
-    emit_inst2("add", op_imm(16), op_reg("rbx"));
-    emit_inst2("add", op_imm(16), op_reg("r14"));
-    emit_inst2("add", op_imm(16), op_reg("r15"));
-    emit_inst2("add", op_imm(4), op_reg("ecx"));
+    /* Advance pointers and counter */
+    emit_inst2("add", op_imm(vec_bytes), op_reg("rbx"));
+    emit_inst2("add", op_imm(vec_bytes), op_reg("r14"));
+    emit_inst2("add", op_imm(vec_bytes), op_reg("r15"));
+    emit_inst2("add", op_imm(vec_elems), op_reg("ecx"));
     emit_inst1("jmp", op_label(l_vec));
 
-    /* --- Scalar remainder loop: process remaining 0-3 elements --- */
+    /* --- Scalar remainder loop --- */
     emit_label_def(l_scalar);
+
+    /* AVX requires vzeroupper before transitioning to SSE/scalar code */
+    if (use_avx) {
+        emit_inst0("vzeroupper");
+    }
+
     emit_inst2("cmp", op_imm(vi->iterations), op_reg("ecx"));
     emit_inst1("jge", op_label(l_done));
 

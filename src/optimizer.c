@@ -30,6 +30,7 @@
  */
 
 #include "optimizer.h"
+#include "codegen.h"
 #include "lexer.h"
 #include <stdlib.h>
 #include <string.h>
@@ -2249,7 +2250,12 @@ static int try_vectorize_loop(ASTNode *for_node) {
     /* Must start at 0 for simple pointer arithmetic */
     if (start_val != 0) return 0;
 
-    /* Need at least 4 iterations to benefit from vectorization */
+    /* Determine vector width: AVX uses 256-bit (8 elements), SSE uses 128-bit (4) */
+    int vec_width = 4;
+    int avx = g_compiler_options.avx_level;
+    /* AVX (level 1) enables 256-bit float; AVX2 (level 2) adds 256-bit int */
+
+    /* Need at least vec_width iterations to benefit from vectorization */
     if (iterations < 4) return 0;
 
     /* Body must be a single statement (possibly wrapped in a block) */
@@ -2310,9 +2316,15 @@ static int try_vectorize_loop(ASTNode *for_node) {
     if (s1_kind != elem_kind || s2_kind != elem_kind) return 0;
     if (s1_size != 4 || s2_size != 4) return 0;
 
+    /* Determine final vector width based on AVX level and element type */
+    if (is_float && avx >= 1) vec_width = 8;   /* AVX: 256-bit float */
+    if (!is_float && avx >= 2) vec_width = 8;  /* AVX2: 256-bit integer */
+    if (iterations < vec_width) vec_width = 4; /* Fall back to SSE if not enough iterations */
+    if (iterations < 4) return 0;              /* Still need at least 4 */
+
     /* All checks passed — annotate the loop for vectorization */
     VecInfo *vi = (VecInfo *)calloc(1, sizeof(VecInfo));
-    vi->width = 4;
+    vi->width = vec_width;
     vi->elem_size = 4;
     vi->is_float = is_float;
     vi->op = op;

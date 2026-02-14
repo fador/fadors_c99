@@ -14,5 +14,7 @@ int get_reg_id(const char *reg);
 void encode_inst0(Buffer *buf, const char *mnemonic);
 void encode_inst1(Buffer *buf, const char *mnemonic, Operand *op1);
 void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest);
+void encode_inst3(Buffer *buf, const char *mnemonic,
+                  Operand *src1, Operand *src2, Operand *dest);
 
 #endif

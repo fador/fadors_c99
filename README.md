@@ -29,7 +29,7 @@ A self-hosting C99-standard compliant compiler written in C99, targeting x86_64 
 
 ### Backends / Code Generation
 - **Integrated Pipeline**: Full compilation to executable without external tools on Linux. Windows PE linker also built-in.
-- **Built-in x86-64 Encoder**: Direct machine code generation — no external assembler needed. Supports all GPR registers (rax–r15), XMM0–XMM15, REX prefixes, ModR/M, SIB encoding. Packed SSE/SSE2 instructions (movups, addps, mulps, movdqu, paddd, etc.) for vectorized loops.
+- **Built-in x86-64 Encoder**: Direct machine code generation — no external assembler needed. Supports all GPR registers (rax–r15), XMM0–XMM15, YMM0–YMM15, REX prefixes, VEX prefixes (2-byte and 3-byte), ModR/M, SIB encoding. Packed SSE/SSE2 instructions (movups, addps, mulps, movdqu, paddd, etc.) for 128-bit vectorized loops. AVX/AVX2 VEX-encoded instructions (vmovups, vaddps, vmovdqu, vpaddd, etc.) for 256-bit vectorized loops with `-mavx`/`-mavx2` flags.
 - **Custom ELF Linker**: Built-in static linker for Linux that merges `.o` files and static archives (`.a`) into executables. Includes a `_start` stub (no CRT needed) and supports dynamic linking against `libc.so.6` via PLT/GOT generation. Generates DWARF 4 debug sections (`.debug_info`, `.debug_abbrev`, `.debug_line`, `.debug_str`, `.debug_aranges`) when `-g` is used.
 - **Custom PE/COFF Linker**: Links COFF `.obj` files into PE executables with DLL import table generation (`kernel32.dll`), `.rdata`, `.data`, `.bss` sections.
 - **Custom COFF Object Writer**: Direct machine code → COFF `.obj` generation on Windows (bypasses MASM).
@@ -92,6 +92,8 @@ Optimization:
   -O3                    Aggressive optimizations
   -Os                    Optimize for code size
   -Og                    Optimize for debugging experience
+  -mavx                  Enable AVX (256-bit float vectorization)
+  -mavx2                 Enable AVX2 (256-bit integer vectorization)
 
 Debug:
   -g                     Emit debug symbols (DWARF on Linux, CodeView on Windows)
@@ -366,7 +368,7 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [x] **Loop unrolling**: Full unroll for constant-count loops with N ≤ 8; partial unroll with factor 2–4 for larger loops (9–256 iterations). Remainder iterations unrolled with constant substitution.
 - [x] **Loop strength reduction**: Achieved through loop unrolling + constant folding — after unrolling, `a[i]` becomes `a[0]`, `a[1]`, ... which are constant-folded into direct indexed addressing.
 - [x] **Interprocedural optimization**: IPA constant propagation (specialize parameters always passed as the same constant across all call sites), dead argument elimination (remove unused parameters from definitions and call sites), dead function elimination (remove functions with zero callers after inlining), and return value propagation (replace calls to always-constant-returning functions with the constant).
-- [x] **Vectorization hints**: Auto-detect simple array loops (`a[i] = b[i] OP c[i]`) and emit SSE/SSE2 packed instructions — `movups`/`addps`/`subps`/`mulps`/`divps` for 4×float, `movdqu`/`paddd`/`psubd` for 4×int32 — processing 4 elements per iteration with automatic scalar remainder for non-multiple-of-4 sizes. Optimizer annotates loops via `VecInfo`; codegen emits vector prologue (save rbx/r14/r15 + compute base addresses), vector loop, scalar remainder, and epilogue.
+- [x] **Vectorization hints**: Auto-detect simple array loops (`a[i] = b[i] OP c[i]`) and emit packed instructions. SSE/SSE2 path (default): `movups`/`addps`/`subps`/`mulps`/`divps` for 4×float, `movdqu`/`paddd`/`psubd` for 4×int32 (128-bit, 4 elements per iteration). AVX/AVX2 path (`-mavx`/`-mavx2`): `vmovups`/`vaddps`/`vsubps`/`vmulps`/`vdivps` for 8×float, `vmovdqu`/`vpaddd`/`vpsubd` for 8×int32 (256-bit YMM registers, 8 elements per iteration, 3-operand VEX encoding). Automatic scalar remainder for non-aligned sizes and `vzeroupper` for AVX-to-SSE transition penalty avoidance.
 - [ ] **Instruction scheduling**: Reorder independent instructions to reduce pipeline stalls and improve ILP (instruction-level parallelism). (future — requires instruction buffer + CFG)
 - [ ] **Profile-guided optimization (PGO) support** (future): Instrument code for profiling, then use profile data to guide inlining and branch prediction hints.
 

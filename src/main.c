@@ -95,7 +95,9 @@ static void print_usage(const char *progname) {
     printf("  -O2          Standard optimizations\n");
     printf("  -O3          Aggressive optimizations\n");
     printf("  -Os          Optimize for code size\n");
-    printf("  -Og          Optimize for debugging experience\n\n");
+    printf("  -Og          Optimize for debugging experience\n");
+    printf("  -mavx        Enable AVX instructions (256-bit float vectorization)\n");
+    printf("  -mavx2       Enable AVX2 instructions (256-bit float + integer vectorization)\n\n");
     printf("Debug:\n");
     printf("  -g           Emit debug symbols (DWARF on Linux, CodeView on Windows)\n\n");
     printf("If only a .c file is given, the full pipeline runs (compile -> assemble -> link).\n");
@@ -556,6 +558,13 @@ int main(int argc, char **argv) {
         // Debug symbols flag
         if (strcmp(argv[i], "-g") == 0) {
             g_compiler_options.debug_info = 1; continue;
+        }
+        // AVX flags
+        if (strcmp(argv[i], "-mavx2") == 0) {
+            g_compiler_options.avx_level = 2; continue;
+        }
+        if (strcmp(argv[i], "-mavx") == 0) {
+            g_compiler_options.avx_level = 1; continue;
         }
         // -l<name>  library
         if (strncmp(argv[i], "-l", 2) == 0 && argv[i][2] != '\0') {
