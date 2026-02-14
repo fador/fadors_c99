@@ -345,10 +345,10 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [x] **Function inlining** (small functions): Inline single-return-expression functions at call sites when arguments have no side effects. Replaces `AST_CALL` with clone of callee's return expression, substituting parameters with actual arguments. Combined with constant folding, enables full compile-time evaluation (e.g., `add(square(3), square(4))` → `25`).
 - [x] **Inline hinting**: GCC and MSVC style inline hints control inlining behavior across optimization levels. `__forceinline` and `__attribute__((always_inline))` force inlining even at `-O0`. `inline`, `__inline`, `__inline__` enable inlining at `-O1+`. `__attribute__((noinline))` and `__declspec(noinline)` suppress inlining at all levels. Supports both pre-return-type and post-parameter-list `__attribute__` syntax.
 
-#### Phase 4b: IR / CFG Construction (future)
-- [ ] **Basic block identification**: Split function bodies into basic blocks at branch targets and after jumps/returns.
-- [ ] **Control Flow Graph (CFG)**: Build directed graph of basic blocks with predecessor/successor edges.
-- [ ] **SSA construction** (optional, for later): Convert variables to Static Single Assignment form with φ-functions for more powerful analyses.
+#### Phase 4b: IR / CFG Construction
+- [x] **Basic block identification**: Split function bodies into basic blocks at branch targets and after jumps/returns.
+- [x] **Control Flow Graph (CFG)**: Build directed graph of basic blocks with predecessor/successor edges. Three-address code IR with 40+ opcodes; expression/statement lowering for all AST node types; `--dump-ir` flag for debug output. Activated at `-O2+`.
+- [ ] **SSA construction** (optional, for later): Convert variables to Static Single Assignment form with φ-functions for more powerful analyses. IR has PHI node support and dominator tree slots ready.
 
 #### Phase 4c: Analysis Passes (future — requires CFG)
 - [ ] **Liveness analysis**: Compute live variable sets at each basic block entry/exit. Identify dead stores.

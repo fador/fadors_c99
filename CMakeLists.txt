@@ -29,6 +29,7 @@ set(SOURCES
     src/linker.c
     src/pe_linker.c
     src/optimizer.c
+    src/ir.c
 )
 
 add_executable(fadors99 ${SOURCES})

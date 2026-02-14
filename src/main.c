@@ -11,6 +11,7 @@
 #include "pe_linker.h"
 #include "types.h"
 #include "optimizer.h"
+#include "ir.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +53,7 @@ typedef enum {
 // Large state moved to heap to avoid segment/initialization issues
 static Parser *current_parser;
 static COFFWriter *current_writer;
+static int g_dump_ir = 0;  /* --dump-ir: print IR/CFG to stderr */
 
 // Helper to execute a command
 static int run_command(const char *cmd) {
@@ -99,7 +101,8 @@ static void print_usage(const char *progname) {
     printf("  -mavx        Enable AVX instructions (256-bit float vectorization)\n");
     printf("  -mavx2       Enable AVX2 instructions (256-bit float + integer vectorization)\n\n");
     printf("Debug:\n");
-    printf("  -g           Emit debug symbols (DWARF on Linux, CodeView on Windows)\n\n");
+    printf("  -g           Emit debug symbols (DWARF on Linux, CodeView on Windows)\n");
+    printf("  --dump-ir    Dump IR / CFG to stderr (requires -O2+)\n\n");
     printf("If only a .c file is given, the full pipeline runs (compile -> assemble -> link).\n");
 }
 
@@ -167,6 +170,19 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
     codegen_set_writer(current_writer);
     codegen_init(NULL);
     optimize(program, g_compiler_options.opt_level);
+
+    /* Build IR / CFG if optimization level >= O2 */
+    if (g_compiler_options.opt_level >= OPT_O2) {
+        IRProgram *ir = ir_build_program(program, g_compiler_options.opt_level);
+        if (ir) {
+            if (g_dump_ir) {
+                ir_dump_program(ir, stderr);
+            }
+            /* TODO: run IR-level analysis/optimization passes here */
+            ir_free_program(ir);
+        }
+    }
+
     codegen_generate(program);
 
     if (target == TARGET_WINDOWS)
@@ -359,6 +375,19 @@ static int do_cc(int input_count, const char **input_files,
 
     codegen_init(asm_out);
     optimize(program, g_compiler_options.opt_level);
+
+    /* Build IR / CFG if optimization level >= O2 */
+    if (g_compiler_options.opt_level >= OPT_O2) {
+        IRProgram *ir = ir_build_program(program, g_compiler_options.opt_level);
+        if (ir) {
+            if (g_dump_ir) {
+                ir_dump_program(ir, stderr);
+            }
+            /* TODO: run IR-level analysis/optimization passes here */
+            ir_free_program(ir);
+        }
+    }
+
     codegen_generate(program);
     fclose(asm_out);
     printf("Generated: %s\n", asm_filename);
@@ -558,6 +587,9 @@ int main(int argc, char **argv) {
         // Debug symbols flag
         if (strcmp(argv[i], "-g") == 0) {
             g_compiler_options.debug_info = 1; continue;
+        }
+        if (strcmp(argv[i], "--dump-ir") == 0) {
+            g_dump_ir = 1; continue;
         }
         // AVX flags
         if (strcmp(argv[i], "-mavx2") == 0) {
