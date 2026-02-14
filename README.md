@@ -318,15 +318,16 @@ This section outlines the implementation plan for compiler optimization flags (`
 
 ### Phase 3: `-O1` — Basic Optimizations
 
-**Goal**: Low-cost optimizations that improve performance without significantly increasing compile time. These operate primarily on the AST or during codegen emission.
+**Goal**: Low-cost optimizations that improve performance without significantly increasing compile time. These operate primarily on the AST or during codegen emission. Implemented as a new AST optimization pass (`optimizer.c`) run between parsing and codegen, plus codegen-level improvements in `arch_x86_64.c`.
 
-- [ ] **Constant folding**: Evaluate constant expressions at compile time (e.g., `3 + 4` → `7`, `sizeof(int) * 2` → `8`). Extend to constant propagation through known-constant variables.
-- [ ] **Dead code elimination (basic)**: Remove code after unconditional `return`, `break`, `continue`, `goto`. Remove unreachable `else` branches when condition is a compile-time constant.
+- [x] **Constant folding**: Evaluate constant expressions at compile time (e.g., `3 + 4` → `7`, `(2+3)*(4-1)` → `15`). Handles all binary operators, unary `-`, `!`, `~`, and nested expressions. Also folds comparisons (`10 > 5` → `1`) and logical operators (`&&`, `||`). Reduces code size ~36% on constant-heavy code (222→142 bytes text).
+- [x] **Dead code elimination (basic)**: Remove statements after unconditional `return`, `break`, `continue`, `goto` in blocks. Remove unreachable branches when `if`/`while`/`for` condition is a compile-time constant (`if(0){...}` → eliminated, `while(0){...}` → eliminated, `if(1){...} else{...}` → then-branch only).
 - [ ] **Redundant load/store elimination**: Track register contents; skip reload if value already in register from prior instruction.
-- [ ] **Strength reduction (simple)**: Replace `x * 2` with `x << 1`, `x * 4` with `x << 2`, `x / 2` with `x >> 1` (for unsigned), `x % 2` with `x & 1`.
+- [x] **Strength reduction (simple)**: Replace `x * 2^n` with `x << n`, `x / 2^n` with `x >> n`, `x % 2^n` with `x & (2^n-1)`. Works for any power-of-two constant on either side of multiplication.
 - [ ] **Branch optimization**: Extend existing peephole — remove redundant jumps, convert `jcc` over `jmp` to inverted `jcc`.
-- [ ] **Zero-initialization optimization**: Use `xor reg, reg` instead of `mov reg, 0` (already partially done, systematize).
-- [ ] **Boolean simplification**: `x == 0` → `test x, x` + `setz`, `x != 0` → `test x, x` + `setnz`.
+- [x] **Zero-initialization optimization**: Use `xor %eax, %eax` instead of `mov $0, %rax` for integer zero-init at `-O1` and above. Also applied to pre-call register zeroing.
+- [x] **Boolean simplification**: All condition tests (`if`, `while`, `do-while`, `for`, ternary) use `test %rax, %rax` instead of `cmp $0, %rax` (shorter encoding, 2 bytes vs 7). Applied unconditionally (always an improvement).
+- [x] **Algebraic simplification**: Identity (`x+0→x`, `x*1→x`, `x/1→x`, `x|0→x`, `x^0→x`, `x<<0→x`) and annihilator (`x*0→0`, `x&0→0`) rules. Also double-negation removal (`-(-x)→x`, `~~x→x`). Automated test suite: `test_opt.sh` (20 tests).
 
 ### Phase 4: `-O2` — Standard Optimizations
 

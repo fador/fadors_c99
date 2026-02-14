@@ -10,6 +10,7 @@
 #include "linker.h"
 #include "pe_linker.h"
 #include "types.h"
+#include "optimizer.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -163,6 +164,7 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
 
     codegen_set_writer(current_writer);
     codegen_init(NULL);
+    optimize(program, g_compiler_options.opt_level);
     codegen_generate(program);
 
     if (target == TARGET_WINDOWS)
@@ -353,6 +355,7 @@ static int do_cc(int input_count, const char **input_files,
     }
 
     codegen_init(asm_out);
+    optimize(program, g_compiler_options.opt_level);
     codegen_generate(program);
     fclose(asm_out);
     printf("Generated: %s\n", asm_filename);

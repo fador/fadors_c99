@@ -1146,7 +1146,12 @@ static void gen_expression(ASTNode *node) {
         node->resolved_type = get_expr_type(node);
     }
     if (node->type == AST_INTEGER) {
-        emit_inst2("mov", op_imm(node->data.integer.value), op_reg("rax"));
+        /* -O1: mov $0 → xor (smaller, faster; also breaks false dependencies) */
+        if (g_compiler_options.opt_level >= OPT_O1 && node->data.integer.value == 0) {
+            emit_inst2("xor", op_reg("eax"), op_reg("eax"));
+        } else {
+            emit_inst2("mov", op_imm(node->data.integer.value), op_reg("rax"));
+        }
         node->resolved_type = type_int();
     } else if (node->type == AST_FLOAT) {
         char label[32];
@@ -1367,7 +1372,7 @@ static void gen_expression(ASTNode *node) {
             /* size → rdx */
             emit_inst2("mov", op_imm(t->size), op_reg("rdx"));
             /* call memcpy */
-            emit_inst2("mov", op_imm(0), op_reg("eax"));
+            emit_inst2("xor", op_reg("eax"), op_reg("eax"));
             emit_inst0("call memcpy");
             node->resolved_type = t;
             return;
@@ -1595,7 +1600,7 @@ static void gen_expression(ASTNode *node) {
         sprintf(l_end, ".L%d", label_end);
         
         gen_expression(node->data.if_stmt.condition);
-        emit_inst2("cmp", op_imm(0), op_reg("rax"));
+        emit_inst2("test", op_reg("rax"), op_reg("rax"));
         emit_inst1("je", op_label(l_else));
         
         gen_expression(node->data.if_stmt.then_branch);
@@ -1896,7 +1901,11 @@ static void gen_statement(ASTNode *node) {
                     if (node->resolved_type->kind == TYPE_FLOAT) emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm0"));
                     else emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm0"));
                 } else {
-                    emit_inst2("mov", op_imm(0), op_reg("rax"));
+                    if (g_compiler_options.opt_level >= OPT_O1) {
+                        emit_inst2("xor", op_reg("eax"), op_reg("eax"));
+                    } else {
+                        emit_inst2("mov", op_imm(0), op_reg("rax"));
+                    }
                 }
             }
             
@@ -1927,7 +1936,7 @@ static void gen_statement(ASTNode *node) {
                     emit_inst2("mov", op_reg("rsp"), op_reg("rdi"));
                     emit_inst2("mov", op_reg("rax"), op_reg("rsi"));
                     emit_inst2("mov", op_imm(alloc_size), op_reg("rdx"));
-                    emit_inst2("mov", op_imm(0), op_reg("eax"));
+                    emit_inst2("xor", op_reg("eax"), op_reg("eax"));
                     emit_inst0("call memcpy");
                 }
             }
@@ -1940,7 +1949,7 @@ static void gen_statement(ASTNode *node) {
         sprintf(l_end, ".L%d", label_end);
         
         gen_expression(node->data.if_stmt.condition);
-        emit_inst2("cmp", op_imm(0), op_reg("rax"));
+        emit_inst2("test", op_reg("rax"), op_reg("rax"));
         emit_inst1("je", op_label(l_else));
         
         // Save stack state before then-branch
@@ -1981,7 +1990,7 @@ static void gen_statement(ASTNode *node) {
         
         emit_label_def(l_start);
         gen_expression(node->data.while_stmt.condition);
-        emit_inst2("cmp", op_imm(0), op_reg("rax"));
+        emit_inst2("test", op_reg("rax"), op_reg("rax"));
         emit_inst1("je", op_label(l_end));
         
         int saved_stack_offset = stack_offset;
@@ -2044,7 +2053,7 @@ static void gen_statement(ASTNode *node) {
 
         emit_label_def(l_cont);
         gen_expression(node->data.while_stmt.condition);
-        emit_inst2("cmp", op_imm(0), op_reg("rax"));
+        emit_inst2("test", op_reg("rax"), op_reg("rax"));
         emit_inst1("jne", op_label(l_start));
         
         emit_label_def(l_end);
@@ -2064,7 +2073,7 @@ static void gen_statement(ASTNode *node) {
         emit_label_def(l_start);
         if (node->data.for_stmt.condition) {
             gen_expression(node->data.for_stmt.condition);
-            emit_inst2("cmp", op_imm(0), op_reg("rax"));
+            emit_inst2("test", op_reg("rax"), op_reg("rax"));
             emit_inst1("je", op_label(l_end));
         }
         
