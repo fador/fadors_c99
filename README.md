@@ -49,6 +49,7 @@ A self-hosting C99-standard compliant compiler written in C99, targeting x86_64 
 - `<stdint.h>`: `int8_t` through `uint64_t`.
 - `<ctype.h>`: `isalpha`, `isdigit`, `isalnum`, `isspace`, `toupper`, `tolower`.
 - `<time.h>`: `time_t`, `time()`.
+- `<assert.h>`: `assert()` macro. When `NDEBUG` is defined, expands to no-op. Otherwise emits a runtime check (`ud2` trap on failure) and provides value range hints to the optimizer.
 
 ## Building
 
@@ -144,7 +145,7 @@ Use `-S` to stop after assembly generation.
 - `src/`: Compiler core (Lexer, Parser, AST, CodeGen, Preprocessor, Types, Encoder, Linker).
 - `include/`: Bundled C standard library headers.
 - `stage1/`: Self-compiled compiler assembly (for bootstrapping).
-- `tests/`: Comprehensive automated test suite (89+ tests).
+- `tests/`: Comprehensive automated test suite (97+ tests).
 - `CMakeLists.txt`: Build configuration.
 
 ## Testing Procedure
@@ -330,6 +331,7 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [x] **Zero-initialization optimization**: Use `xor %eax, %eax` instead of `mov $0, %rax` for integer zero-init at `-O1` and above. Also applied to pre-call register zeroing.
 - [x] **Boolean simplification**: All condition tests (`if`, `while`, `do-while`, `for`, ternary) use `test %rax, %rax` instead of `cmp $0, %rax` (shorter encoding, 2 bytes vs 7). Applied unconditionally (always an improvement).
 - [x] **Algebraic simplification**: Identity (`x+0→x`, `x*1→x`, `x/1→x`, `x|0→x`, `x^0→x`, `x<<0→x`) and annihilator (`x*0→0`, `x&0→0`) rules. Also double-negation removal (`-(-x)→x`, `~~x→x`). Automated test suite: `test_opt.sh` (30 tests).
+- [x] **Assert-based value range analysis**: Extract value ranges from `assert()` conditions to guide optimization. Supports `assert(x == CONST)` (exact value substitution enabling constant folding + strength reduction), `assert(x >= lo && x <= hi)` (range narrowing), `assert((x & (x-1)) == 0)` (power-of-2 detection), and `&&` chains for combining multiple constraints. For example, `assert(x == 8); return y * x;` is optimized to `return y << 3;`.
 
 ### Phase 4: `-O2` — Standard Optimizations
 

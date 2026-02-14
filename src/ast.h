@@ -44,7 +44,8 @@ typedef enum {
     AST_CONTINUE,
     AST_DO_WHILE,
     AST_UNKNOWN,
-    AST_FLOAT
+    AST_FLOAT,
+    AST_ASSERT
 } ASTNodeType;
 
 /* Vectorization metadata (set by optimizer O3 pass) */
@@ -161,6 +162,9 @@ typedef struct ASTNode {
         struct {
             char *name;
         } label_stmt;
+        struct {
+            struct ASTNode *condition;  /* assert condition expression */
+        } assert_stmt;
     } data;
 } ASTNode;
 

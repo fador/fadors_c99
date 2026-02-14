@@ -412,6 +412,15 @@ static ASTNode *parse_primary(Parser *parser) {
         parser_advance(parser);
         
         if (parser->current_token.type == TOKEN_LPAREN) {
+            /* Check for __builtin_assert — create AST_ASSERT instead of AST_CALL */
+            if (strcmp(name, "__builtin_assert") == 0) {
+                parser_advance(parser);
+                ASTNode *node = parser_create_node(parser, AST_ASSERT);
+                node->data.assert_stmt.condition = parse_expression(parser);
+                parser_expect(parser, TOKEN_RPAREN);
+                free(name);
+                return node;
+            }
             parser_advance(parser);
             ASTNode *node = parser_create_node(parser, AST_CALL);
             node->data.call.name = name;

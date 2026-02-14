@@ -426,6 +426,11 @@ static void opt_stmt(ASTNode *node) {
                 opt_stmt(node->data.switch_stmt.body);
             break;
 
+        case AST_ASSERT:
+            if (node->data.assert_stmt.condition)
+                node->data.assert_stmt.condition = opt_expr(node->data.assert_stmt.condition);
+            break;
+
         case AST_BLOCK:
             opt_block(node);
             break;
@@ -493,6 +498,371 @@ static void opt_function(ASTNode *func) {
     if (!func->data.function.body) return;  /* declaration only */
 
     opt_stmt(func->data.function.body);
+}
+
+/* ================================================================== */
+/* Assert-based value range analysis                                  */
+/* ================================================================== */
+
+/* Value range entry: variable name → known range / properties */
+#define MAX_RANGES 64
+typedef struct {
+    const char *name;       /* variable name */
+    long long   min_val;    /* minimum known value (LLONG_MIN = unbounded) */
+    long long   max_val;    /* maximum known value (LLONG_MAX = unbounded) */
+    int         is_pow2;    /* 1 if assert guarantees power-of-2 */
+    int         exact;      /* 1 if min_val == max_val (exact constant) */
+} RangeEntry;
+
+typedef struct {
+    RangeEntry entries[MAX_RANGES];
+    int count;
+} RangeEnv;
+
+static void range_env_init(RangeEnv *env) {
+    env->count = 0;
+}
+
+static RangeEntry *range_env_find(RangeEnv *env, const char *name) {
+    for (int i = 0; i < env->count; i++) {
+        if (strcmp(env->entries[i].name, name) == 0) return &env->entries[i];
+    }
+    return NULL;
+}
+
+static void range_env_set(RangeEnv *env, const char *name,
+                           long long lo, long long hi, int pow2) {
+    RangeEntry *e = range_env_find(env, name);
+    if (!e) {
+        if (env->count >= MAX_RANGES) return;
+        e = &env->entries[env->count++];
+        e->name = name;
+    }
+    e->min_val = lo;
+    e->max_val = hi;
+    e->is_pow2 = pow2;
+    e->exact = (lo == hi) ? 1 : 0;
+}
+
+/* Invalidate a range entry (e.g., after assignment to the variable) */
+static void range_env_invalidate(RangeEnv *env, const char *name) {
+    for (int i = 0; i < env->count; i++) {
+        if (strcmp(env->entries[i].name, name) == 0) {
+            /* Remove by shifting down */
+            for (int j = i; j < env->count - 1; j++)
+                env->entries[j] = env->entries[j + 1];
+            env->count--;
+            return;
+        }
+    }
+}
+
+/* Extract a variable name from an AST_IDENTIFIER node */
+static const char *range_get_ident(ASTNode *node) {
+    if (!node) return NULL;
+    if (node->type == AST_IDENTIFIER) return node->data.identifier.name;
+    return NULL;
+}
+
+/* Check if expr matches the pattern: (x & (x - 1)) == 0
+ * This is the canonical power-of-2 test.
+ * Returns the variable name if matched, NULL otherwise. */
+static const char *range_match_pow2(ASTNode *cond) {
+    if (!cond || cond->type != AST_BINARY_EXPR) return NULL;
+    if (cond->data.binary_expr.op != TOKEN_EQUAL_EQUAL) return NULL;
+
+    ASTNode *lhs = cond->data.binary_expr.left;
+    ASTNode *rhs = cond->data.binary_expr.right;
+
+    /* RHS must be 0 */
+    if (!is_const_int(rhs) || rhs->data.integer.value != 0) return NULL;
+
+    /* LHS must be (x & (x - 1)) */
+    if (lhs->type != AST_BINARY_EXPR) return NULL;
+    if (lhs->data.binary_expr.op != TOKEN_AMPERSAND) return NULL;
+
+    ASTNode *and_l = lhs->data.binary_expr.left;
+    ASTNode *and_r = lhs->data.binary_expr.right;
+
+    /* Pattern A: x & (x - 1) */
+    const char *name_l = range_get_ident(and_l);
+    if (name_l && and_r->type == AST_BINARY_EXPR &&
+        and_r->data.binary_expr.op == TOKEN_MINUS) {
+        const char *name_r = range_get_ident(and_r->data.binary_expr.left);
+        if (name_r && strcmp(name_l, name_r) == 0 &&
+            is_const_int(and_r->data.binary_expr.right) &&
+            and_r->data.binary_expr.right->data.integer.value == 1) {
+            return name_l;
+        }
+    }
+
+    /* Pattern B: (x - 1) & x */
+    const char *name_r = range_get_ident(and_r);
+    if (name_r && and_l->type == AST_BINARY_EXPR &&
+        and_l->data.binary_expr.op == TOKEN_MINUS) {
+        const char *name_l2 = range_get_ident(and_l->data.binary_expr.left);
+        if (name_l2 && strcmp(name_r, name_l2) == 0 &&
+            is_const_int(and_l->data.binary_expr.right) &&
+            and_l->data.binary_expr.right->data.integer.value == 1) {
+            return name_r;
+        }
+    }
+
+    return NULL;
+}
+
+/* Extract value range info from a single comparison expression.
+ * Populates env with the range information found. */
+static void range_extract_cmp(ASTNode *cond, RangeEnv *env) {
+    if (!cond || cond->type != AST_BINARY_EXPR) return;
+
+    TokenType op = cond->data.binary_expr.op;
+    ASTNode *left = cond->data.binary_expr.left;
+    ASTNode *right = cond->data.binary_expr.right;
+
+    /* var OP const */
+    const char *name = range_get_ident(left);
+    if (name && is_const_int(right)) {
+        long long val = right->data.integer.value;
+        RangeEntry *existing = range_env_find(env, name);
+        long long lo = existing ? existing->min_val : (-2147483647LL - 1);
+        long long hi = existing ? existing->max_val : 2147483647LL;
+        int pow2 = existing ? existing->is_pow2 : 0;
+
+        switch (op) {
+        case TOKEN_LESS:           /* x < val → x <= val-1 */
+            if (val - 1 < hi) hi = val - 1;
+            break;
+        case TOKEN_LESS_EQUAL:     /* x <= val */
+            if (val < hi) hi = val;
+            break;
+        case TOKEN_GREATER:        /* x > val → x >= val+1 */
+            if (val + 1 > lo) lo = val + 1;
+            break;
+        case TOKEN_GREATER_EQUAL:  /* x >= val */
+            if (val > lo) lo = val;
+            break;
+        case TOKEN_EQUAL_EQUAL:    /* x == val */
+            lo = val; hi = val;
+            break;
+        default:
+            return;
+        }
+        range_env_set(env, name, lo, hi, pow2);
+        return;
+    }
+
+    /* const OP var (reverse) */
+    name = range_get_ident(right);
+    if (name && is_const_int(left)) {
+        long long val = left->data.integer.value;
+        RangeEntry *existing = range_env_find(env, name);
+        long long lo = existing ? existing->min_val : (-2147483647LL - 1);
+        long long hi = existing ? existing->max_val : 2147483647LL;
+        int pow2 = existing ? existing->is_pow2 : 0;
+
+        switch (op) {
+        case TOKEN_LESS:           /* const < x → x > const → x >= const+1 */
+            if (val + 1 > lo) lo = val + 1;
+            break;
+        case TOKEN_LESS_EQUAL:     /* const <= x → x >= const */
+            if (val > lo) lo = val;
+            break;
+        case TOKEN_GREATER:        /* const > x → x < const → x <= const-1 */
+            if (val - 1 < hi) hi = val - 1;
+            break;
+        case TOKEN_GREATER_EQUAL:  /* const >= x → x <= const */
+            if (val < hi) hi = val;
+            break;
+        case TOKEN_EQUAL_EQUAL:    /* const == x → exact */
+            lo = val; hi = val;
+            break;
+        default:
+            return;
+        }
+        range_env_set(env, name, lo, hi, pow2);
+        return;
+    }
+}
+
+/* Analyze an assert condition and extract value ranges.
+ * Handles: simple comparisons, && chains, power-of-2 patterns, x > 0. */
+static void range_extract_assert(ASTNode *cond, RangeEnv *env) {
+    if (!cond) return;
+
+    /* Handle && chains: assert(a && b) → extract from both a and b */
+    if (cond->type == AST_BINARY_EXPR &&
+        cond->data.binary_expr.op == TOKEN_AMPERSAND_AMPERSAND) {
+        range_extract_assert(cond->data.binary_expr.left, env);
+        range_extract_assert(cond->data.binary_expr.right, env);
+        return;
+    }
+
+    /* Check for power-of-2 pattern: (x & (x-1)) == 0 */
+    const char *pow2_var = range_match_pow2(cond);
+    if (pow2_var) {
+        RangeEntry *existing = range_env_find(env, pow2_var);
+        long long lo = existing ? existing->min_val : (-2147483647LL - 1);
+        long long hi = existing ? existing->max_val : 2147483647LL;
+        range_env_set(env, pow2_var, lo, hi, 1);
+        return;
+    }
+
+    /* Simple comparison: x REL const */
+    range_extract_cmp(cond, env);
+}
+
+/* Apply range-based optimizations to an expression.
+ * - x * var where var is known power-of-2: cannot convert at AST level
+ *   (var is not a compile-time constant). Instead, we can use the range
+ *   info to inform codegen. But for assert(x == const), we can substitute.
+ * - var * const / var / const: already handled by strength_reduce for constants.
+ *
+ * Key optimization: when a variable is known to be a power-of-2 via assert,
+ * we can replace expressions like:
+ *   y * x  → y << log2(x)   [but x is variable — need runtime log2]
+ * However, if assert also gives us an exact value (range is exact, and power-of-2),
+ * we can substitute the constant directly.
+ *
+ * More practical: if assert(x >= 0 && x <= 300), and we see x / 4, the existing
+ * strength reduction handles this. The range info contributes by:
+ *   - Confirming x is non-negative, allowing unsigned optimizations for / and %
+ *   - When x is exact power-of-2 constant, we already handle it
+ *   - When variable is flagged is_pow2 by assert, and used as divisor/multiplier:
+ *     y / x → y >> __builtin_ctz(x)  — requires runtime intrinsic, skip for now.
+ *     y * x → y << __builtin_ctz(x)  — same.
+ *
+ * Practical optimization we CAN do:
+ *   1. assert(x == CONST) → substitute x with CONST in subsequent expressions
+ *      (enables constant folding + existing strength reduction)
+ *   2. assert(x >= 0) → enables signed div/mod → unsigned shift optimization
+ *      (existing strength_reduce already handles x / 2^n → x >> n, but only
+ *       when the divisor is constant — the range info gives us confidence it's safe)
+ *
+ * For is_pow2 variables specifically, we replace:
+ *   y * pow2_var → y << ctz(pow2_var)  but since pow2_var is a variable,
+ *   we need codegen support. Instead, at the AST level, if the pow2 var
+ *   also has a known exact value, we substitute.
+ */
+
+/* Substitute assert-derived exact constants into expressions */
+static ASTNode *range_subst_expr(ASTNode *node, RangeEnv *env) {
+    if (!node) return NULL;
+
+    switch (node->type) {
+    case AST_IDENTIFIER: {
+        const char *name = node->data.identifier.name;
+        RangeEntry *r = range_env_find(env, name);
+        if (r && r->exact) {
+            /* Known exact value from assert — substitute constant */
+            return make_int(r->min_val, node->line);
+        }
+        return node;
+    }
+    case AST_BINARY_EXPR:
+        node->data.binary_expr.left = range_subst_expr(node->data.binary_expr.left, env);
+        node->data.binary_expr.right = range_subst_expr(node->data.binary_expr.right, env);
+        /* After substitution, check if we can fold */
+        node = fold_binary(node);
+        if (node->type == AST_INTEGER) return node;
+        node = algebraic_simplify(node);
+        if (node->type != AST_BINARY_EXPR) return node;
+        node = strength_reduce(node);
+        return node;
+    case AST_NEG:
+    case AST_NOT:
+    case AST_BITWISE_NOT:
+        node->data.unary.expression = range_subst_expr(node->data.unary.expression, env);
+        return node;
+    case AST_CAST:
+        node->data.cast.expression = range_subst_expr(node->data.cast.expression, env);
+        return node;
+    case AST_CALL:
+        for (size_t i = 0; i < node->children_count; i++)
+            node->children[i] = range_subst_expr(node->children[i], env);
+        return node;
+    case AST_ARRAY_ACCESS:
+        node->data.array_access.array = range_subst_expr(node->data.array_access.array, env);
+        node->data.array_access.index = range_subst_expr(node->data.array_access.index, env);
+        return node;
+    default:
+        return node;
+    }
+}
+
+/* Apply range-based substitution to a statement */
+static void range_subst_stmt(ASTNode *node, RangeEnv *env) {
+    if (!node) return;
+    switch (node->type) {
+    case AST_RETURN:
+        if (node->data.return_stmt.expression)
+            node->data.return_stmt.expression = range_subst_expr(node->data.return_stmt.expression, env);
+        break;
+    case AST_VAR_DECL:
+        if (node->data.var_decl.initializer)
+            node->data.var_decl.initializer = range_subst_expr(node->data.var_decl.initializer, env);
+        break;
+    case AST_ASSIGN:
+        node->data.assign.value = range_subst_expr(node->data.assign.value, env);
+        /* Assignment to a ranged variable invalidates its range */
+        if (node->data.assign.left && node->data.assign.left->type == AST_IDENTIFIER) {
+            range_env_invalidate(env, node->data.assign.left->data.identifier.name);
+        }
+        break;
+    default:
+        break;
+    }
+}
+
+/* Walk a block-level AST, find AST_ASSERT nodes, extract value ranges,
+ * and apply range-based optimizations to subsequent statements.
+ * Should be called after O1 passes so constants are already folded. */
+static void range_analyze_block(ASTNode *block) {
+    if (!block || block->type != AST_BLOCK) return;
+
+    RangeEnv env;
+    range_env_init(&env);
+
+    for (size_t i = 0; i < block->children_count; i++) {
+        ASTNode *stmt = block->children[i];
+        if (!stmt) continue;
+
+        if (stmt->type == AST_ASSERT) {
+            /* Extract value ranges from the assert condition */
+            range_extract_assert(stmt->data.assert_stmt.condition, &env);
+            continue;
+        }
+
+        /* Apply range-based substitutions to this statement */
+        if (env.count > 0) {
+            range_subst_stmt(stmt, &env);
+        }
+
+        /* Assignment invalidates ranges for the target variable */
+        if (stmt->type == AST_ASSIGN && stmt->data.assign.left &&
+            stmt->data.assign.left->type == AST_IDENTIFIER) {
+            range_env_invalidate(&env, stmt->data.assign.left->data.identifier.name);
+        }
+        if (stmt->type == AST_VAR_DECL) {
+            range_env_invalidate(&env, stmt->data.var_decl.name);
+        }
+
+        /* Control flow: recurse into sub-blocks but reset ranges at flow boundaries */
+        if (stmt->type == AST_IF) {
+            if (stmt->data.if_stmt.then_branch)
+                range_analyze_block(stmt->data.if_stmt.then_branch);
+            if (stmt->data.if_stmt.else_branch)
+                range_analyze_block(stmt->data.if_stmt.else_branch);
+        } else if (stmt->type == AST_WHILE || stmt->type == AST_DO_WHILE) {
+            if (stmt->data.while_stmt.body)
+                range_analyze_block(stmt->data.while_stmt.body);
+        } else if (stmt->type == AST_FOR) {
+            if (stmt->data.for_stmt.body)
+                range_analyze_block(stmt->data.for_stmt.body);
+        } else if (stmt->type == AST_BLOCK) {
+            range_analyze_block(stmt);
+        }
+    }
 }
 
 /* ================================================================== */
@@ -3199,6 +3569,16 @@ ASTNode *optimize(ASTNode *program, OptLevel level) {
         /* Global variable initializers */
         if (child->type == AST_VAR_DECL && child->data.var_decl.initializer) {
             child->data.var_decl.initializer = opt_expr(child->data.var_decl.initializer);
+        }
+    }
+
+    /* -O1: Assert-based value range analysis — extract ranges from assert()
+       conditions and use them for constant substitution + strength reduction.
+       Must run after O1 folding so assert conditions are simplified. */
+    for (size_t i = 0; i < program->children_count; i++) {
+        ASTNode *child = program->children[i];
+        if (child->type == AST_FUNCTION && child->data.function.body) {
+            range_analyze_block(child->data.function.body);
         }
     }
 

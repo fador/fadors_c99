@@ -2749,6 +2749,20 @@ static void gen_statement(ASTNode *node) {
         for (size_t i = 0; i < node->children_count; i++) {
             gen_statement(node->children[i]);
         }
+    } else if (node->type == AST_ASSERT) {
+        /* Runtime assert: evaluate condition, ud2 if false */
+        if (node->data.assert_stmt.condition) {
+            gen_expression(node->data.assert_stmt.condition);
+            /* Result is in rax — test it */
+            emit_inst2("test", op_reg("rax"), op_reg("rax"));
+            int lbl_ok = label_count++;
+            char l_ok[32];
+            sprintf(l_ok, ".L%d", lbl_ok);
+            emit_inst1("jne", op_label(l_ok));
+            /* Assertion failed: emit ud2 (undefined instruction → crash) */
+            emit_inst0("ud2");
+            emit_label_def(l_ok);
+        }
     } else {
         gen_expression(node);
     }

@@ -132,6 +132,10 @@ void encode_inst0(Buffer *buf, const char *mnemonic) {
         /* VEX.128.0F.WIG 77 — zero upper 128 bits of all YMM registers */
         emit_vex2(buf, 0, 0, 0, 0);
         buffer_write_byte(buf, 0x77);
+    } else if (strcmp(mnemonic, "ud2") == 0) {
+        /* 0F 0B — undefined instruction (trap) */
+        buffer_write_byte(buf, 0x0F);
+        buffer_write_byte(buf, 0x0B);
     }
 }
 

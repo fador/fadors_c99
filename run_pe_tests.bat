@@ -98,7 +98,14 @@ set TEST_LIST=^
  69_self_ref_struct:0^
  70_minimal_switch:20^
  71_2d_array:0^
- 72_global_init_list:0
+ 72_global_init_list:0^
+ 94_assert_basic:42^
+ 96_assert_range:20
+
+:: Optimization tests (require -O1 flag)
+set OPT_TEST_LIST=^
+ 95_assert_exact_val:40^
+ 97_assert_pow2:40
 
 set PASS=0
 set FAIL=0
@@ -128,6 +135,30 @@ for %%T in (%TEST_LIST%) do (
             set /a PASS+=1
         ) else (
             echo   FAIL  !TNAME!  ^(exit=!RC!, expected=!EXPECTED!^)
+            set /a FAIL+=1
+        )
+    )
+)
+
+:: Run optimization tests (need -O1 flag)
+for %%T in (%OPT_TEST_LIST%) do (
+    set /a TOTAL+=1
+    for /f "tokens=1,2 delims=:" %%A in ("%%T") do (
+        set "TNAME=%%A"
+        set "EXPECTED=%%B"
+    )
+
+    %FADORS% tests\!TNAME!.c -O1 -o tests\!TNAME!.exe > nul 2>&1
+    if errorlevel 1 (
+        echo   FAIL  !TNAME! -O1  ^(compile/link error, expected exit=!EXPECTED!^)
+        set /a FAIL+=1
+    ) else (
+        tests\!TNAME!.exe > nul 2>&1
+        set "RC=!errorlevel!"
+        if "!RC!"=="!EXPECTED!" (
+            set /a PASS+=1
+        ) else (
+            echo   FAIL  !TNAME! -O1  ^(exit=!RC!, expected=!EXPECTED!^)
             set /a FAIL+=1
         )
     )
