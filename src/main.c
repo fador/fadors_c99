@@ -13,6 +13,12 @@
 
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <direct.h>
+#define getcwd _getcwd
+#else
+#include <unistd.h>
+#endif
 
 // Manually declare needed Windows API to avoid header conflicts with coff.h
 #ifdef _WIN32
@@ -147,6 +153,14 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
     codegen_set_target(target);
     current_writer = malloc(sizeof(COFFWriter));
     coff_writer_init(current_writer);
+
+    /* Set debug source info when -g is active */
+    if (g_compiler_options.debug_info) {
+        char cwd[512];
+        if (getcwd(cwd, sizeof(cwd)) == NULL) cwd[0] = '\0';
+        coff_writer_set_debug_source(current_writer, source_filename, cwd);
+    }
+
     codegen_set_writer(current_writer);
     codegen_init(NULL);
     codegen_generate(program);

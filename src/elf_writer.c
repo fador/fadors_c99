@@ -2,6 +2,7 @@
 #include "elf.h"
 #include "coff.h"
 #include "buffer.h"
+#include "codegen.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -50,11 +51,18 @@ void elf_writer_write(COFFWriter *w, const char *filename) {
     int num_sections = 7;
     int rela_text_idx = 0;
     int rela_data_idx = 0;
+    int fadors_debug_idx = 0;
     if (w->text_relocs_count > 0) {
         rela_text_idx = num_sections++;
     }
     if (w->data_relocs_count > 0) {
         rela_data_idx = num_sections++;
+    }
+    /* Custom debug section: carries raw line entries through to the linker */
+    int has_debug = (g_compiler_options.debug_info && w->debug_line_count > 0
+                     && w->debug_source_file);
+    if (has_debug) {
+        fadors_debug_idx = num_sections++;
     }
 
     /* ---- Build .shstrtab (section name string table) ---- */
@@ -91,6 +99,40 @@ void elf_writer_write(COFFWriter *w, const char *filename) {
     if (rela_data_idx > 0) {
         name_rela_data = (uint32_t)shstrtab.size;
         buffer_write_bytes(&shstrtab, ".rela.data", 11);
+    }
+
+    uint32_t name_fadors_debug = 0;
+    Buffer fadors_debug_sec;
+    buffer_init(&fadors_debug_sec);
+    if (has_debug) {
+        name_fadors_debug = (uint32_t)shstrtab.size;
+        buffer_write_bytes(&shstrtab, ".fadors_debug", 14);
+
+        /* Build custom debug section:
+         *   u32 source_name_len (incl. null)
+         *   char[] source_name
+         *   u32 comp_dir_len (incl. null)
+         *   char[] comp_dir
+         *   u32 entry_count
+         *   DebugLineEntry[] entries (each: u32 address, u32 line, u8 is_stmt, u8 end_seq)
+         */
+        uint32_t slen = (uint32_t)(strlen(w->debug_source_file) + 1);
+        buffer_write_dword(&fadors_debug_sec, slen);
+        buffer_write_bytes(&fadors_debug_sec, w->debug_source_file, slen);
+
+        const char *cdir = w->debug_comp_dir ? w->debug_comp_dir : ".";
+        uint32_t clen = (uint32_t)(strlen(cdir) + 1);
+        buffer_write_dword(&fadors_debug_sec, clen);
+        buffer_write_bytes(&fadors_debug_sec, cdir, clen);
+
+        uint32_t count = (uint32_t)w->debug_line_count;
+        buffer_write_dword(&fadors_debug_sec, count);
+        for (size_t di = 0; di < w->debug_line_count; di++) {
+            buffer_write_dword(&fadors_debug_sec, w->debug_lines[di].address);
+            buffer_write_dword(&fadors_debug_sec, w->debug_lines[di].line);
+            buffer_write_byte(&fadors_debug_sec, w->debug_lines[di].is_stmt);
+            buffer_write_byte(&fadors_debug_sec, w->debug_lines[di].end_seq);
+        }
     }
 
     /* ---- Build .strtab and .symtab ---- */
@@ -224,7 +266,8 @@ void elf_writer_write(COFFWriter *w, const char *filename) {
 
     /* ---- Calculate file offsets ---- */
     /* Layout: ehdr | .text | .data | .rela.text | .rela.data |
-     *         .symtab | .strtab | .shstrtab | section headers     */
+     *         .fadors_debug | .symtab | .strtab | .shstrtab |
+     *         section headers                                    */
     uint64_t offset = sizeof(Elf64_Ehdr); /* 64 */
 
     uint64_t text_offset = offset;
@@ -243,6 +286,11 @@ void elf_writer_write(COFFWriter *w, const char *filename) {
     offset = align_up(offset, 8);
     uint64_t rela_data_offset = offset;
     offset += rela_data_byte_size;
+
+    offset = align_up(offset, 8);
+    uint64_t fadors_debug_offset = offset;
+    uint64_t fadors_debug_size   = fadors_debug_sec.size;
+    offset += fadors_debug_size;
 
     offset = align_up(offset, 8);
     uint64_t symtab_offset   = offset;
@@ -306,6 +354,12 @@ void elf_writer_write(COFFWriter *w, const char *filename) {
     pad_to(f, rela_data_offset);
     if (rela_data_byte_size > 0)
         fwrite(rela_data, 1, rela_data_byte_size, f);
+
+    /* .fadors_debug */
+    if (has_debug) {
+        pad_to(f, fadors_debug_offset);
+        fwrite(fadors_debug_sec.data, 1, fadors_debug_sec.size, f);
+    }
 
     /* .symtab */
     pad_to(f, symtab_offset);
@@ -435,6 +489,19 @@ void elf_writer_write(COFFWriter *w, const char *filename) {
         fwrite(&sh, sizeof(sh), 1, f);
     }
 
+    /* .fadors_debug (optional) */
+    if (has_debug) {
+        Elf64_Shdr sh;
+        memset(&sh, 0, sizeof(sh));
+        sh.sh_name      = name_fadors_debug;
+        sh.sh_type      = ELF_SHT_PROGBITS;
+        sh.sh_flags     = 0; /* non-loadable */
+        sh.sh_offset    = fadors_debug_offset;
+        sh.sh_size      = fadors_debug_size;
+        sh.sh_addralign = 4;
+        fwrite(&sh, sizeof(sh), 1, f);
+    }
+
     fclose(f);
 
     /* Cleanup */
@@ -444,4 +511,5 @@ void elf_writer_write(COFFWriter *w, const char *filename) {
     free(rela_data);
     buffer_free(&strtab);
     buffer_free(&shstrtab);
+    buffer_free(&fadors_debug_sec);
 }

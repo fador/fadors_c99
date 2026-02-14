@@ -35,6 +35,14 @@ typedef struct {
     int64_t  addend;
 } LinkReloc;
 
+/* Debug line entries (read from .fadors_debug sections) */
+typedef struct {
+    uint32_t address;   /* offset within merged .text */
+    uint32_t line;      /* 1-based source line number */
+    uint8_t  is_stmt;
+    uint8_t  end_seq;
+} LinkDebugLine;
+
 typedef struct {
     Buffer   text;
     Buffer   data;
@@ -53,6 +61,13 @@ typedef struct {
 
     char      **libraries;
     size_t      lib_count;
+
+    /* Debug info */
+    char           *debug_source_file;
+    char           *debug_comp_dir;
+    LinkDebugLine  *debug_lines;
+    size_t          debug_line_count;
+    size_t          debug_line_cap;
 } Linker;
 
 /* Create / destroy */

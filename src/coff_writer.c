@@ -25,6 +25,12 @@ void coff_writer_init(COFFWriter *w) {
     w->data_relocs_count = 0;
     w->data_relocs_capacity = 16;
     w->data_relocs = malloc(w->data_relocs_capacity * sizeof(RelocEntry));
+
+    w->debug_source_file = NULL;
+    w->debug_comp_dir = NULL;
+    w->debug_lines = NULL;
+    w->debug_line_count = 0;
+    w->debug_line_capacity = 0;
 }
 
 void coff_writer_free(COFFWriter *w) {
@@ -40,6 +46,9 @@ void coff_writer_free(COFFWriter *w) {
     }
     free(w->text_relocs);
     free(w->data_relocs);
+    free(w->debug_source_file);
+    free(w->debug_comp_dir);
+    free(w->debug_lines);
 }
 
 int32_t coff_writer_find_symbol(COFFWriter *w, const char *name) {
@@ -98,6 +107,25 @@ void coff_writer_add_reloc(COFFWriter *w, uint32_t virtual_address, uint32_t sym
         w->data_relocs[w->data_relocs_count].type = type;
         w->data_relocs_count++;
     }
+}
+
+void coff_writer_set_debug_source(COFFWriter *w, const char *filename, const char *comp_dir) {
+    free(w->debug_source_file);
+    free(w->debug_comp_dir);
+    w->debug_source_file = strdup(filename);
+    w->debug_comp_dir = comp_dir ? strdup(comp_dir) : NULL;
+}
+
+void coff_writer_add_debug_line(COFFWriter *w, uint32_t address, uint32_t line, uint8_t is_stmt) {
+    if (w->debug_line_count >= w->debug_line_capacity) {
+        w->debug_line_capacity = w->debug_line_capacity ? w->debug_line_capacity * 2 : 256;
+        w->debug_lines = realloc(w->debug_lines, w->debug_line_capacity * sizeof(DebugLineEntry));
+    }
+    DebugLineEntry *e = &w->debug_lines[w->debug_line_count++];
+    e->address = address;
+    e->line = line;
+    e->is_stmt = is_stmt;
+    e->end_seq = 0;
 }
 
 void coff_writer_write(COFFWriter *w, const char *filename) {

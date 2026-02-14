@@ -30,7 +30,7 @@ A self-hosting C99-standard compliant compiler written in C99, targeting x86_64 
 ### Backends / Code Generation
 - **Integrated Pipeline**: Full compilation to executable without external tools on Linux. Windows PE linker also built-in.
 - **Built-in x86-64 Encoder**: Direct machine code generation — no external assembler needed. Supports all GPR registers (rax–r15), XMM0–XMM15, REX prefixes, ModR/M, SIB encoding.
-- **Custom ELF Linker**: Built-in static linker for Linux that merges `.o` files and static archives (`.a`) into executables. Includes a `_start` stub (no CRT needed) and supports dynamic linking against `libc.so.6` via PLT/GOT generation.
+- **Custom ELF Linker**: Built-in static linker for Linux that merges `.o` files and static archives (`.a`) into executables. Includes a `_start` stub (no CRT needed) and supports dynamic linking against `libc.so.6` via PLT/GOT generation. Generates DWARF 4 debug sections (`.debug_info`, `.debug_abbrev`, `.debug_line`) when `-g` is used.
 - **Custom PE/COFF Linker**: Links COFF `.obj` files into PE executables with DLL import table generation (`kernel32.dll`), `.rdata`, `.data`, `.bss` sections.
 - **Custom COFF Object Writer**: Direct machine code → COFF `.obj` generation on Windows (bypasses MASM).
 - **Custom ELF Object Writer**: Direct machine code → ELF `.o` generation on Linux (bypasses GNU `as`).
@@ -282,22 +282,24 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [x] **Compiler options struct**: Add `opt_level` (0–3) and `debug_info` (bool) fields to a global `CompilerOptions` struct in `codegen.h`.
 - [x] **Pass options to codegen**: `g_compiler_options` is globally accessible from all pipeline stages via `codegen.h`.
 
-### Phase 2: `-g` — Debug Symbol Generation (DWARF / CodeView)
+### Phase 2: `-g` — Debug Symbol Generation (DWARF / CodeView) 🔄
 
 **Goal**: Emit debug information so `gdb`/`lldb` (Linux) or Visual Studio/WinDbg (Windows) can map machine code back to source lines, variables, and types.
 
-#### Phase 2a: ELF / DWARF (Linux)
-- [ ] **Line number tracking**: Record source file + line number for each AST node during parsing; propagate to codegen.
-- [ ] **`.debug_line` section**: Emit DWARF line number program (opcodes: `DW_LNS_advance_pc`, `DW_LNS_advance_line`, `DW_LNS_copy`, etc.) mapping instruction offsets → source lines.
-- [ ] **`.debug_info` section**: Emit compilation unit DIE (`DW_TAG_compile_unit`) with producer, language, file reference.
-- [ ] **`.debug_abbrev` section**: Define abbreviation table entries for compile unit, subprogram, variable, base type DIEs.
+#### Phase 2a: ELF / DWARF (Linux) ✅
+- [x] **Line number tracking**: Record source file + line number for each AST node during parsing; propagate to codegen.
+- [x] **`.debug_line` section**: Emit DWARF 4 line number program (opcodes: `DW_LNS_advance_pc`, `DW_LNS_advance_line`, `DW_LNS_copy`, special opcodes) mapping instruction offsets → source lines.
+- [x] **`.debug_info` section**: Emit compilation unit DIE (`DW_TAG_compile_unit`) with producer, language, file reference, low_pc/high_pc, stmt_list.
+- [x] **`.debug_abbrev` section**: Define abbreviation table entries for compile unit DIE.
+- [x] **Symbol table**: `.symtab` / `.strtab` sections with function symbols for debugger resolution.
+- [x] **ELF writer integration**: Custom `.fadors_debug` section in `.o` files carries raw line entries; linker generates proper DWARF 4 sections (`.debug_abbrev`, `.debug_info`, `.debug_line`) in final executable.
+- [x] **DWARF version**: DWARF 4 (compatible with gdb 7.5+, lldb).
+- [x] **GDB verification**: `break main`, `step`, `list`, `info line` all work correctly with source-level mapping.
 - [ ] **Subprogram DIEs**: `DW_TAG_subprogram` for each function — name, low_pc/high_pc, return type.
 - [ ] **Variable DIEs**: `DW_TAG_variable` / `DW_TAG_formal_parameter` with location expressions (`DW_OP_fbreg + offset`) for locals and parameters.
 - [ ] **Type DIEs**: `DW_TAG_base_type` for int/char/float/double, `DW_TAG_pointer_type`, `DW_TAG_structure_type`, `DW_TAG_array_type`, `DW_TAG_typedef`, `DW_TAG_enumeration_type`, `DW_TAG_union_type`.
 - [ ] **`.debug_str` section**: Pooled string table for type/variable/function names.
 - [ ] **`.debug_aranges` section**: Address range lookup table.
-- [ ] **ELF writer integration**: Add `.debug_*` sections to ELF object writer and linker, including the necessary relocations.
-- [ ] **DWARF version**: Target DWARF 4 (widely supported by gdb 7.5+, lldb).
 
 #### Phase 2b: COFF / CodeView (Windows)
 - [ ] **`.debug$S` section**: Emit CodeView S_GPROC32 / S_LPROC32 (function symbols), S_LOCAL (local variables), S_REGREL32 (stack-relative locations).
@@ -308,10 +310,10 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [ ] **CodeView version**: Target CodeView 8 (compatible with Visual Studio 2015+).
 
 #### Phase 2c: Source-Level Debugging Verification
-- [ ] **Test `gdb` step-through**: Compile a test program with `-g`, verify `gdb` can `break main`, `step`, `print` variables.
+- [x] **Test `gdb` step-through**: Compile a test program with `-g`, verify `gdb` can `break main`, `step`, `list`, `info line`.
+- [ ] **Test `gdb` variable inspection**: Verify `print` and `info locals` work (requires Variable/Type DIEs from Phase 2a).
 - [ ] **Test `lldb` step-through**: Same with `lldb` on Linux.
 - [ ] **Test Visual Studio debugging**: Compile with `-g --masm`, verify variable inspection in VS debugger.
-- [ ] **Test `info locals`**: Verify local variables are visible and correct in debuggers.
 - [ ] **Test source mapping accuracy**: Line-by-line stepping matches actual source code.
 
 ### Phase 3: `-O1` — Basic Optimizations

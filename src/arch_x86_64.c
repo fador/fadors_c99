@@ -1,5 +1,6 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "arch_x86_64.h"
+#include "codegen.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +23,18 @@ static Section current_section = SECTION_TEXT;
 static Type *current_func_return_type = NULL;
 static char *current_func_name = NULL;
 static int static_label_count = 0;
+static int debug_last_line = 0;  /* last line emitted for debug tracking */
+
+/* Record a debug line entry if -g is active and the source line changed */
+static void debug_record_line(ASTNode *node) {
+    if (!obj_writer || !g_compiler_options.debug_info) return;
+    if (!node || node->line <= 0) return;
+    if ((int)node->line == debug_last_line) return;
+    debug_last_line = (int)node->line;
+    coff_writer_add_debug_line(obj_writer,
+                               (uint32_t)obj_writer->text_section.size,
+                               (uint32_t)node->line, 1);
+}
 
 // ABI register parameter arrays
 static const char *g_arg_regs[6];
@@ -1618,6 +1631,7 @@ static void collect_cases(ASTNode *node, ASTNode **cases, int *case_count, ASTNo
 
 static void gen_statement(ASTNode *node) {
     if (!node) return;
+    debug_record_line(node);
     if (node->type == AST_RETURN) {
         if (node->data.return_stmt.expression) {
             gen_expression(node->data.return_stmt.expression);
@@ -2145,6 +2159,8 @@ static void gen_function(ASTNode *node) {
         }
         return;
     }
+    debug_last_line = 0;  /* reset for each function */
+    debug_record_line(node);
     current_function_end_label = label_count++;
 
     // Reset peephole state for new function

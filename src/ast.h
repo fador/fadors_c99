@@ -52,6 +52,7 @@ typedef struct ASTNode {
     struct ASTNode **children;
     size_t children_count;
     Type *resolved_type;
+    int line;  // Source line number (for debug info / -g)
     
     // For specific nodes
     union {
