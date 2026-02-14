@@ -337,8 +337,8 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [x] **Constant propagation**: Track `var = const` assignments within a basic block. Substitute known constants into subsequent uses, enabling further constant folding. Handles chained propagation (`x = 5; y = x + 3 → y = 8; z = y * 2 → z = 16`). Correctly avoids propagating into loop conditions to prevent infinite loops.
 - [x] **Copy propagation**: Track `var = othervar` assignments. Replace uses of the copy with the original variable when the source hasn't been invalidated. Conservative invalidation on calls, pointer writes, and control flow.
 - [x] **Dead store elimination**: Detect assignments to variables that are overwritten before being read. Remove the dead store (converted to no-op). Preserves stores with side effects. Only eliminates assignment statements, not variable declarations (which are still needed for stack allocation).
-- [ ] **Tail call optimization**: Convert `return f(args)` to a jump when stack frame can be reused.
-- [ ] **Function inlining** (small functions): Inline functions with small body size (threshold: ~20 instructions or compiler heuristic).
+- [x] **Tail call optimization**: Detect `return f(args)` pattern and convert `call f; leave; ret` to `leave; jmp f` when all args fit in registers and return types are register-compatible. Eliminates stack frame overhead for tail-position calls. Works for both self-recursive and cross-function tail calls.
+- [x] **Function inlining** (small functions): Inline single-return-expression functions at call sites when arguments have no side effects. Replaces `AST_CALL` with clone of callee's return expression, substituting parameters with actual arguments. Combined with constant folding, enables full compile-time evaluation (e.g., `add(square(3), square(4))` → `25`).
 
 #### Phase 4b: IR / CFG Construction (future)
 - [ ] **Basic block identification**: Split function bodies into basic blocks at branch targets and after jumps/returns.

@@ -397,9 +397,11 @@ echo ""
 echo "--- Tail Call Optimization ---"
 
 # Test: simple tail call to another function
+# (multi-statement body so it won't be inlined)
 cat > "$TMPDIR/tco1.c" << 'EOF'
 int helper(int x) {
-    return x + 1;
+    int y = x + 1;
+    return y;
 }
 int tail_caller(int a) {
     return helper(a + 5);
@@ -460,10 +462,12 @@ int main() {
 EOF
 check_exit "tco_multi_args" "$TMPDIR/tco3.c" 33 "-O2"
 
-# Test: non-tail call (expression after call) should NOT be optimized
+# Test: non-tail call (expression after call) should NOT be TCO'd
+# (multi-statement body so it won't be inlined)
 cat > "$TMPDIR/tco4.c" << 'EOF'
 int square(int x) {
-    return x * x;
+    int y = x * x;
+    return y;
 }
 int not_tail(int a) {
     return square(a) + 1;
@@ -500,6 +504,88 @@ int main() {
 }
 EOF
 check_exit "tco_with_constprop" "$TMPDIR/tco6.c" 42 "-O2"
+
+# ---- 11. Function Inlining (-O2) ----
+echo ""
+echo "--- Function Inlining ---"
+
+# Test: basic inlining of single-return function
+cat > "$TMPDIR/inl1.c" << 'EOF'
+int square(int x) { return x * x; }
+int main() {
+    return square(5);
+}
+EOF
+check_exit "inline_basic" "$TMPDIR/inl1.c" 25 "-O2"
+
+# Verify no call to square at -O2 (inlined away)
+"$CC" -O2 -S -o "$TMPDIR/inl1.s" "$TMPDIR/inl1.c" 2>/dev/null
+if ! grep -q "call square" "$TMPDIR/inl1.s"; then
+    pass "inline_basic_asm: square inlined (no call)"
+else
+    fail "inline_basic_asm: call square still present"
+fi
+
+# Test: nested inline (add(square(3), square(4)))
+cat > "$TMPDIR/inl2.c" << 'EOF'
+int square(int x) { return x * x; }
+int add(int a, int b) { return a + b; }
+int main() {
+    return add(square(3), square(4));
+}
+EOF
+check_exit "inline_nested" "$TMPDIR/inl2.c" 25 "-O2"
+
+# Test: inlining + constant folding
+cat > "$TMPDIR/inl3.c" << 'EOF'
+int double_it(int x) { return x + x; }
+int main() {
+    return double_it(21);
+}
+EOF
+check_exit "inline_constfold" "$TMPDIR/inl3.c" 42 "-O2"
+
+# Verify constant folded to immediate
+"$CC" -O2 -S -o "$TMPDIR/inl3.s" "$TMPDIR/inl3.c" 2>/dev/null
+if grep -q 'mov \$42' "$TMPDIR/inl3.s"; then
+    pass "inline_constfold_asm: folded to mov \$42"
+else
+    fail "inline_constfold_asm: expected mov \$42"
+fi
+
+# Test: function with side-effect argument should NOT be inlined
+# (multi-use param, side-effect arg)
+cat > "$TMPDIR/inl4.c" << 'EOF'
+int double_val(int x) { return x + x; }
+int g;
+int bump() { g = g + 1; return g; }
+int main() {
+    g = 10;
+    int r = double_val(bump());
+    return r;
+}
+EOF
+check_exit "inline_sideeffect" "$TMPDIR/inl4.c" 22 "-O2"
+
+# Test: inlining should NOT happen for multi-statement functions
+cat > "$TMPDIR/inl5.c" << 'EOF'
+int compute(int x) {
+    int y = x * 2;
+    return y + 1;
+}
+int main() {
+    return compute(10);
+}
+EOF
+check_exit "inline_no_multi" "$TMPDIR/inl5.c" 21 "-O2"
+
+# Verify multi-statement function is NOT inlined
+"$CC" -O2 -S -o "$TMPDIR/inl5.s" "$TMPDIR/inl5.c" 2>/dev/null
+if grep -q "call compute" "$TMPDIR/inl5.s" || grep -q "jmp compute" "$TMPDIR/inl5.s"; then
+    pass "inline_no_multi_asm: compute not inlined"
+else
+    fail "inline_no_multi_asm: compute was unexpectedly inlined"
+fi
 
 # ---- Summary ----
 echo ""

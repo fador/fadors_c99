@@ -285,6 +285,7 @@ static int do_cc(int input_count, const char **input_files,
 
     /* Reset preprocessor for this file */
     preprocess_reset();
+    preprocess_define("FC99", "1");
     if (target == TARGET_WINDOWS) {
         preprocess_define("_WIN32", "1");
         preprocess_define("_WIN64", "1");

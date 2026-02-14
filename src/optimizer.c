@@ -11,6 +11,7 @@
  *   5. Constant propagation: x = 5; y = x + 3 → y = 8
  *   6. Copy propagation: x = a; ... use x → ... use a (when a unchanged)
  *   7. Dead store elimination: x = 5; x = 10; → x = 10 (remove first store)
+ *   8. Function inlining: inline small functions (single return expr) at call sites
  */
 
 #include "optimizer.h"
@@ -855,6 +856,327 @@ static void o2_propagate_block(ASTNode *block) {
     }
 }
 
+/* ================================================================== */
+/* -O2 pass: Function Inlining                                        */
+/*   Inline small functions (single return expr) at call sites.       */
+/* ================================================================== */
+
+#define MAX_INLINE_CANDIDATES 256
+#define MAX_INLINE_PARAMS 16
+
+typedef struct {
+    const char *name;
+    ASTNode   *return_expr;   /* the expression in "return expr;" */
+    int        param_count;
+    const char *param_names[MAX_INLINE_PARAMS];
+} InlineCandidate;
+
+static InlineCandidate g_inline_cands[MAX_INLINE_CANDIDATES];
+static int g_inline_cand_count;
+
+/* Deep-clone an AST expression tree.  Only handles expression nodes
+   (the kinds that can appear in a function's return expression). */
+static ASTNode *ast_clone_expr(ASTNode *n) {
+    if (!n) return NULL;
+    ASTNode *c = (ASTNode *)calloc(1, sizeof(ASTNode));
+    c->type = n->type;
+    c->line = n->line;
+    c->resolved_type = n->resolved_type;
+
+    switch (n->type) {
+    case AST_INTEGER:
+        c->data.integer.value = n->data.integer.value;
+        break;
+    case AST_FLOAT:
+        c->data.float_val.value = n->data.float_val.value;
+        break;
+    case AST_IDENTIFIER:
+        c->data.identifier.name = strdup(n->data.identifier.name);
+        break;
+    case AST_STRING:
+        c->data.string.value = (char *)malloc(n->data.string.length + 1);
+        memcpy(c->data.string.value, n->data.string.value, n->data.string.length + 1);
+        c->data.string.length = n->data.string.length;
+        break;
+    case AST_BINARY_EXPR:
+        c->data.binary_expr.op    = n->data.binary_expr.op;
+        c->data.binary_expr.left  = ast_clone_expr(n->data.binary_expr.left);
+        c->data.binary_expr.right = ast_clone_expr(n->data.binary_expr.right);
+        break;
+    case AST_NEG:
+    case AST_NOT:
+    case AST_BITWISE_NOT:
+    case AST_PRE_INC:
+    case AST_PRE_DEC:
+    case AST_POST_INC:
+    case AST_POST_DEC:
+    case AST_DEREF:
+    case AST_ADDR_OF:
+        c->data.unary.expression = ast_clone_expr(n->data.unary.expression);
+        break;
+    case AST_CAST:
+        c->data.cast.expression  = ast_clone_expr(n->data.cast.expression);
+        c->data.cast.target_type = n->data.cast.target_type;
+        break;
+    case AST_CALL:
+        c->data.call.name = strdup(n->data.call.name);
+        for (size_t i = 0; i < n->children_count; i++)
+            ast_add_child(c, ast_clone_expr(n->children[i]));
+        break;
+    case AST_MEMBER_ACCESS:
+        c->data.member_access.struct_expr = ast_clone_expr(n->data.member_access.struct_expr);
+        c->data.member_access.member_name = strdup(n->data.member_access.member_name);
+        c->data.member_access.is_arrow    = n->data.member_access.is_arrow;
+        break;
+    case AST_ARRAY_ACCESS:
+        c->data.array_access.array = ast_clone_expr(n->data.array_access.array);
+        c->data.array_access.index = ast_clone_expr(n->data.array_access.index);
+        break;
+    case AST_IF: /* ternary */
+        c->data.if_stmt.condition   = ast_clone_expr(n->data.if_stmt.condition);
+        c->data.if_stmt.then_branch = ast_clone_expr(n->data.if_stmt.then_branch);
+        c->data.if_stmt.else_branch = ast_clone_expr(n->data.if_stmt.else_branch);
+        break;
+    case AST_ASSIGN:
+        c->data.assign.left  = ast_clone_expr(n->data.assign.left);
+        c->data.assign.value = ast_clone_expr(n->data.assign.value);
+        break;
+    default:
+        /* unsupported expression kind — copy verbatim (no deep children) */
+        c->data = n->data;
+        break;
+    }
+    return c;
+}
+
+/* Substitute parameter identifiers with argument expressions (cloned). */
+static ASTNode *inline_substitute(ASTNode *expr, int pcnt,
+                                  const char **pnames, ASTNode **args) {
+    if (!expr) return NULL;
+
+    /* Leaf: identifier matching a parameter? */
+    if (expr->type == AST_IDENTIFIER) {
+        for (int i = 0; i < pcnt; i++) {
+            if (strcmp(expr->data.identifier.name, pnames[i]) == 0) {
+                ASTNode *rep = ast_clone_expr(args[i]);
+                rep->resolved_type = expr->resolved_type ? expr->resolved_type
+                                                         : args[i]->resolved_type;
+                return rep;
+            }
+        }
+        return expr;   /* not a parameter — leave as-is */
+    }
+
+    /* Recurse into sub-expressions */
+    switch (expr->type) {
+    case AST_BINARY_EXPR:
+        expr->data.binary_expr.left  = inline_substitute(expr->data.binary_expr.left, pcnt, pnames, args);
+        expr->data.binary_expr.right = inline_substitute(expr->data.binary_expr.right, pcnt, pnames, args);
+        break;
+    case AST_NEG: case AST_NOT: case AST_BITWISE_NOT:
+    case AST_PRE_INC: case AST_PRE_DEC:
+    case AST_POST_INC: case AST_POST_DEC:
+    case AST_DEREF: case AST_ADDR_OF:
+        expr->data.unary.expression = inline_substitute(expr->data.unary.expression, pcnt, pnames, args);
+        break;
+    case AST_CAST:
+        expr->data.cast.expression = inline_substitute(expr->data.cast.expression, pcnt, pnames, args);
+        break;
+    case AST_CALL:
+        for (size_t i = 0; i < expr->children_count; i++)
+            expr->children[i] = inline_substitute(expr->children[i], pcnt, pnames, args);
+        break;
+    case AST_MEMBER_ACCESS:
+        expr->data.member_access.struct_expr =
+            inline_substitute(expr->data.member_access.struct_expr, pcnt, pnames, args);
+        break;
+    case AST_ARRAY_ACCESS:
+        expr->data.array_access.array = inline_substitute(expr->data.array_access.array, pcnt, pnames, args);
+        expr->data.array_access.index = inline_substitute(expr->data.array_access.index, pcnt, pnames, args);
+        break;
+    case AST_IF:
+        expr->data.if_stmt.condition   = inline_substitute(expr->data.if_stmt.condition, pcnt, pnames, args);
+        expr->data.if_stmt.then_branch = inline_substitute(expr->data.if_stmt.then_branch, pcnt, pnames, args);
+        expr->data.if_stmt.else_branch = inline_substitute(expr->data.if_stmt.else_branch, pcnt, pnames, args);
+        break;
+    case AST_ASSIGN:
+        expr->data.assign.left  = inline_substitute(expr->data.assign.left, pcnt, pnames, args);
+        expr->data.assign.value = inline_substitute(expr->data.assign.value, pcnt, pnames, args);
+        break;
+    default:
+        break;
+    }
+    return expr;
+}
+
+/* Scan program for small inlineable functions (single return expr). */
+static void find_inline_candidates(ASTNode *program) {
+    g_inline_cand_count = 0;
+    for (size_t i = 0; i < program->children_count; i++) {
+        ASTNode *fn = program->children[i];
+        if (fn->type != AST_FUNCTION || !fn->data.function.body) continue;
+
+        ASTNode *body = fn->data.function.body;
+        if (body->type != AST_BLOCK || body->children_count != 1) continue;
+
+        ASTNode *stmt = body->children[0];
+        if (stmt->type != AST_RETURN || !stmt->data.return_stmt.expression) continue;
+
+        if ((int)fn->children_count > MAX_INLINE_PARAMS) continue;
+        if (g_inline_cand_count >= MAX_INLINE_CANDIDATES) break;
+
+        InlineCandidate *c = &g_inline_cands[g_inline_cand_count++];
+        c->name        = fn->data.function.name;
+        c->return_expr = stmt->data.return_stmt.expression;
+        c->param_count = (int)fn->children_count;
+        for (int j = 0; j < c->param_count; j++) {
+            c->param_names[j] = fn->children[j]->data.var_decl.name;
+        }
+    }
+}
+
+/* Look up an inline candidate by name. */
+static InlineCandidate *find_inline_cand(const char *name) {
+    for (int i = 0; i < g_inline_cand_count; i++) {
+        if (strcmp(g_inline_cands[i].name, name) == 0) return &g_inline_cands[i];
+    }
+    return NULL;
+}
+
+/* Try to inline a call expression.  Returns the inlined expression or NULL. */
+static ASTNode *try_inline_call(ASTNode *call) {
+    if (call->type != AST_CALL) return NULL;
+    InlineCandidate *cand = find_inline_cand(call->data.call.name);
+    if (!cand) return NULL;
+    if ((int)call->children_count != cand->param_count) return NULL;
+
+    /* Safety: do not inline if any argument has side effects (to avoid
+       duplication of effects when a param is used more than once). */
+    for (size_t i = 0; i < call->children_count; i++) {
+        if (has_side_effects(call->children[i])) return NULL;
+    }
+
+    /* Clone the return expression and substitute parameters. */
+    ASTNode *inlined = ast_clone_expr(cand->return_expr);
+    inlined = inline_substitute(inlined, cand->param_count,
+                                cand->param_names, call->children);
+    /* Preserve the call's resolved type */
+    if (call->resolved_type && !inlined->resolved_type)
+        inlined->resolved_type = call->resolved_type;
+
+    /* Run O1 optimizations on the inlined result (catch constant folding etc.) */
+    inlined = opt_expr(inlined);
+    return inlined;
+}
+
+/* Walk an expression tree and inline eligible calls in-place. */
+static ASTNode *inline_expr(ASTNode *expr) {
+    if (!expr) return NULL;
+
+    /* Try to inline this node first */
+    if (expr->type == AST_CALL) {
+        /* First inline within the call's arguments */
+        for (size_t i = 0; i < expr->children_count; i++)
+            expr->children[i] = inline_expr(expr->children[i]);
+        ASTNode *r = try_inline_call(expr);
+        if (r) return inline_expr(r);  /* re-check the result for nested inlines */
+        return expr;
+    }
+
+    /* Recurse into sub-expressions */
+    switch (expr->type) {
+    case AST_BINARY_EXPR:
+        expr->data.binary_expr.left  = inline_expr(expr->data.binary_expr.left);
+        expr->data.binary_expr.right = inline_expr(expr->data.binary_expr.right);
+        break;
+    case AST_NEG: case AST_NOT: case AST_BITWISE_NOT:
+    case AST_PRE_INC: case AST_PRE_DEC:
+    case AST_POST_INC: case AST_POST_DEC:
+    case AST_DEREF: case AST_ADDR_OF:
+        expr->data.unary.expression = inline_expr(expr->data.unary.expression);
+        break;
+    case AST_CAST:
+        expr->data.cast.expression = inline_expr(expr->data.cast.expression);
+        break;
+    case AST_MEMBER_ACCESS:
+        expr->data.member_access.struct_expr = inline_expr(expr->data.member_access.struct_expr);
+        break;
+    case AST_ARRAY_ACCESS:
+        expr->data.array_access.array = inline_expr(expr->data.array_access.array);
+        expr->data.array_access.index = inline_expr(expr->data.array_access.index);
+        break;
+    case AST_IF:
+        expr->data.if_stmt.condition   = inline_expr(expr->data.if_stmt.condition);
+        expr->data.if_stmt.then_branch = inline_expr(expr->data.if_stmt.then_branch);
+        expr->data.if_stmt.else_branch = inline_expr(expr->data.if_stmt.else_branch);
+        break;
+    case AST_ASSIGN:
+        expr->data.assign.left  = inline_expr(expr->data.assign.left);
+        expr->data.assign.value = inline_expr(expr->data.assign.value);
+        break;
+    default:
+        break;
+    }
+    return expr;
+}
+
+/* Walk a statement tree and inline calls in all expressions. */
+static void inline_stmt(ASTNode *stmt) {
+    if (!stmt) return;
+    switch (stmt->type) {
+    case AST_BLOCK:
+        for (size_t i = 0; i < stmt->children_count; i++)
+            inline_stmt(stmt->children[i]);
+        break;
+    case AST_RETURN:
+        if (stmt->data.return_stmt.expression)
+            stmt->data.return_stmt.expression = inline_expr(stmt->data.return_stmt.expression);
+        break;
+    case AST_VAR_DECL:
+        if (stmt->data.var_decl.initializer)
+            stmt->data.var_decl.initializer = inline_expr(stmt->data.var_decl.initializer);
+        break;
+    case AST_ASSIGN:
+        stmt->data.assign.left  = inline_expr(stmt->data.assign.left);
+        stmt->data.assign.value = inline_expr(stmt->data.assign.value);
+        break;
+    case AST_IF:
+        stmt->data.if_stmt.condition = inline_expr(stmt->data.if_stmt.condition);
+        inline_stmt(stmt->data.if_stmt.then_branch);
+        if (stmt->data.if_stmt.else_branch)
+            inline_stmt(stmt->data.if_stmt.else_branch);
+        break;
+    case AST_WHILE:
+        stmt->data.while_stmt.condition = inline_expr(stmt->data.while_stmt.condition);
+        inline_stmt(stmt->data.while_stmt.body);
+        break;
+    case AST_DO_WHILE:
+        stmt->data.while_stmt.condition = inline_expr(stmt->data.while_stmt.condition);
+        inline_stmt(stmt->data.while_stmt.body);
+        break;
+    case AST_FOR:
+        if (stmt->data.for_stmt.init) inline_stmt(stmt->data.for_stmt.init);
+        if (stmt->data.for_stmt.condition)
+            stmt->data.for_stmt.condition = inline_expr(stmt->data.for_stmt.condition);
+        if (stmt->data.for_stmt.increment)
+            stmt->data.for_stmt.increment = inline_expr(stmt->data.for_stmt.increment);
+        inline_stmt(stmt->data.for_stmt.body);
+        break;
+    case AST_SWITCH:
+        stmt->data.switch_stmt.condition = inline_expr(stmt->data.switch_stmt.condition);
+        inline_stmt(stmt->data.switch_stmt.body);
+        break;
+    default:
+        /* Expression statements (bare calls, increments, etc.) */
+        if (stmt->type == AST_CALL) {
+            for (size_t i = 0; i < stmt->children_count; i++)
+                stmt->children[i] = inline_expr(stmt->children[i]);
+            /* Don't inline statement-level calls (value is discarded) */
+        }
+        break;
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Top-level entry point                                              */
 /* ------------------------------------------------------------------ */
@@ -873,6 +1195,19 @@ ASTNode *optimize(ASTNode *program, OptLevel level) {
         /* Global variable initializers */
         if (child->type == AST_VAR_DECL && child->data.var_decl.initializer) {
             child->data.var_decl.initializer = opt_expr(child->data.var_decl.initializer);
+        }
+    }
+
+    /* -O2: Function inlining (before propagation so inlined code benefits) */
+    if (level >= OPT_O2) {
+        find_inline_candidates(program);
+        if (g_inline_cand_count > 0) {
+            for (size_t i = 0; i < program->children_count; i++) {
+                ASTNode *child = program->children[i];
+                if (child->type == AST_FUNCTION && child->data.function.body) {
+                    inline_stmt(child->data.function.body);
+                }
+            }
         }
     }
 
