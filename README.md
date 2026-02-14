@@ -350,11 +350,11 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [x] **Control Flow Graph (CFG)**: Build directed graph of basic blocks with predecessor/successor edges. Three-address code IR with 40+ opcodes; expression/statement lowering for all AST node types; `--dump-ir` flag for debug output. Activated at `-O2+`.
 - [x] **SSA construction**: Convert variables to Static Single Assignment form with φ-functions. Implements Cooper-Harvey-Kennedy iterative dominator algorithm, dominance frontier computation, φ-function insertion at iterated dominance frontiers, and DFS variable renaming on the dominator tree. Parameter SSA entry vregs, SSA validation (single-definition check), dominator/DF info in `--dump-ir` output.
 
-#### Phase 4c: Analysis Passes (future — requires CFG)
-- [ ] **Liveness analysis**: Compute live variable sets at each basic block entry/exit. Identify dead stores.
-- [ ] **Reaching definitions**: Track which assignments reach each use of a variable.
+#### Phase 4c: Analysis Passes ✅
+- [x] **Liveness analysis**: Iterative backward dataflow on SSA-form IR. Computes def/use bitsets per block, propagates `live_in[B] = use[B] ∪ (live_out[B] − def[B])` and `live_out[B] = ∪ live_in[S]` to fixed point. PHI arguments modelled as uses in predecessor blocks. Parameter entry vregs implicitly defined. Live-in/live-out vreg sets shown in `--dump-ir` output.
+- [x] **Reaching definitions**: Forward dataflow analysis tracking which `(block, vreg, instr_idx)` definitions reach each point. Per-vreg gen/kill sets with iterative convergence. Allocated on demand via `ir_compute_reaching_defs()` (caller frees).
 - [x] **Dominator tree**: Compute dominance relationships and dominance frontiers. Used for SSA φ-function placement and loop detection.
-- [ ] **Loop detection**: Identify natural loops (back edges in CFG) for loop-focused optimizations.
+- [x] **Loop detection**: Back-edge identification via dominator tree (`ir_dominates()` walk), natural loop body collection via backward DFS from back-edge source, loop depth and header annotations per block. Handles nested loops (sorted by body size so inner loops overwrite outer headers). Shown in `--dump-ir` output as `loop: depth=N hdr=bbM`.
 
 #### Phase 4d: Advanced Optimization Passes (future — requires analysis)
 - [ ] **Global constant propagation**: Propagate known-constant values across basic blocks (current implementation is within-block only).

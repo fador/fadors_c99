@@ -1703,6 +1703,13 @@ static ASTNode *parse_external_declaration(Parser *parser) {
             parser_advance(parser); // Consume '('
             while (parser->current_token.type != TOKEN_RPAREN && parser->current_token.type != TOKEN_EOF) {
                 Type *param_type = parse_type(parser);
+
+                /* (void) means no parameters – skip the child node */
+                if (param_type && param_type->kind == TYPE_VOID &&
+                    parser->current_token.type == TOKEN_RPAREN) {
+                    break;
+                }
+
                 if (!param_type) {
                     if (parser->current_token.type == TOKEN_ELLIPSIS) {
                         parser_advance(parser);

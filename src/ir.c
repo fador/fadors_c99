@@ -1116,15 +1116,21 @@ static IRFunction *ir_build_function(ASTNode *func_node) {
                                         func_node->line);
     func->return_type = func_node->resolved_type;
 
-    /* Set up parameters */
-    func->param_count = (int)func_node->children_count;
-    if (func->param_count > 0) {
-        func->param_names = (char **)ir_alloc(func->param_count * sizeof(char *));
-        func->param_types = (Type **)ir_alloc(func->param_count * sizeof(Type *));
-        for (int i = 0; i < func->param_count; i++) {
+    /* Set up parameters (skip void-only params from (void) prototypes) */
+    int raw_param_count = (int)func_node->children_count;
+    func->param_count = 0;
+    if (raw_param_count > 0) {
+        func->param_names = (char **)ir_alloc(raw_param_count * sizeof(char *));
+        func->param_types = (Type **)ir_alloc(raw_param_count * sizeof(Type *));
+        for (int i = 0; i < raw_param_count; i++) {
             ASTNode *param = func_node->children[i];
-            func->param_names[i] = ir_strdup(param->data.var_decl.name);
-            func->param_types[i] = param->resolved_type;
+            /* Skip void-only params (no name) or params with void type */
+            if (!param->data.var_decl.name) continue;
+            if (param->resolved_type && param->resolved_type->kind == TYPE_VOID)
+                continue;
+            int idx = func->param_count++;
+            func->param_names[idx] = ir_strdup(param->data.var_decl.name);
+            func->param_types[idx] = param->resolved_type;
 
             /* Create vreg for each parameter */
             int vreg = ir_var_lookup(func, param->data.var_decl.name,
@@ -1872,6 +1878,602 @@ int ir_ssa_validate(IRFunction *func) {
 }
 
 /* ================================================================== */
+/* Analysis Passes                                                    */
+/*                                                                    */
+/* 1. Liveness analysis (backward dataflow)                           */
+/* 2. Reaching definitions (forward dataflow)                         */
+/* 3. Loop detection (back edges + natural loop bodies)               */
+/* ================================================================== */
+
+/* ------------------------------------------------------------------ */
+/* Bitset helpers                                                     */
+/* ------------------------------------------------------------------ */
+
+static int bitset_words(int nbits) {
+    return (nbits + 31) / 32;
+}
+
+static int *bitset_alloc(int words) {
+    return (int *)calloc(words, sizeof(int));
+}
+
+static void bitset_set(int *bs, int bit) {
+    bs[bit >> 5] |= (1 << (bit & 31));
+}
+
+static int bitset_test(int *bs, int bit) {
+    return (bs[bit >> 5] >> (bit & 31)) & 1;
+}
+
+/* dst = dst ∪ src. Returns 1 if dst changed. */
+static int bitset_union(int *dst, const int *src, int words) {
+    int changed = 0;
+    for (int i = 0; i < words; i++) {
+        int old = dst[i];
+        dst[i] |= src[i];
+        if (dst[i] != old) changed = 1;
+    }
+    return changed;
+}
+
+/* dst = src1 - src2 (set difference: src1 & ~src2) */
+static void bitset_diff(int *dst, const int *src1, const int *src2, int words) {
+    for (int i = 0; i < words; i++) {
+        dst[i] = src1[i] & ~src2[i];
+    }
+}
+
+/* Count number of set bits. */
+static int bitset_popcount(const int *bs, int words) {
+    int count = 0;
+    for (int i = 0; i < words; i++) {
+        unsigned int v = (unsigned int)bs[i];
+        /* Brian Kernighan's algorithm */
+        while (v) { v &= v - 1; count++; }
+    }
+    return count;
+}
+
+/* ------------------------------------------------------------------ */
+/* Collect vreg uses from an operand                                 */
+/* ------------------------------------------------------------------ */
+
+static void collect_vreg_use(IROperand *op, int *use_set, int *def_set,
+                             int words) {
+    if (op->kind == IR_OPERAND_VREG) {
+        int v = op->val.vreg;
+        if (v >= 0 && v < words * 32 && !bitset_test(def_set, v)) {
+            bitset_set(use_set, v);
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* 1. Liveness Analysis                                               */
+/* ------------------------------------------------------------------ */
+
+void ir_compute_def_use(IRFunction *func) {
+    int n = func->block_count;
+    int nv = func->next_vreg;
+    int words = bitset_words(nv);
+
+    for (int b = 0; b < n; b++) {
+        IRBlock *block = func->blocks[b];
+
+        /* Allocate or clear bitsets */
+        free(block->def);
+        free(block->use);
+        block->def = bitset_alloc(words);
+        block->use = bitset_alloc(words);
+
+        /* Scan instructions forward: use = used-before-defined */
+        for (IRInstr *instr = block->first; instr; instr = instr->next) {
+            /* PHI nodes: arguments are uses from predecessor blocks,
+               not from this block. Skip src1/src2 for PHI. */
+            if (instr->opcode == IR_PHI) {
+                /* PHI args are considered uses in the corresponding
+                   predecessor blocks, not in this block.
+                   Only the destination is a def here. */
+            } else {
+                /* Collect uses in src1, src2 */
+                collect_vreg_use(&instr->src1, block->use, block->def, words);
+                collect_vreg_use(&instr->src2, block->use, block->def, words);
+
+                /* For BRANCH: src1 is a use */
+                /* For CALL: src2 is arg count (imm), already handled */
+
+                /* PHI args in successor blocks reference vregs —
+                   handled when we process successor blocks' phis below */
+            }
+
+            /* Collect def in dst */
+            if (instr->dst.kind == IR_OPERAND_VREG) {
+                int v = instr->dst.val.vreg;
+                if (v >= 0 && v < nv) {
+                    bitset_set(block->def, v);
+                }
+            }
+        }
+    }
+
+    /* For PHI nodes in successor blocks: the phi argument corresponding to
+       predecessor block B is a use in block B. */
+    for (int b = 0; b < n; b++) {
+        IRBlock *block = func->blocks[b];
+        for (int s = 0; s < block->succ_count; s++) {
+            IRBlock *succ = func->blocks[block->succs[s]];
+
+            /* Find our predecessor index in the successor */
+            int pred_idx = -1;
+            for (int p = 0; p < succ->pred_count; p++) {
+                if (succ->preds[p] == b) { pred_idx = p; break; }
+            }
+            if (pred_idx < 0) continue;
+
+            /* Add phi argument vregs as uses in this block */
+            for (IRInstr *phi = succ->first;
+                 phi && phi->opcode == IR_PHI;
+                 phi = phi->next) {
+                if (pred_idx < phi->phi_count) {
+                    collect_vreg_use(&phi->phi_args[pred_idx],
+                                     block->use, block->def, words);
+                }
+            }
+        }
+    }
+}
+
+void ir_compute_liveness(IRFunction *func) {
+    int n = func->block_count;
+    int nv = func->next_vreg;
+    int words = bitset_words(nv);
+    if (nv == 0 || n == 0) return;
+
+    /* Ensure def/use sets exist */
+    if (!func->blocks[0]->def) {
+        ir_compute_def_use(func);
+    }
+
+    /* Allocate live_in / live_out bitsets */
+    for (int b = 0; b < n; b++) {
+        IRBlock *block = func->blocks[b];
+        free(block->live_in);
+        free(block->live_out);
+        block->live_in = bitset_alloc(words);
+        block->live_out = bitset_alloc(words);
+    }
+
+    /* Iterative backward dataflow to fixed point */
+    int *temp = bitset_alloc(words);
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+
+        /* Process blocks in reverse order (approximate reverse postorder) */
+        for (int b = n - 1; b >= 0; b--) {
+            IRBlock *block = func->blocks[b];
+
+            /* live_out[B] = ∪ live_in[S] for all successors S */
+            for (int s = 0; s < block->succ_count; s++) {
+                IRBlock *succ = func->blocks[block->succs[s]];
+                if (bitset_union(block->live_out, succ->live_in, words))
+                    changed = 1;
+            }
+
+            /* live_in[B] = use[B] ∪ (live_out[B] - def[B]) */
+            bitset_diff(temp, block->live_out, block->def, words);
+            bitset_union(temp, block->use, words);
+
+            /* Check if live_in changed */
+            for (int w = 0; w < words; w++) {
+                if (temp[w] != block->live_in[w]) {
+                    changed = 1;
+                    break;
+                }
+            }
+            /* Copy temp → live_in */
+            for (int w = 0; w < words; w++) {
+                block->live_in[w] = temp[w];
+            }
+
+            /* Reset temp */
+            memset(temp, 0, words * sizeof(int));
+        }
+    }
+    free(temp);
+
+    /* Mark parameter entry vregs as implicitly live at entry. */
+    if (func->ssa_param_vregs) {
+        IRBlock *entry = func->blocks[func->entry_block];
+        for (int v = 0; v < func->var_count; v++) {
+            int pv = func->ssa_param_vregs[v];
+            if (pv >= 0 && pv < nv) {
+                bitset_set(entry->def, pv);
+            }
+        }
+    }
+}
+
+void ir_compute_liveness_program(IRProgram *prog) {
+    if (!prog) return;
+    for (int i = 0; i < prog->func_count; i++) {
+        ir_compute_liveness(prog->functions[i]);
+    }
+}
+
+int ir_is_live_in(IRBlock *block, int vreg, int bsw) {
+    if (!block->live_in || vreg < 0 || vreg >= bsw * 32) return 0;
+    return bitset_test(block->live_in, vreg);
+}
+
+int ir_is_live_out(IRBlock *block, int vreg, int bsw) {
+    if (!block->live_out || vreg < 0 || vreg >= bsw * 32) return 0;
+    return bitset_test(block->live_out, vreg);
+}
+
+/* ------------------------------------------------------------------ */
+/* 2. Reaching Definitions                                            */
+/* ------------------------------------------------------------------ */
+
+IRReachDefs *ir_compute_reaching_defs(IRFunction *func) {
+    int n = func->block_count;
+    if (n == 0) return NULL;
+
+    IRReachDefs *rd = (IRReachDefs *)ir_alloc(sizeof(IRReachDefs));
+    rd->block_count = n;
+
+    /* Phase 1: Collect all definition points */
+    rd->def_count = 0;
+    rd->def_capacity = 64;
+    rd->defs = (IRDefPoint *)ir_alloc(rd->def_capacity * sizeof(IRDefPoint));
+
+    /* Also build a mapping: vreg → list of def IDs (for kill set computation) */
+    int max_vreg = func->next_vreg;
+    int *vreg_first_def = (int *)malloc(max_vreg * sizeof(int));
+    for (int i = 0; i < max_vreg; i++) vreg_first_def[i] = -1;
+
+    /* Linked list of defs per vreg (implicit via next_def_of_vreg array) */
+    int *next_def_of_vreg = NULL;  /* allocated after collecting all defs */
+
+    for (int b = 0; b < n; b++) {
+        int idx = 0;
+        for (IRInstr *instr = func->blocks[b]->first; instr;
+             instr = instr->next, idx++) {
+            if (instr->dst.kind == IR_OPERAND_VREG) {
+                if (rd->def_count >= rd->def_capacity) {
+                    rd->def_capacity *= 2;
+                    rd->defs = (IRDefPoint *)realloc(
+                        rd->defs, rd->def_capacity * sizeof(IRDefPoint));
+                }
+                int def_id = rd->def_count;
+                rd->defs[def_id].block_id = b;
+                rd->defs[def_id].vreg = instr->dst.val.vreg;
+                rd->defs[def_id].instr_idx = idx;
+                rd->def_count++;
+            }
+        }
+    }
+
+    /* Build per-vreg def lists */
+    next_def_of_vreg = (int *)malloc(rd->def_count * sizeof(int));
+    for (int i = 0; i < rd->def_count; i++) next_def_of_vreg[i] = -1;
+    for (int i = 0; i < max_vreg; i++) vreg_first_def[i] = -1;
+    for (int d = rd->def_count - 1; d >= 0; d--) {
+        int v = rd->defs[d].vreg;
+        if (v >= 0 && v < max_vreg) {
+            next_def_of_vreg[d] = vreg_first_def[v];
+            vreg_first_def[v] = d;
+        }
+    }
+
+    /* Phase 2: Compute gen/kill bitsets per block */
+    int words = bitset_words(rd->def_count);
+    rd->bitset_words = words;
+
+    rd->gen = (int **)ir_alloc(n * sizeof(int *));
+    rd->kill = (int **)ir_alloc(n * sizeof(int *));
+    rd->reach_in = (int **)ir_alloc(n * sizeof(int *));
+    rd->reach_out = (int **)ir_alloc(n * sizeof(int *));
+
+    for (int b = 0; b < n; b++) {
+        rd->gen[b] = bitset_alloc(words);
+        rd->kill[b] = bitset_alloc(words);
+        rd->reach_in[b] = bitset_alloc(words);
+        rd->reach_out[b] = bitset_alloc(words);
+    }
+
+    /* For each def in block b:
+       gen[b] += {d}  (last def of vreg in block wins)
+       kill[b] += all other defs of the same vreg */
+    for (int d = 0; d < rd->def_count; d++) {
+        int b = rd->defs[d].block_id;
+        int v = rd->defs[d].vreg;
+
+        /* Add all defs of vreg v to kill[b] */
+        for (int od = vreg_first_def[v]; od >= 0; od = next_def_of_vreg[od]) {
+            if (od != d) {
+                bitset_set(rd->kill[b], od);
+            }
+        }
+    }
+
+    /* gen: only the LAST def of each vreg in the block */
+    for (int b = 0; b < n; b++) {
+        /* Find last def of each vreg in this block */
+        int *last_def = (int *)malloc(max_vreg * sizeof(int));
+        for (int i = 0; i < max_vreg; i++) last_def[i] = -1;
+
+        for (int d = 0; d < rd->def_count; d++) {
+            if (rd->defs[d].block_id == b) {
+                last_def[rd->defs[d].vreg] = d;
+            }
+        }
+
+        for (int v = 0; v < max_vreg; v++) {
+            if (last_def[v] >= 0) {
+                bitset_set(rd->gen[b], last_def[v]);
+            }
+        }
+        free(last_def);
+    }
+
+    /* Phase 3: Iterative forward dataflow to fixed point
+       reach_out[B] = gen[B] ∪ (reach_in[B] - kill[B])
+       reach_in[B]  = ∪ reach_out[P] for all predecessors P */
+    int *temp = bitset_alloc(words);
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+        for (int b = 0; b < n; b++) {
+            IRBlock *block = func->blocks[b];
+
+            /* reach_in[B] = ∪ reach_out[P] */
+            int in_changed = 0;
+            for (int p = 0; p < block->pred_count; p++) {
+                if (bitset_union(rd->reach_in[b],
+                                 rd->reach_out[block->preds[p]], words))
+                    in_changed = 1;
+            }
+
+            /* reach_out[B] = gen[B] ∪ (reach_in[B] - kill[B]) */
+            bitset_diff(temp, rd->reach_in[b], rd->kill[b], words);
+            bitset_union(temp, rd->gen[b], words);
+
+            /* Check if reach_out changed */
+            for (int w = 0; w < words; w++) {
+                if (temp[w] != rd->reach_out[b][w]) {
+                    changed = 1;
+                    break;
+                }
+            }
+
+            for (int w = 0; w < words; w++) {
+                rd->reach_out[b][w] = temp[w];
+            }
+            memset(temp, 0, words * sizeof(int));
+
+            if (in_changed) changed = 1;
+        }
+    }
+    free(temp);
+    free(vreg_first_def);
+    free(next_def_of_vreg);
+
+    return rd;
+}
+
+void ir_free_reach_defs(IRReachDefs *rd) {
+    if (!rd) return;
+    free(rd->defs);
+    for (int b = 0; b < rd->block_count; b++) {
+        free(rd->gen[b]);
+        free(rd->kill[b]);
+        free(rd->reach_in[b]);
+        free(rd->reach_out[b]);
+    }
+    free(rd->gen);
+    free(rd->kill);
+    free(rd->reach_in);
+    free(rd->reach_out);
+    free(rd);
+}
+
+/* ------------------------------------------------------------------ */
+/* 3. Loop Detection                                                  */
+/* ------------------------------------------------------------------ */
+
+/* Check if block a dominates block b (walk the dominator tree from b). */
+static int ir_dominates(IRFunction *func, int a, int b) {
+    if (a == b) return 1;
+    int cur = b;
+    while (cur >= 0) {
+        if (cur == a) return 1;
+        int idom = func->blocks[cur]->idom;
+        if (idom < 0 || idom == cur) break;
+        cur = idom;
+    }
+    return 0;
+}
+
+/* Collect natural loop body: all blocks that can reach back_edge_src
+ * without going through header, plus header itself. */
+static void collect_loop_body(IRFunction *func, int header, int back_edge_src,
+                              int **body, int *body_count, int *body_cap) {
+    int n = func->block_count;
+    int *in_loop = (int *)calloc(n, sizeof(int));
+    int *stack = (int *)malloc(n * sizeof(int));
+    int sp = 0;
+
+    in_loop[header] = 1;
+    (*body)[(*body_count)++] = header;
+
+    if (back_edge_src != header) {
+        in_loop[back_edge_src] = 1;
+        if (*body_count >= *body_cap) {
+            *body_cap *= 2;
+            *body = (int *)realloc(*body, *body_cap * sizeof(int));
+        }
+        (*body)[(*body_count)++] = back_edge_src;
+        stack[sp++] = back_edge_src;
+    }
+
+    /* DFS backwards from back_edge_src through predecessors */
+    while (sp > 0) {
+        int cur = stack[--sp];
+        IRBlock *block = func->blocks[cur];
+        for (int p = 0; p < block->pred_count; p++) {
+            int pred = block->preds[p];
+            if (!in_loop[pred]) {
+                in_loop[pred] = 1;
+                if (*body_count >= *body_cap) {
+                    *body_cap *= 2;
+                    *body = (int *)realloc(*body, *body_cap * sizeof(int));
+                }
+                (*body)[(*body_count)++] = pred;
+                stack[sp++] = pred;
+            }
+        }
+    }
+
+    free(in_loop);
+    free(stack);
+}
+
+IRLoopInfo *ir_detect_loops(IRFunction *func) {
+    int n = func->block_count;
+    if (n == 0) return NULL;
+
+    /* Ensure dominator tree is computed */
+    if (func->blocks[0]->idom == -1 && func->entry_block == 0 && n > 1) {
+        ir_compute_dominators(func);
+    }
+
+    IRLoopInfo *li = (IRLoopInfo *)ir_alloc(sizeof(IRLoopInfo));
+    li->loop_count = 0;
+    li->loop_capacity = 8;
+    li->loops = (IRLoop *)ir_alloc(li->loop_capacity * sizeof(IRLoop));
+
+    /* Reset loop info on blocks */
+    for (int b = 0; b < n; b++) {
+        func->blocks[b]->loop_depth = 0;
+        func->blocks[b]->loop_header = -1;
+    }
+
+    /* Find back edges: edge B → H where H dominates B */
+    for (int b = 0; b < n; b++) {
+        IRBlock *block = func->blocks[b];
+        for (int s = 0; s < block->succ_count; s++) {
+            int h = block->succs[s];
+            if (ir_dominates(func, h, b)) {
+                /* Back edge found: b → h */
+                if (li->loop_count >= li->loop_capacity) {
+                    li->loop_capacity *= 2;
+                    li->loops = (IRLoop *)realloc(
+                        li->loops, li->loop_capacity * sizeof(IRLoop));
+                }
+
+                IRLoop *loop = &li->loops[li->loop_count];
+                loop->header = h;
+                loop->back_edge_src = b;
+                loop->depth = 0;  /* computed below */
+                loop->body_count = 0;
+                int body_cap = 8;
+                loop->body = (int *)malloc(body_cap * sizeof(int));
+
+                collect_loop_body(func, h, b,
+                                  &loop->body, &loop->body_count, &body_cap);
+                li->loop_count++;
+            }
+        }
+    }
+
+    /* Compute loop depths: a block's depth = number of loops it's in.
+       Also set loop_header to the innermost loop's header. */
+    for (int l = 0; l < li->loop_count; l++) {
+        IRLoop *loop = &li->loops[l];
+        for (int i = 0; i < loop->body_count; i++) {
+            int b = loop->body[i];
+            func->blocks[b]->loop_depth++;
+        }
+    }
+
+    /* Set loop_header to the header of the innermost loop.
+       The innermost loop is the one with the smallest body. */
+    /* First, sort loops by body size descending so smaller (inner) loops
+       overwrite larger (outer) loops' header assignment. */
+    for (int i = 0; i < li->loop_count; i++) {
+        for (int j = i + 1; j < li->loop_count; j++) {
+            if (li->loops[j].body_count > li->loops[i].body_count) {
+                IRLoop tmp = li->loops[i];
+                li->loops[i] = li->loops[j];
+                li->loops[j] = tmp;
+            }
+        }
+    }
+
+    for (int l = 0; l < li->loop_count; l++) {
+        IRLoop *loop = &li->loops[l];
+        for (int i = 0; i < loop->body_count; i++) {
+            int b = loop->body[i];
+            func->blocks[b]->loop_header = loop->header;
+        }
+    }
+
+    /* Assign depth to each loop: depth = loop_depth of header block
+       before this loop was counted (= nesting level).
+       Simpler: depth = number of outer loops containing this header + 1. */
+    for (int l = 0; l < li->loop_count; l++) {
+        IRLoop *loop = &li->loops[l];
+        int depth = 0;
+        for (int l2 = 0; l2 < li->loop_count; l2++) {
+            if (l2 == l) continue;
+            IRLoop *outer = &li->loops[l2];
+            /* Check if outer contains our header */
+            for (int i = 0; i < outer->body_count; i++) {
+                if (outer->body[i] == loop->header) {
+                    depth++;
+                    break;
+                }
+            }
+        }
+        loop->depth = depth + 1;
+    }
+
+    return li;
+}
+
+void ir_free_loop_info(IRLoopInfo *li) {
+    if (!li) return;
+    for (int i = 0; i < li->loop_count; i++) {
+        free(li->loops[i].body);
+    }
+    free(li->loops);
+    free(li);
+}
+
+/* ------------------------------------------------------------------ */
+/* Combined analysis driver                                           */
+/* ------------------------------------------------------------------ */
+
+void ir_analyze_function(IRFunction *func) {
+    if (!func || func->block_count == 0) return;
+
+    /* Liveness analysis (depends on def/use) */
+    ir_compute_liveness(func);
+
+    /* Loop detection (depends on dominator tree, already computed in SSA) */
+    IRLoopInfo *li = ir_detect_loops(func);
+    ir_free_loop_info(li);  /* results stored on blocks */
+}
+
+void ir_analyze_program(IRProgram *prog) {
+    if (!prog) return;
+    for (int i = 0; i < prog->func_count; i++) {
+        ir_analyze_function(prog->functions[i]);
+    }
+}
+
+/* ================================================================== */
 /* Debug Output                                                       */
 /* ================================================================== */
 
@@ -1967,7 +2569,47 @@ void ir_dump_block(IRBlock *block, FILE *out) {
         for (int i = 0; i < block->dom_frontier_count; i++)
             fprintf(out, " bb%d", block->dom_frontier[i]);
     }
+    /* Loop info */
+    if (block->loop_depth > 0) {
+        fprintf(out, "  ; loop: depth=%d hdr=bb%d",
+                block->loop_depth, block->loop_header);
+    }
     fprintf(out, "\n");
+
+    /* Print liveness summary if computed */
+    if (block->live_in) {
+        int words = 0;
+        /* Find max vreg in live sets to determine bitset width */
+        /* Just print non-empty liveness lines */
+        int max_word = 0;
+        for (int w = 0; w < 64; w++) {  /* reasonable upper bound */
+            if (block->live_in[w] || (block->live_out && block->live_out[w]))
+                max_word = w + 1;
+            else if (w > 0 && !block->live_in[w] &&
+                     (!block->live_out || !block->live_out[w]))
+                break;
+        }
+        words = max_word;
+        if (words > 0) {
+            int live_in_count = bitset_popcount(block->live_in, words);
+            int live_out_count = block->live_out
+                ? bitset_popcount(block->live_out, words) : 0;
+            if (live_in_count > 0 || live_out_count > 0) {
+                fprintf(out, "    ; live_in(%d):", live_in_count);
+                for (int v = 0; v < words * 32; v++) {
+                    if (bitset_test(block->live_in, v))
+                        fprintf(out, " t%d", v);
+                }
+                fprintf(out, "\n");
+                fprintf(out, "    ; live_out(%d):", live_out_count);
+                for (int v = 0; v < words * 32; v++) {
+                    if (block->live_out && bitset_test(block->live_out, v))
+                        fprintf(out, " t%d", v);
+                }
+                fprintf(out, "\n");
+            }
+        }
+    }
 
     /* Print instructions */
     for (IRInstr *instr = block->first; instr; instr = instr->next) {

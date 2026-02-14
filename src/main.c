@@ -177,10 +177,11 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
         if (ir) {
             /* Construct SSA form: dominators, phi insertion, rename */
             ir_ssa_construct_program(ir);
+            /* Run analysis passes: liveness, loop detection */
+            ir_analyze_program(ir);
             if (g_dump_ir) {
                 ir_dump_program(ir, stderr);
             }
-            /* TODO: run IR-level analysis/optimization passes here */
             ir_free_program(ir);
         }
     }
@@ -384,10 +385,11 @@ static int do_cc(int input_count, const char **input_files,
         if (ir) {
             /* Construct SSA form: dominators, phi insertion, rename */
             ir_ssa_construct_program(ir);
+            /* Run analysis passes: liveness, loop detection */
+            ir_analyze_program(ir);
             if (g_dump_ir) {
                 ir_dump_program(ir, stderr);
             }
-            /* TODO: run IR-level analysis/optimization passes here */
             ir_free_program(ir);
         }
     }

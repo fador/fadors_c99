@@ -353,6 +353,99 @@ void ir_ssa_construct_program(IRProgram *prog);
 int ir_ssa_validate(IRFunction *func);
 
 /* ================================================================== */
+/* API: Analysis Passes                                               */
+/* ================================================================== */
+
+/* --- Liveness Analysis --- */
+
+/* Compute def/use bitsets for all basic blocks.
+ * Each bitset has ceil(next_vreg / 32) ints.
+ * def[B] = vregs defined in B.
+ * use[B] = vregs used in B before any def. */
+void ir_compute_def_use(IRFunction *func);
+
+/* Compute live_in / live_out bitsets via iterative backward dataflow.
+ * Requires def/use sets (calls ir_compute_def_use if not done).
+ * live_in[B]  = use[B] ∪ (live_out[B] - def[B])
+ * live_out[B] = ∪ live_in[S] for all successors S */
+void ir_compute_liveness(IRFunction *func);
+
+/* Compute liveness for all functions in the program. */
+void ir_compute_liveness_program(IRProgram *prog);
+
+/* Check if vreg v is live at the entry of block b. */
+int ir_is_live_in(IRBlock *block, int vreg, int bitset_words);
+
+/* Check if vreg v is live at the exit of block b. */
+int ir_is_live_out(IRBlock *block, int vreg, int bitset_words);
+
+/* --- Reaching Definitions --- */
+
+/* A single definition point: (block_id, vreg defined). */
+typedef struct {
+    int block_id;
+    int vreg;
+    int instr_idx;     /* instruction index within the block */
+} IRDefPoint;
+
+/* Reaching definitions result for a function. */
+typedef struct {
+    IRDefPoint *defs;  /* array of all definitions */
+    int def_count;
+    int def_capacity;
+
+    /* Per-block bitsets (indexed by def ID) */
+    int **reach_in;    /* reach_in[block]: defs reaching block entry */
+    int **reach_out;   /* reach_out[block]: defs reaching block exit */
+    int **gen;         /* gen[block]: defs generated in block */
+    int **kill;        /* kill[block]: defs killed in block */
+
+    int bitset_words;  /* ceil(def_count / 32) */
+    int block_count;
+} IRReachDefs;
+
+/* Compute reaching definitions for a function.
+ * Caller must free with ir_free_reach_defs(). */
+IRReachDefs *ir_compute_reaching_defs(IRFunction *func);
+
+/* Free reaching definitions result. */
+void ir_free_reach_defs(IRReachDefs *rd);
+
+/* --- Loop Detection --- */
+
+/* A natural loop identified in the CFG. */
+typedef struct {
+    int header;        /* loop header block ID */
+    int *body;         /* array of block IDs in the loop */
+    int body_count;
+    int back_edge_src; /* block ID of back-edge source */
+    int depth;         /* nesting depth (1 = outermost) */
+} IRLoop;
+
+/* Loop analysis result for a function. */
+typedef struct {
+    IRLoop *loops;
+    int loop_count;
+    int loop_capacity;
+} IRLoopInfo;
+
+/* Detect natural loops in the CFG.
+ * Requires dominator tree (calls ir_compute_dominators if not done).
+ * Also sets loop_depth and loop_header on each IRBlock.
+ * Caller must free with ir_free_loop_info(). */
+IRLoopInfo *ir_detect_loops(IRFunction *func);
+
+/* Free loop info. */
+void ir_free_loop_info(IRLoopInfo *li);
+
+/* Run all analysis passes on a function:
+ * dominators, liveness, reaching definitions, loop detection. */
+void ir_analyze_function(IRFunction *func);
+
+/* Run all analysis passes on all functions in the program. */
+void ir_analyze_program(IRProgram *prog);
+
+/* ================================================================== */
 /* API: Debug Output                                                  */
 /* ================================================================== */
 
