@@ -175,6 +175,8 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
     if (g_compiler_options.opt_level >= OPT_O2) {
         IRProgram *ir = ir_build_program(program, g_compiler_options.opt_level);
         if (ir) {
+            /* Construct SSA form: dominators, phi insertion, rename */
+            ir_ssa_construct_program(ir);
             if (g_dump_ir) {
                 ir_dump_program(ir, stderr);
             }
@@ -380,6 +382,8 @@ static int do_cc(int input_count, const char **input_files,
     if (g_compiler_options.opt_level >= OPT_O2) {
         IRProgram *ir = ir_build_program(program, g_compiler_options.opt_level);
         if (ir) {
+            /* Construct SSA form: dominators, phi insertion, rename */
+            ir_ssa_construct_program(ir);
             if (g_dump_ir) {
                 ir_dump_program(ir, stderr);
             }

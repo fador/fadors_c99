@@ -348,12 +348,12 @@ This section outlines the implementation plan for compiler optimization flags (`
 #### Phase 4b: IR / CFG Construction
 - [x] **Basic block identification**: Split function bodies into basic blocks at branch targets and after jumps/returns.
 - [x] **Control Flow Graph (CFG)**: Build directed graph of basic blocks with predecessor/successor edges. Three-address code IR with 40+ opcodes; expression/statement lowering for all AST node types; `--dump-ir` flag for debug output. Activated at `-O2+`.
-- [ ] **SSA construction** (optional, for later): Convert variables to Static Single Assignment form with φ-functions for more powerful analyses. IR has PHI node support and dominator tree slots ready.
+- [x] **SSA construction**: Convert variables to Static Single Assignment form with φ-functions. Implements Cooper-Harvey-Kennedy iterative dominator algorithm, dominance frontier computation, φ-function insertion at iterated dominance frontiers, and DFS variable renaming on the dominator tree. Parameter SSA entry vregs, SSA validation (single-definition check), dominator/DF info in `--dump-ir` output.
 
 #### Phase 4c: Analysis Passes (future — requires CFG)
 - [ ] **Liveness analysis**: Compute live variable sets at each basic block entry/exit. Identify dead stores.
 - [ ] **Reaching definitions**: Track which assignments reach each use of a variable.
-- [ ] **Dominator tree**: Compute dominance relationships for loop detection and placement of φ-functions.
+- [x] **Dominator tree**: Compute dominance relationships and dominance frontiers. Used for SSA φ-function placement and loop detection.
 - [ ] **Loop detection**: Identify natural loops (back edges in CFG) for loop-focused optimizations.
 
 #### Phase 4d: Advanced Optimization Passes (future — requires analysis)

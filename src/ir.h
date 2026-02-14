@@ -172,6 +172,7 @@ typedef struct IRInstr {
     IROperand src1;    /* first source operand */
     IROperand src2;    /* second source operand */
     int line;          /* source line number (for debug info) */
+    int ssa_var;       /* SSA: variable index this PHI belongs to (-1 if N/A) */
 
     /* For IR_BRANCH: false target (true target in src2 label) */
     int false_target;
@@ -264,6 +265,10 @@ typedef struct {
 
     /* Source info */
     int line;                  /* function definition line */
+
+    /* SSA state */
+    int is_ssa;                /* 1 if in SSA form, 0 otherwise */
+    int *ssa_param_vregs;      /* SSA entry vregs for parameters (NULL if not SSA) */
 } IRFunction;
 
 /* ================================================================== */
@@ -326,6 +331,26 @@ void ir_build_cfg(IRFunction *func);
 
 /* Allocate a new instruction with the given opcode. */
 IRInstr *ir_instr_new(IROpcode opcode, int line);
+
+/* ================================================================== */
+/* API: SSA Construction                                              */
+/* ================================================================== */
+
+/* Compute immediate dominators for all blocks using Cooper-Harvey-Kennedy. */
+void ir_compute_dominators(IRFunction *func);
+
+/* Compute dominance frontiers from dominator tree. */
+void ir_compute_dom_frontiers(IRFunction *func);
+
+/* Full SSA construction: dominators + frontiers + phi insertion + rename. */
+void ir_ssa_construct(IRFunction *func);
+
+/* Construct SSA for all functions in the program. */
+void ir_ssa_construct_program(IRProgram *prog);
+
+/* Validate SSA properties (every vreg defined exactly once).
+ * Returns 1 if valid, 0 otherwise. Prints violations to stderr. */
+int ir_ssa_validate(IRFunction *func);
 
 /* ================================================================== */
 /* API: Debug Output                                                  */

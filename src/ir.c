@@ -53,6 +53,7 @@ IRInstr *ir_instr_new(IROpcode opcode, int line) {
     instr->src2 = ir_op_none();
     instr->false_target = -1;
     instr->default_target = -1;
+    instr->ssa_var = -1;
     instr->next = NULL;
     return instr;
 }
@@ -115,6 +116,8 @@ static IRFunction *ir_function_new(const char *name, int line) {
     func->param_names = NULL;
     func->param_types = NULL;
     func->return_type = NULL;
+    func->is_ssa = 0;
+    func->ssa_param_vregs = NULL;
     return func;
 }
 
@@ -1220,6 +1223,655 @@ IRProgram *ir_build_program(ASTNode *program, OptLevel level) {
 }
 
 /* ================================================================== */
+/* SSA Construction                                                   */
+/*                                                                    */
+/* Implements the standard SSA construction algorithm:                 */
+/*   1. Compute dominator tree (Cooper-Harvey-Kennedy iterative)      */
+/*   2. Compute dominance frontiers                                   */
+/*   3. Insert phi-functions at iterated dominance frontiers          */
+/*   4. Rename variables (DFS on dominator tree)                      */
+/* ================================================================== */
+
+/* ------------------------------------------------------------------ */
+/* Reverse postorder (RPO) computation via DFS                        */
+/* ------------------------------------------------------------------ */
+
+static void rpo_dfs(IRFunction *func, int block_id, int *visited,
+                    int *rpo, int *rpo_idx) {
+    if (block_id < 0 || block_id >= func->block_count) return;
+    if (visited[block_id]) return;
+    visited[block_id] = 1;
+
+    IRBlock *b = func->blocks[block_id];
+    for (int i = 0; i < b->succ_count; i++) {
+        rpo_dfs(func, b->succs[i], visited, rpo, rpo_idx);
+    }
+    rpo[--(*rpo_idx)] = block_id;
+}
+
+/* Returns an array of block IDs in reverse postorder.
+ * *out_count is set to the number of reachable blocks.
+ * Caller must free the returned array. */
+static int *compute_rpo(IRFunction *func, int *out_count) {
+    int n = func->block_count;
+    int *visited = (int *)calloc(n, sizeof(int));
+    int *rpo = (int *)calloc(n, sizeof(int));
+    int rpo_idx = n;
+
+    rpo_dfs(func, func->entry_block, visited, rpo, &rpo_idx);
+    free(visited);
+
+    int count = n - rpo_idx;
+    if (rpo_idx > 0) {
+        memmove(rpo, rpo + rpo_idx, count * sizeof(int));
+    }
+    *out_count = count;
+    return rpo;
+}
+
+/* ------------------------------------------------------------------ */
+/* Dominator tree computation (Cooper, Harvey, Kennedy 2001)          */
+/* ------------------------------------------------------------------ */
+
+static int dom_intersect(int *doms, int *rpo_num, int b1, int b2) {
+    int finger1 = b1;
+    int finger2 = b2;
+    while (finger1 != finger2) {
+        while (rpo_num[finger1] > rpo_num[finger2])
+            finger1 = doms[finger1];
+        while (rpo_num[finger2] > rpo_num[finger1])
+            finger2 = doms[finger2];
+    }
+    return finger1;
+}
+
+void ir_compute_dominators(IRFunction *func) {
+    int n = func->block_count;
+    if (n == 0) return;
+
+    /* Compute reverse postorder */
+    int rpo_count;
+    int *rpo = compute_rpo(func, &rpo_count);
+
+    /* Assign RPO numbers (for intersect comparisons) */
+    int *rpo_num = (int *)malloc(n * sizeof(int));
+    for (int i = 0; i < n; i++) rpo_num[i] = -1;  /* unreachable */
+    for (int i = 0; i < rpo_count; i++) rpo_num[rpo[i]] = i;
+
+    /* Initialize idom array: undefined = -1, entry = self */
+    int *doms = (int *)malloc(n * sizeof(int));
+    for (int i = 0; i < n; i++) doms[i] = -1;
+    doms[func->entry_block] = func->entry_block;
+
+    /* Iterative dominator computation */
+    int changed = 1;
+    while (changed) {
+        changed = 0;
+        for (int i = 0; i < rpo_count; i++) {
+            int b = rpo[i];
+            if (b == func->entry_block) continue;
+
+            IRBlock *block = func->blocks[b];
+
+            /* Find first processed predecessor */
+            int new_idom = -1;
+            for (int p = 0; p < block->pred_count; p++) {
+                if (doms[block->preds[p]] != -1) {
+                    new_idom = block->preds[p];
+                    break;
+                }
+            }
+            if (new_idom == -1) continue;  /* unreachable */
+
+            /* Intersect with other processed predecessors */
+            for (int p = 0; p < block->pred_count; p++) {
+                int pred = block->preds[p];
+                if (pred == new_idom) continue;
+                if (doms[pred] != -1) {
+                    new_idom = dom_intersect(doms, rpo_num, pred, new_idom);
+                }
+            }
+
+            if (doms[b] != new_idom) {
+                doms[b] = new_idom;
+                changed = 1;
+            }
+        }
+    }
+
+    /* Store results in blocks */
+    for (int i = 0; i < n; i++) {
+        func->blocks[i]->idom = doms[i];
+    }
+    func->blocks[func->entry_block]->idom = -1;  /* entry has no idom */
+
+    free(doms);
+    free(rpo);
+    free(rpo_num);
+}
+
+/* ------------------------------------------------------------------ */
+/* Dominance frontier computation                                     */
+/* ------------------------------------------------------------------ */
+
+void ir_compute_dom_frontiers(IRFunction *func) {
+    int n = func->block_count;
+
+    /* Reset existing frontiers */
+    for (int i = 0; i < n; i++) {
+        free(func->blocks[i]->dom_frontier);
+        func->blocks[i]->dom_frontier = NULL;
+        func->blocks[i]->dom_frontier_count = 0;
+    }
+
+    /* Allocate dynamic arrays for frontiers */
+    int *df_cap = (int *)calloc(n, sizeof(int));
+    for (int i = 0; i < n; i++) {
+        df_cap[i] = 4;
+        func->blocks[i]->dom_frontier = (int *)malloc(4 * sizeof(int));
+    }
+
+    /* Standard DF computation:
+     * For each join point b (pred_count >= 2), walk up the dominator tree
+     * from each predecessor until we reach b's immediate dominator,
+     * adding b to the dominance frontier of each block along the way. */
+    for (int b = 0; b < n; b++) {
+        IRBlock *block = func->blocks[b];
+        if (block->pred_count < 2) continue;
+
+        for (int p = 0; p < block->pred_count; p++) {
+            int runner = block->preds[p];
+            while (runner >= 0 && runner != block->idom) {
+                IRBlock *rb = func->blocks[runner];
+
+                /* Check for duplicate */
+                int found = 0;
+                for (int d = 0; d < rb->dom_frontier_count; d++) {
+                    if (rb->dom_frontier[d] == b) { found = 1; break; }
+                }
+                if (!found) {
+                    if (rb->dom_frontier_count >= df_cap[runner]) {
+                        df_cap[runner] *= 2;
+                        rb->dom_frontier = (int *)realloc(
+                            rb->dom_frontier, df_cap[runner] * sizeof(int));
+                    }
+                    rb->dom_frontier[rb->dom_frontier_count++] = b;
+                }
+                runner = func->blocks[runner]->idom;
+            }
+        }
+    }
+
+    free(df_cap);
+}
+
+/* ------------------------------------------------------------------ */
+/* Phi-function insertion at iterated dominance frontiers             */
+/* ------------------------------------------------------------------ */
+
+static void ir_ssa_insert_phis(IRFunction *func) {
+    int n = func->block_count;
+    int nv = func->var_count;
+    if (nv == 0 || n == 0) return;
+
+    /* Build reverse map: canonical vreg → variable index */
+    int max_vreg = func->next_vreg;
+    int *var_of_vreg = (int *)malloc(max_vreg * sizeof(int));
+    for (int i = 0; i < max_vreg; i++) var_of_vreg[i] = -1;
+    for (int i = 0; i < nv; i++) var_of_vreg[func->vars[i].vreg] = i;
+
+    /* For each variable, find def blocks */
+    int **def_blocks = (int **)calloc(nv, sizeof(int *));
+    int *def_count = (int *)calloc(nv, sizeof(int));
+    int *def_cap = (int *)calloc(nv, sizeof(int));
+    for (int i = 0; i < nv; i++) {
+        def_cap[i] = 4;
+        def_blocks[i] = (int *)malloc(4 * sizeof(int));
+    }
+
+    for (int b = 0; b < n; b++) {
+        for (IRInstr *instr = func->blocks[b]->first; instr; instr = instr->next) {
+            if (instr->dst.kind == IR_OPERAND_VREG &&
+                instr->dst.val.vreg < max_vreg) {
+                int vi = var_of_vreg[instr->dst.val.vreg];
+                if (vi >= 0) {
+                    /* Add block b to def_blocks[vi] if not already there */
+                    int found = 0;
+                    for (int d = 0; d < def_count[vi]; d++) {
+                        if (def_blocks[vi][d] == b) { found = 1; break; }
+                    }
+                    if (!found) {
+                        if (def_count[vi] >= def_cap[vi]) {
+                            def_cap[vi] *= 2;
+                            def_blocks[vi] = (int *)realloc(
+                                def_blocks[vi], def_cap[vi] * sizeof(int));
+                        }
+                        def_blocks[vi][def_count[vi]++] = b;
+                    }
+                }
+            }
+        }
+    }
+
+    /* Insert phi-functions using iterated dominance frontier */
+    int *has_phi = (int *)calloc(nv * n, sizeof(int));
+    int *worklist = (int *)malloc(n * sizeof(int));
+    int *in_worklist = (int *)calloc(n, sizeof(int));
+
+    for (int v = 0; v < nv; v++) {
+        /* Initialize worklist with def blocks for variable v */
+        int wl_count = 0;
+        memset(in_worklist, 0, n * sizeof(int));
+        for (int d = 0; d < def_count[v]; d++) {
+            worklist[wl_count++] = def_blocks[v][d];
+            in_worklist[def_blocks[v][d]] = 1;
+        }
+
+        while (wl_count > 0) {
+            int d = worklist[--wl_count];
+            in_worklist[d] = 0;
+
+            IRBlock *db = func->blocks[d];
+            for (int f = 0; f < db->dom_frontier_count; f++) {
+                int y = db->dom_frontier[f];
+                if (has_phi[v * n + y]) continue;
+                has_phi[v * n + y] = 1;
+
+                /* Insert phi at top of block y */
+                IRBlock *yb = func->blocks[y];
+                IRInstr *phi = ir_instr_new(IR_PHI, 0);
+                phi->ssa_var = v;
+                phi->dst = ir_op_vreg(func->vars[v].vreg, func->vars[v].type);
+                phi->phi_count = yb->pred_count;
+                phi->phi_args = (IROperand *)ir_alloc(
+                    yb->pred_count * sizeof(IROperand));
+                phi->phi_preds = (int *)ir_alloc(
+                    yb->pred_count * sizeof(int));
+                for (int p = 0; p < yb->pred_count; p++) {
+                    phi->phi_args[p] = ir_op_none();  /* filled during rename */
+                    phi->phi_preds[p] = yb->preds[p];
+                }
+
+                /* Prepend to block */
+                phi->next = yb->first;
+                yb->first = phi;
+                if (!yb->last) yb->last = phi;
+                yb->instr_count++;
+
+                /* If y is not already a def site, add to worklist */
+                if (!in_worklist[y]) {
+                    worklist[wl_count++] = y;
+                    in_worklist[y] = 1;
+                }
+            }
+        }
+    }
+
+    free(has_phi);
+    free(worklist);
+    free(in_worklist);
+    for (int i = 0; i < nv; i++) free(def_blocks[i]);
+    free(def_blocks);
+    free(def_count);
+    free(def_cap);
+    free(var_of_vreg);
+}
+
+/* ------------------------------------------------------------------ */
+/* Variable renaming (DFS on dominator tree)                          */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+    int *stack;
+    int top;
+    int cap;
+} SSAVarStack;
+
+static void ssa_stack_init(SSAVarStack *s) {
+    s->cap = 8;
+    s->top = 0;
+    s->stack = (int *)malloc(s->cap * sizeof(int));
+}
+
+static void ssa_stack_free(SSAVarStack *s) {
+    free(s->stack);
+}
+
+static void ssa_push(SSAVarStack *s, int vreg) {
+    if (s->top >= s->cap) {
+        s->cap *= 2;
+        s->stack = (int *)realloc(s->stack, s->cap * sizeof(int));
+    }
+    s->stack[s->top++] = vreg;
+}
+
+static int ssa_top(SSAVarStack *s) {
+    if (s->top <= 0) return -1;
+    return s->stack[s->top - 1];
+}
+
+static int ssa_new_name(SSAVarStack *s, IRFunction *func) {
+    int vreg = func->next_vreg++;
+    ssa_push(s, vreg);
+    return vreg;
+}
+
+/* Build dominator tree children lists.
+ * Caller must free dom_children[i] for each i, plus dom_children and counts. */
+static void build_dom_children(IRFunction *func, int ***out_children,
+                               int **out_counts) {
+    int n = func->block_count;
+    int **children = (int **)calloc(n, sizeof(int *));
+    int *counts = (int *)calloc(n, sizeof(int));
+    int *caps = (int *)calloc(n, sizeof(int));
+    for (int i = 0; i < n; i++) {
+        caps[i] = 4;
+        children[i] = (int *)malloc(4 * sizeof(int));
+    }
+
+    for (int i = 0; i < n; i++) {
+        int idom = func->blocks[i]->idom;
+        if (idom >= 0 && idom != i) {
+            if (counts[idom] >= caps[idom]) {
+                caps[idom] *= 2;
+                children[idom] = (int *)realloc(
+                    children[idom], caps[idom] * sizeof(int));
+            }
+            children[idom][counts[idom]++] = i;
+        }
+    }
+
+    free(caps);
+    *out_children = children;
+    *out_counts = counts;
+}
+
+static void ssa_rename_block(IRFunction *func, int block_id,
+                             SSAVarStack *stacks, int *var_of_vreg,
+                             int max_orig_vreg, int **dom_children,
+                             int *dom_child_counts) {
+    IRBlock *block = func->blocks[block_id];
+    int nv = func->var_count;
+
+    /* Track how many versions we push per variable for later cleanup */
+    int *local_pushes = (int *)calloc(nv, sizeof(int));
+
+    /* 1. Process PHI definitions: rename dst, push new version */
+    for (IRInstr *instr = block->first;
+         instr && instr->opcode == IR_PHI;
+         instr = instr->next) {
+        int vi = instr->ssa_var;
+        if (vi >= 0 && vi < nv) {
+            int new_vreg = ssa_new_name(&stacks[vi], func);
+            instr->dst.val.vreg = new_vreg;
+            local_pushes[vi]++;
+        }
+    }
+
+    /* 2. Process non-PHI instructions: rename uses then defs */
+    for (IRInstr *instr = block->first; instr; instr = instr->next) {
+        if (instr->opcode == IR_PHI) continue;
+
+        /* Rename uses in src1 */
+        if (instr->src1.kind == IR_OPERAND_VREG &&
+            instr->src1.val.vreg < max_orig_vreg) {
+            int vi = var_of_vreg[instr->src1.val.vreg];
+            if (vi >= 0) {
+                int cur = ssa_top(&stacks[vi]);
+                if (cur >= 0) instr->src1.val.vreg = cur;
+            }
+        }
+
+        /* Rename uses in src2 */
+        if (instr->src2.kind == IR_OPERAND_VREG &&
+            instr->src2.val.vreg < max_orig_vreg) {
+            int vi = var_of_vreg[instr->src2.val.vreg];
+            if (vi >= 0) {
+                int cur = ssa_top(&stacks[vi]);
+                if (cur >= 0) instr->src2.val.vreg = cur;
+            }
+        }
+
+        /* Rename definition in dst */
+        if (instr->dst.kind == IR_OPERAND_VREG &&
+            instr->dst.val.vreg < max_orig_vreg) {
+            int vi = var_of_vreg[instr->dst.val.vreg];
+            if (vi >= 0) {
+                int new_vreg = ssa_new_name(&stacks[vi], func);
+                instr->dst.val.vreg = new_vreg;
+                local_pushes[vi]++;
+            }
+        }
+    }
+
+    /* 3. Fill phi arguments in successor blocks */
+    for (int s = 0; s < block->succ_count; s++) {
+        int succ_id = block->succs[s];
+        IRBlock *succ = func->blocks[succ_id];
+
+        /* Determine our predecessor index in the successor */
+        int pred_idx = -1;
+        for (int p = 0; p < succ->pred_count; p++) {
+            if (succ->preds[p] == block_id) { pred_idx = p; break; }
+        }
+        if (pred_idx < 0) continue;
+
+        /* Fill matching phi arguments */
+        for (IRInstr *phi = succ->first;
+             phi && phi->opcode == IR_PHI;
+             phi = phi->next) {
+            int vi = phi->ssa_var;
+            if (vi >= 0 && vi < nv && pred_idx < phi->phi_count) {
+                int cur = ssa_top(&stacks[vi]);
+                if (cur >= 0) {
+                    phi->phi_args[pred_idx] =
+                        ir_op_vreg(cur, func->vars[vi].type);
+                } else {
+                    /* Variable undefined along this path — use 0 (undef) */
+                    phi->phi_args[pred_idx] = ir_op_imm_int(0);
+                }
+            }
+        }
+    }
+
+    /* 4. Recurse into dominator tree children */
+    for (int c = 0; c < dom_child_counts[block_id]; c++) {
+        ssa_rename_block(func, dom_children[block_id][c],
+                         stacks, var_of_vreg, max_orig_vreg,
+                         dom_children, dom_child_counts);
+    }
+
+    /* 5. Pop all versions pushed in this block */
+    for (int v = 0; v < nv; v++) {
+        stacks[v].top -= local_pushes[v];
+    }
+
+    free(local_pushes);
+}
+
+static void ir_ssa_rename(IRFunction *func) {
+    int nv = func->var_count;
+    if (nv == 0) return;
+
+    /* Save the pre-SSA vreg count to know which vregs are "original" */
+    int max_orig_vreg = func->next_vreg;
+
+    /* Build reverse map: canonical vreg → variable index */
+    int *var_of_vreg = (int *)malloc(max_orig_vreg * sizeof(int));
+    for (int i = 0; i < max_orig_vreg; i++) var_of_vreg[i] = -1;
+    for (int i = 0; i < nv; i++) var_of_vreg[func->vars[i].vreg] = i;
+
+    /* Build dominator tree children lists */
+    int **dom_children;
+    int *dom_child_counts;
+    build_dom_children(func, &dom_children, &dom_child_counts);
+
+    /* Initialize per-variable stacks */
+    SSAVarStack *stacks = (SSAVarStack *)malloc(nv * sizeof(SSAVarStack));
+    for (int v = 0; v < nv; v++) {
+        ssa_stack_init(&stacks[v]);
+    }
+
+    /* Push initial versions for parameters (implicitly defined at entry) */
+    func->ssa_param_vregs = (int *)malloc(nv * sizeof(int));
+    for (int v = 0; v < nv; v++) {
+        func->ssa_param_vregs[v] = -1;
+        if (func->vars[v].is_param) {
+            int entry_vreg = func->next_vreg++;
+            ssa_push(&stacks[v], entry_vreg);
+            func->ssa_param_vregs[v] = entry_vreg;
+        }
+    }
+
+    /* Run DFS rename starting from entry block */
+    ssa_rename_block(func, func->entry_block, stacks, var_of_vreg,
+                     max_orig_vreg, dom_children, dom_child_counts);
+
+    /* Cleanup */
+    for (int v = 0; v < nv; v++) ssa_stack_free(&stacks[v]);
+    free(stacks);
+    for (int i = 0; i < func->block_count; i++) free(dom_children[i]);
+    free(dom_children);
+    free(dom_child_counts);
+    free(var_of_vreg);
+}
+
+/* ------------------------------------------------------------------ */
+/* SSA construction entry point                                       */
+/* ------------------------------------------------------------------ */
+
+void ir_ssa_construct(IRFunction *func) {
+    if (!func || func->block_count == 0) return;
+    if (func->var_count == 0) { func->is_ssa = 1; return; }
+
+    /* Step 1: Compute dominator tree */
+    ir_compute_dominators(func);
+
+    /* Step 2: Compute dominance frontiers */
+    ir_compute_dom_frontiers(func);
+
+    /* Step 3: Insert phi-functions */
+    ir_ssa_insert_phis(func);
+
+    /* Step 4: Rename variables */
+    ir_ssa_rename(func);
+
+    func->is_ssa = 1;
+}
+
+void ir_ssa_construct_program(IRProgram *prog) {
+    if (!prog) return;
+    for (int i = 0; i < prog->func_count; i++) {
+        ir_ssa_construct(prog->functions[i]);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* SSA validation                                                     */
+/* ------------------------------------------------------------------ */
+
+int ir_ssa_validate(IRFunction *func) {
+    if (!func || !func->is_ssa) return 0;
+
+    int max_vreg = func->next_vreg;
+    int *def_count = (int *)calloc(max_vreg, sizeof(int));
+    int valid = 1;
+
+    /* Count definitions of each vreg */
+    for (int b = 0; b < func->block_count; b++) {
+        for (IRInstr *instr = func->blocks[b]->first; instr; instr = instr->next) {
+            if (instr->dst.kind == IR_OPERAND_VREG) {
+                int v = instr->dst.val.vreg;
+                if (v >= 0 && v < max_vreg) def_count[v]++;
+            }
+        }
+    }
+
+    /* Check single-definition property */
+    for (int v = 0; v < max_vreg; v++) {
+        if (def_count[v] > 1) {
+            fprintf(stderr, "SSA violation: t%d defined %d times\n",
+                    v, def_count[v]);
+            valid = 0;
+        }
+    }
+
+    /* Check that every used vreg is defined (or is a parameter entry vreg) */
+    int *defined = (int *)calloc(max_vreg, sizeof(int));
+    for (int b = 0; b < func->block_count; b++) {
+        for (IRInstr *instr = func->blocks[b]->first; instr; instr = instr->next) {
+            if (instr->dst.kind == IR_OPERAND_VREG) {
+                int v = instr->dst.val.vreg;
+                if (v >= 0 && v < max_vreg) defined[v] = 1;
+            }
+        }
+    }
+    /* Mark parameter entry vregs as defined (implicit defs at function entry) */
+    if (func->ssa_param_vregs) {
+        for (int v = 0; v < func->var_count; v++) {
+            int pv = func->ssa_param_vregs[v];
+            if (pv >= 0 && pv < max_vreg) defined[pv] = 1;
+        }
+    }
+
+    for (int b = 0; b < func->block_count; b++) {
+        for (IRInstr *instr = func->blocks[b]->first; instr; instr = instr->next) {
+            if (instr->src1.kind == IR_OPERAND_VREG) {
+                int v = instr->src1.val.vreg;
+                if (v >= 0 && v < max_vreg && !defined[v]) {
+                    fprintf(stderr,
+                        "SSA violation: t%d used but not defined (bb%d)\n",
+                        v, b);
+                    valid = 0;
+                }
+            }
+            if (instr->src2.kind == IR_OPERAND_VREG) {
+                int v = instr->src2.val.vreg;
+                if (v >= 0 && v < max_vreg && !defined[v]) {
+                    fprintf(stderr,
+                        "SSA violation: t%d used but not defined (bb%d)\n",
+                        v, b);
+                    valid = 0;
+                }
+            }
+            if (instr->opcode == IR_PHI) {
+                for (int p = 0; p < instr->phi_count; p++) {
+                    if (instr->phi_args[p].kind == IR_OPERAND_VREG) {
+                        int v = instr->phi_args[p].val.vreg;
+                        if (v >= 0 && v < max_vreg && !defined[v]) {
+                            fprintf(stderr,
+                                "SSA violation: PHI arg t%d not defined "
+                                "(bb%d pred bb%d)\n",
+                                v, b, instr->phi_preds[p]);
+                            valid = 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* Check PHI node consistency: pred count matches block pred count */
+    for (int b = 0; b < func->block_count; b++) {
+        IRBlock *block = func->blocks[b];
+        for (IRInstr *instr = block->first;
+             instr && instr->opcode == IR_PHI;
+             instr = instr->next) {
+            if (instr->phi_count != block->pred_count) {
+                fprintf(stderr,
+                    "SSA violation: PHI in bb%d has %d args but block has "
+                    "%d preds\n", b, instr->phi_count, block->pred_count);
+                valid = 0;
+            }
+        }
+    }
+
+    free(def_count);
+    free(defined);
+    return valid;
+}
+
+/* ================================================================== */
 /* Debug Output                                                       */
 /* ================================================================== */
 
@@ -1305,6 +1957,15 @@ void ir_dump_block(IRBlock *block, FILE *out) {
         fprintf(out, "  ; preds:");
         for (int i = 0; i < block->pred_count; i++)
             fprintf(out, " bb%d", block->preds[i]);
+    }
+    /* Print dominator info if available */
+    if (block->idom >= 0) {
+        fprintf(out, "  ; idom: bb%d", block->idom);
+    }
+    if (block->dom_frontier_count > 0) {
+        fprintf(out, "  ; DF:");
+        for (int i = 0; i < block->dom_frontier_count; i++)
+            fprintf(out, " bb%d", block->dom_frontier[i]);
     }
     fprintf(out, "\n");
 
@@ -1392,8 +2053,9 @@ void ir_dump_function(IRFunction *func, FILE *out) {
         fprintf(out, "\n");
     }
 
-    fprintf(out, "  ; %d blocks, %d vregs\n\n",
-            func->block_count, func->next_vreg);
+    fprintf(out, "  ; %d blocks, %d vregs%s\n\n",
+            func->block_count, func->next_vreg,
+            func->is_ssa ? " (SSA)" : "");
 
     /* Print all blocks */
     for (int i = 0; i < func->block_count; i++) {
@@ -1485,6 +2147,7 @@ void ir_free_function(IRFunction *func) {
         free(func->vars[i].name);
     }
     free(func->vars);
+    free(func->ssa_param_vregs);
     free(func);
 }
 
