@@ -269,6 +269,12 @@ typedef struct {
     /* SSA state */
     int is_ssa;                /* 1 if in SSA form, 0 otherwise */
     int *ssa_param_vregs;      /* SSA entry vregs for parameters (NULL if not SSA) */
+
+    /* Register allocation results (populated by ir_regalloc) */
+    int *regalloc;             /* vreg → physical register ID (or RA_SPILL) */
+    int *regalloc_spill;       /* vreg → spill slot index (-1 if not spilled) */
+    int spill_count;           /* total number of spill slots used */
+    int has_regalloc;          /* 1 if register allocation has been performed */
 } IRFunction;
 
 /* ================================================================== */
@@ -444,6 +450,40 @@ void ir_analyze_function(IRFunction *func);
 
 /* Run all analysis passes on all functions in the program. */
 void ir_analyze_program(IRProgram *prog);
+
+/* ================================================================== */
+/* API: Optimization Passes                                           */
+/* ================================================================== */
+
+/* Sparse Conditional Constant Propagation (SCCP).
+ * Propagates constants across basic blocks through SSA def-use chains.
+ * Folds constant branches into unconditional jumps. */
+void ir_sccp(IRFunction *func);
+void ir_sccp_program(IRProgram *prog);
+
+/* Global Value Numbering / Common Subexpression Elimination.
+ * Dominator-tree walk; replaces redundant computations with copies. */
+void ir_gvn_cse(IRFunction *func);
+void ir_gvn_cse_program(IRProgram *prog);
+
+/* Loop-Invariant Code Motion.
+ * Moves pure instructions whose operands are all defined outside the loop
+ * to a preheader block. */
+void ir_licm(IRFunction *func);
+void ir_licm_program(IRProgram *prog);
+
+/* Linear Scan Register Allocation.
+ * Assigns physical x86_64 GPRs to virtual registers based on liveness
+ * intervals. Spills the least-used vregs when registers are exhausted. */
+void ir_regalloc(IRFunction *func);
+void ir_regalloc_program(IRProgram *prog);
+
+/* Run all optimization passes on a function:
+ * SCCP → GVN/CSE → LICM → register allocation. */
+void ir_optimize_function(IRFunction *func);
+
+/* Run all optimization passes on all functions in the program. */
+void ir_optimize_program(IRProgram *prog);
 
 /* ================================================================== */
 /* API: Debug Output                                                  */

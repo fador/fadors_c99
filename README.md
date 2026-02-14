@@ -356,11 +356,11 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [x] **Dominator tree**: Compute dominance relationships and dominance frontiers. Used for SSA φ-function placement and loop detection.
 - [x] **Loop detection**: Back-edge identification via dominator tree (`ir_dominates()` walk), natural loop body collection via backward DFS from back-edge source, loop depth and header annotations per block. Handles nested loops (sorted by body size so inner loops overwrite outer headers). Shown in `--dump-ir` output as `loop: depth=N hdr=bbM`.
 
-#### Phase 4d: Advanced Optimization Passes (future — requires analysis)
-- [ ] **Global constant propagation**: Propagate known-constant values across basic blocks (current implementation is within-block only).
-- [ ] **Common subexpression elimination (CSE)**: Detect repeated computations (`a + b` computed twice) and reuse the first result.
-- [ ] **Loop-invariant code motion (LICM)**: Move computations that don't change within a loop to the preheader.
-- [ ] **Register allocation**: Replace naive stack-spill-everything with a graph-coloring or linear-scan register allocator. Use liveness analysis to minimize spills.
+#### Phase 4d: Advanced Optimization Passes ✅
+- [x] **Global constant propagation (SCCP)**: Sparse Conditional Constant Propagation — lattice-based (TOP/CONST/BOTTOM) iterative propagation on SSA virtual registers. Evaluates binary/unary ops on constant operands at compile time. Phase 2 rewrites constant vreg uses to immediates. Phase 3 folds constant branches to unconditional jumps, eliminating dead CFG paths. Handles addition, subtraction, multiplication, division, modulo, comparisons, and negation.
+- [x] **Common subexpression elimination (CSE/GVN)**: Global Value Numbering with hash-based dominator-tree preorder walk. Value numbers assigned per SSA vreg with copy propagation (COPY instructions propagate VN from source). Pure computations with matching `(opcode, VN(src1), VN(src2))` replaced with copy from earlier result. Redundant `a + b` computed twice becomes `copy` of first result.
+- [x] **Loop-invariant code motion (LICM)**: Uses `IRLoopInfo` from loop detection. Iteratively marks instructions as invariant if all sources are constants, defined outside the loop, or already marked invariant. Function parameters (no def block) are treated as invariant. Creates preheader block when needed, redirects CFG edges, updates PHI predecessors, and migrates invariant instructions before loop entry.
+- [x] **Register allocation (linear scan)**: Linear scan over liveness intervals. 14 allocatable x86_64 GPRs (rax, rcx, rdx, rbx, rsi, rdi, r8–r15, excluding rsp/rbp). Spills longest-lived active interval when registers exhausted. Summary shown in `--dump-ir` output: `regalloc: N in regs, M spilled (S slots)` with per-vreg register assignments.
 
 ### Phase 5: `-O3` — Aggressive Optimizations
 

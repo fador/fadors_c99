@@ -360,8 +360,8 @@ int main() {
 }
 EOF
 IR=$(run_ssa /tmp/ssa_t14.c)
-# Check phi has proper [value, block] format
-if echo "$IR" | grep "phi" | grep -q "\[t.*bb"; then
+# Check phi has proper [value, block] format (accept vreg [tN,bbN] or constant [$N,bbN] after SCCP)
+if echo "$IR" | grep "phi" | grep -qE "\[(t|\\$).*bb"; then
     pass "Phi predecessor format"
 else
     fail "Phi predecessor format" "phi args don't show [tN, bbN]"

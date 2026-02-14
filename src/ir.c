@@ -118,6 +118,10 @@ static IRFunction *ir_function_new(const char *name, int line) {
     func->return_type = NULL;
     func->is_ssa = 0;
     func->ssa_param_vregs = NULL;
+    func->regalloc = NULL;
+    func->regalloc_spill = NULL;
+    func->spill_count = 0;
+    func->has_regalloc = 0;
     return func;
 }
 
@@ -2474,6 +2478,1196 @@ void ir_analyze_program(IRProgram *prog) {
 }
 
 /* ================================================================== */
+/* Optimization Pass: Sparse Conditional Constant Propagation (SCCP)  */
+/* ================================================================== */
+
+/*
+ * SSA-based global constant propagation.  For each vreg, compute a
+ * lattice value:
+ *   TOP     = undefined (may become constant)
+ *   CONST(c)= known constant integer c
+ *   BOTTOM  = variable (not constant)
+ *
+ * Walk instructions in RPO.  When a vreg becomes CONST, fold all uses.
+ * PHI nodes are resolved: if all arguments are the same constant, the
+ * PHI produces that constant; if arguments disagree, it's BOTTOM.
+ */
+
+typedef enum { SCCP_TOP, SCCP_CONST, SCCP_BOTTOM } SCCPState;
+
+typedef struct {
+    SCCPState state;
+    long long value;        /* valid only when state == SCCP_CONST */
+} SCCPCell;
+
+/* Try to get the constant value of an operand using lattice cells.
+ * Returns 1 if op is a constant, filling *out_val. */
+static int sccp_get_const(IROperand *op, SCCPCell *cells, int nv,
+                          long long *out_val) {
+    if (op->kind == IR_OPERAND_IMM_INT) {
+        *out_val = op->val.imm_int;
+        return 1;
+    }
+    if (op->kind == IR_OPERAND_VREG) {
+        int v = op->val.vreg;
+        if (v >= 0 && v < nv && cells[v].state == SCCP_CONST) {
+            *out_val = cells[v].value;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Evaluate a binary operation on two constants. Returns 1 on success. */
+static int sccp_eval_binop(IROpcode op, long long a, long long b,
+                           long long *result) {
+    switch (op) {
+    case IR_ADD:    *result = a + b; return 1;
+    case IR_SUB:    *result = a - b; return 1;
+    case IR_MUL:    *result = a * b; return 1;
+    case IR_DIV:    if (b == 0) return 0; *result = a / b; return 1;
+    case IR_MOD:    if (b == 0) return 0; *result = a % b; return 1;
+    case IR_AND:    *result = a & b; return 1;
+    case IR_OR:     *result = a | b; return 1;
+    case IR_XOR:    *result = a ^ b; return 1;
+    case IR_SHL:    *result = a << b; return 1;
+    case IR_SHR:    *result = a >> b; return 1;
+    case IR_CMP_EQ: *result = (a == b); return 1;
+    case IR_CMP_NE: *result = (a != b); return 1;
+    case IR_CMP_LT: *result = (a < b); return 1;
+    case IR_CMP_LE: *result = (a <= b); return 1;
+    case IR_CMP_GT: *result = (a > b); return 1;
+    case IR_CMP_GE: *result = (a >= b); return 1;
+    default: return 0;
+    }
+}
+
+/* Mark a cell as CONST(v) or BOTTOM.  Returns 1 if changed. */
+static int sccp_set(SCCPCell *cells, int vreg, SCCPState state,
+                    long long value) {
+    SCCPCell *c = &cells[vreg];
+    if (c->state == SCCP_BOTTOM) return 0;  /* already bottom, can't go up */
+    if (state == SCCP_CONST) {
+        if (c->state == SCCP_CONST && c->value == value) return 0;
+        if (c->state == SCCP_CONST && c->value != value) {
+            /* conflict → bottom */
+            c->state = SCCP_BOTTOM;
+            return 1;
+        }
+        /* TOP → CONST */
+        c->state = SCCP_CONST;
+        c->value = value;
+        return 1;
+    }
+    /* BOTTOM */
+    if (c->state != SCCP_BOTTOM) {
+        c->state = SCCP_BOTTOM;
+        return 1;
+    }
+    return 0;
+}
+
+void ir_sccp(IRFunction *func) {
+    if (!func || func->block_count == 0) return;
+    int nv = func->next_vreg;
+    if (nv == 0) return;
+
+    SCCPCell *cells = (SCCPCell *)ir_alloc(nv * sizeof(SCCPCell));
+    /* All cells start as TOP */
+
+    /* Mark parameter vregs as BOTTOM (unknown) */
+    if (func->ssa_param_vregs) {
+        for (int v = 0; v < func->var_count; v++) {
+            int pv = func->ssa_param_vregs[v];
+            if (pv >= 0 && pv < nv && func->vars[v].is_param) {
+                cells[pv].state = SCCP_BOTTOM;
+            }
+        }
+    }
+
+    /* Iterative propagation to fixed point */
+    int changed = 1;
+    int iters = 0;
+    while (changed && iters < 100) {
+        changed = 0;
+        iters++;
+
+        for (int b = 0; b < func->block_count; b++) {
+            IRBlock *block = func->blocks[b];
+            for (IRInstr *instr = block->first; instr; instr = instr->next) {
+                if (instr->dst.kind != IR_OPERAND_VREG) continue;
+                int dst = instr->dst.val.vreg;
+                if (dst < 0 || dst >= nv) continue;
+
+                switch (instr->opcode) {
+                case IR_CONST:
+                    if (instr->src1.kind == IR_OPERAND_IMM_INT) {
+                        changed |= sccp_set(cells, dst, SCCP_CONST,
+                                            instr->src1.val.imm_int);
+                    } else {
+                        changed |= sccp_set(cells, dst, SCCP_BOTTOM, 0);
+                    }
+                    break;
+
+                case IR_COPY: {
+                    long long val;
+                    if (sccp_get_const(&instr->src1, cells, nv, &val)) {
+                        changed |= sccp_set(cells, dst, SCCP_CONST, val);
+                    } else if (instr->src1.kind == IR_OPERAND_VREG) {
+                        int sv = instr->src1.val.vreg;
+                        if (sv >= 0 && sv < nv &&
+                            cells[sv].state == SCCP_BOTTOM) {
+                            changed |= sccp_set(cells, dst, SCCP_BOTTOM, 0);
+                        }
+                    } else {
+                        changed |= sccp_set(cells, dst, SCCP_BOTTOM, 0);
+                    }
+                    break;
+                }
+
+                case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV:
+                case IR_MOD: case IR_AND: case IR_OR:  case IR_XOR:
+                case IR_SHL: case IR_SHR:
+                case IR_CMP_EQ: case IR_CMP_NE: case IR_CMP_LT:
+                case IR_CMP_LE: case IR_CMP_GT: case IR_CMP_GE: {
+                    long long a, bv, result;
+                    if (sccp_get_const(&instr->src1, cells, nv, &a) &&
+                        sccp_get_const(&instr->src2, cells, nv, &bv) &&
+                        sccp_eval_binop(instr->opcode, a, bv, &result)) {
+                        changed |= sccp_set(cells, dst, SCCP_CONST, result);
+                    } else {
+                        /* If either operand is BOTTOM → BOTTOM */
+                        int bot = 0;
+                        if (instr->src1.kind == IR_OPERAND_VREG) {
+                            int sv = instr->src1.val.vreg;
+                            if (sv >= 0 && sv < nv &&
+                                cells[sv].state == SCCP_BOTTOM)
+                                bot = 1;
+                        }
+                        if (instr->src2.kind == IR_OPERAND_VREG) {
+                            int sv = instr->src2.val.vreg;
+                            if (sv >= 0 && sv < nv &&
+                                cells[sv].state == SCCP_BOTTOM)
+                                bot = 1;
+                        }
+                        /* Also if either operand is a non-vreg non-imm */
+                        if (!bot && instr->src1.kind != IR_OPERAND_VREG &&
+                            instr->src1.kind != IR_OPERAND_IMM_INT)
+                            bot = 1;
+                        if (!bot && instr->src2.kind != IR_OPERAND_VREG &&
+                            instr->src2.kind != IR_OPERAND_IMM_INT)
+                            bot = 1;
+                        if (bot)
+                            changed |= sccp_set(cells, dst, SCCP_BOTTOM, 0);
+                    }
+                    break;
+                }
+
+                case IR_NEG: {
+                    long long val;
+                    if (sccp_get_const(&instr->src1, cells, nv, &val)) {
+                        changed |= sccp_set(cells, dst, SCCP_CONST, -val);
+                    } else if (instr->src1.kind == IR_OPERAND_VREG) {
+                        int sv = instr->src1.val.vreg;
+                        if (sv >= 0 && sv < nv &&
+                            cells[sv].state == SCCP_BOTTOM)
+                            changed |= sccp_set(cells, dst, SCCP_BOTTOM, 0);
+                    } else {
+                        changed |= sccp_set(cells, dst, SCCP_BOTTOM, 0);
+                    }
+                    break;
+                }
+
+                case IR_NOT: {
+                    long long val;
+                    if (sccp_get_const(&instr->src1, cells, nv, &val)) {
+                        changed |= sccp_set(cells, dst, SCCP_CONST, !val);
+                    } else if (instr->src1.kind == IR_OPERAND_VREG) {
+                        int sv = instr->src1.val.vreg;
+                        if (sv >= 0 && sv < nv &&
+                            cells[sv].state == SCCP_BOTTOM)
+                            changed |= sccp_set(cells, dst, SCCP_BOTTOM, 0);
+                    } else {
+                        changed |= sccp_set(cells, dst, SCCP_BOTTOM, 0);
+                    }
+                    break;
+                }
+
+                case IR_BITNOT: {
+                    long long val;
+                    if (sccp_get_const(&instr->src1, cells, nv, &val)) {
+                        changed |= sccp_set(cells, dst, SCCP_CONST, ~val);
+                    } else if (instr->src1.kind == IR_OPERAND_VREG) {
+                        int sv = instr->src1.val.vreg;
+                        if (sv >= 0 && sv < nv &&
+                            cells[sv].state == SCCP_BOTTOM)
+                            changed |= sccp_set(cells, dst, SCCP_BOTTOM, 0);
+                    } else {
+                        changed |= sccp_set(cells, dst, SCCP_BOTTOM, 0);
+                    }
+                    break;
+                }
+
+                case IR_PHI: {
+                    /* Meet of all phi args: if all CONST with same val → CONST
+                       if any BOTTOM or different constants → BOTTOM
+                       if all TOP or CONST(same) → CONST or remain TOP */
+                    int has_bottom = 0;
+                    int has_const = 0;
+                    long long phi_val = 0;
+                    for (int p = 0; p < instr->phi_count; p++) {
+                        IROperand *arg = &instr->phi_args[p];
+                        if (arg->kind == IR_OPERAND_IMM_INT) {
+                            if (!has_const) {
+                                phi_val = arg->val.imm_int;
+                                has_const = 1;
+                            } else if (arg->val.imm_int != phi_val) {
+                                has_bottom = 1;
+                            }
+                        } else if (arg->kind == IR_OPERAND_VREG) {
+                            int av = arg->val.vreg;
+                            if (av >= 0 && av < nv) {
+                                if (cells[av].state == SCCP_BOTTOM) {
+                                    has_bottom = 1;
+                                } else if (cells[av].state == SCCP_CONST) {
+                                    if (!has_const) {
+                                        phi_val = cells[av].value;
+                                        has_const = 1;
+                                    } else if (cells[av].value != phi_val) {
+                                        has_bottom = 1;
+                                    }
+                                }
+                                /* TOP args don't contribute */
+                            }
+                        } else {
+                            has_bottom = 1;
+                        }
+                    }
+                    if (has_bottom) {
+                        changed |= sccp_set(cells, dst, SCCP_BOTTOM, 0);
+                    } else if (has_const) {
+                        changed |= sccp_set(cells, dst, SCCP_CONST, phi_val);
+                    }
+                    /* else all TOP → remain TOP */
+                    break;
+                }
+
+                default:
+                    /* Calls, loads, stores, etc. → BOTTOM */
+                    changed |= sccp_set(cells, dst, SCCP_BOTTOM, 0);
+                    break;
+                }
+            }
+        }
+    }
+
+    /* Phase 2: Rewrite — replace uses of constant vregs with immediates.
+     * Also replace constant-producing instructions with IR_CONST. */
+    int opt_count = 0;
+    for (int b = 0; b < func->block_count; b++) {
+        IRBlock *block = func->blocks[b];
+        for (IRInstr *instr = block->first; instr; instr = instr->next) {
+            /* Replace source operands that are constant vregs */
+            if (instr->src1.kind == IR_OPERAND_VREG) {
+                int v = instr->src1.val.vreg;
+                if (v >= 0 && v < nv && cells[v].state == SCCP_CONST &&
+                    instr->opcode != IR_PHI) {
+                    instr->src1 = ir_op_imm_int(cells[v].value);
+                    opt_count++;
+                }
+            }
+            if (instr->src2.kind == IR_OPERAND_VREG) {
+                int v = instr->src2.val.vreg;
+                if (v >= 0 && v < nv && cells[v].state == SCCP_CONST &&
+                    instr->opcode != IR_PHI) {
+                    instr->src2 = ir_op_imm_int(cells[v].value);
+                    opt_count++;
+                }
+            }
+
+            /* Replace PHI args that are constant */
+            if (instr->opcode == IR_PHI) {
+                for (int p = 0; p < instr->phi_count; p++) {
+                    if (instr->phi_args[p].kind == IR_OPERAND_VREG) {
+                        int v = instr->phi_args[p].val.vreg;
+                        if (v >= 0 && v < nv &&
+                            cells[v].state == SCCP_CONST) {
+                            instr->phi_args[p] =
+                                ir_op_imm_int(cells[v].value);
+                            opt_count++;
+                        }
+                    }
+                }
+            }
+
+            /* If destination is constant, replace the instruction with
+             * IR_CONST (unless it's already a CONST or has side effects) */
+            if (instr->dst.kind == IR_OPERAND_VREG) {
+                int v = instr->dst.val.vreg;
+                if (v >= 0 && v < nv && cells[v].state == SCCP_CONST &&
+                    instr->opcode != IR_CONST &&
+                    !ir_has_side_effects(instr->opcode) &&
+                    instr->opcode != IR_PHI) {
+                    instr->opcode = IR_CONST;
+                    instr->src1 = ir_op_imm_int(cells[v].value);
+                    instr->src2 = ir_op_none();
+                    opt_count++;
+                }
+            }
+        }
+    }
+
+    /* Phase 3: Fold constant branches.
+     * If a branch condition is a constant, convert to unconditional jump
+     * and remove the dead edge. */
+    for (int b = 0; b < func->block_count; b++) {
+        IRBlock *block = func->blocks[b];
+        IRInstr *term = block->last;
+        if (!term || term->opcode != IR_BRANCH) continue;
+
+        long long cond_val;
+        if (sccp_get_const(&term->src1, cells, nv, &cond_val)) {
+            int true_target = term->src2.val.label;
+            int false_target = term->false_target;
+            int keep_target = cond_val ? true_target : false_target;
+
+            /* Convert branch to unconditional jump */
+            term->opcode = IR_JUMP;
+            term->src1 = ir_op_label(keep_target);
+            term->src2 = ir_op_none();
+            term->false_target = -1;
+            opt_count++;
+
+            /* Rebuild CFG edges for this block */
+            block->succ_count = 0;
+            ir_cfg_add_edge(func, b, keep_target);
+
+            /* Remove this block from the predecessor lists of the dead target */
+            int dead_target = cond_val ? false_target : true_target;
+            IRBlock *dead_block = func->blocks[dead_target];
+            int new_pred_count = 0;
+            for (int p = 0; p < dead_block->pred_count; p++) {
+                if (dead_block->preds[p] != b)
+                    dead_block->preds[new_pred_count++] = dead_block->preds[p];
+            }
+            dead_block->pred_count = new_pred_count;
+        }
+    }
+
+    free(cells);
+    (void)opt_count;  /* suppress unused warning */
+}
+
+void ir_sccp_program(IRProgram *prog) {
+    if (!prog) return;
+    for (int i = 0; i < prog->func_count; i++) {
+        ir_sccp(prog->functions[i]);
+    }
+}
+
+/* ================================================================== */
+/* Optimization Pass: Global Value Numbering / CSE                    */
+/* ================================================================== */
+
+/*
+ * Dominator-based value numbering.  Walk blocks in dominator-tree
+ * preorder.  For each instruction (opcode, vn(src1), vn(src2)),
+ * compute a hash.  If a prior instruction has the same hash and
+ * operands, replace the current instruction with a copy from the
+ * earlier result.
+ *
+ * This is a simplified GVN that works on SSA form:
+ * - Only pure (side-effect-free, non-terminator) instructions are
+ *   candidates for elimination.
+ * - VN is assigned per SSA vreg at definition (identity).
+ * - Instructions are hashed as (opcode << 16 | vn(src1) << 8 | vn(src2)).
+ */
+
+#define GVN_TABLE_SIZE 256
+
+typedef struct GVNEntry {
+    unsigned hash;
+    IROpcode opcode;
+    int src1_vn;      /* value number of first source */
+    long long src1_imm;/* immediate if src1 is const */
+    int src2_vn;       /* value number of second source */
+    long long src2_imm;/* immediate if src2 is const */
+    int result_vreg;   /* vreg holding the result */
+    struct GVNEntry *next;
+} GVNEntry;
+
+typedef struct {
+    GVNEntry *buckets[GVN_TABLE_SIZE];
+    int *vn;            /* value number for each vreg */
+    int next_vn;
+    int nv;             /* total vregs */
+} GVNTable;
+
+static void gvn_init(GVNTable *t, int nv) {
+    memset(t->buckets, 0, sizeof(t->buckets));
+    t->nv = nv;
+    t->next_vn = nv;  /* start value numbers after vreg range */
+    t->vn = (int *)ir_alloc(nv * sizeof(int));
+    /* Initially each vreg is its own value number */
+    for (int i = 0; i < nv; i++) t->vn[i] = i;
+}
+
+static void gvn_free(GVNTable *t) {
+    for (int i = 0; i < GVN_TABLE_SIZE; i++) {
+        GVNEntry *e = t->buckets[i];
+        while (e) {
+            GVNEntry *next = e->next;
+            free(e);
+            e = next;
+        }
+    }
+    free(t->vn);
+}
+
+static int gvn_get_vn_op(GVNTable *t, IROperand *op) {
+    if (op->kind == IR_OPERAND_VREG) {
+        int v = op->val.vreg;
+        if (v >= 0 && v < t->nv) return t->vn[v];
+    }
+    /* For immediates, use a sentinel that includes the value.
+       We use negative values: -(imm + 1) to avoid collision with vn range.
+       This is imperfect for large values but works for typical code. */
+    if (op->kind == IR_OPERAND_IMM_INT) {
+        return -(int)(op->val.imm_int + 1);
+    }
+    return -999999;  /* sentinel: never matches */
+}
+
+static unsigned gvn_hash(IROpcode op, int vn1, long long imm1,
+                         int vn2, long long imm2) {
+    unsigned h = (unsigned)op * 2654435761u;
+    h ^= (unsigned)vn1 * 2246822519u;
+    h ^= (unsigned)(imm1 & 0xFFFFFFFF) * 3266489917u;
+    h ^= (unsigned)vn2 * 668265263u;
+    h ^= (unsigned)(imm2 & 0xFFFFFFFF) * 374761393u;
+    return h;
+}
+
+/* Check if opcode is a pure computation that can be CSE'd */
+static int gvn_is_pure(IROpcode op) {
+    switch (op) {
+    case IR_ADD: case IR_SUB: case IR_MUL: case IR_DIV: case IR_MOD:
+    case IR_AND: case IR_OR:  case IR_XOR: case IR_SHL: case IR_SHR:
+    case IR_CMP_EQ: case IR_CMP_NE: case IR_CMP_LT:
+    case IR_CMP_LE: case IR_CMP_GT: case IR_CMP_GE:
+    case IR_NEG: case IR_NOT: case IR_BITNOT:
+    case IR_CAST:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+/* Try to find a matching entry.  Returns result_vreg or -1. */
+static int gvn_lookup(GVNTable *t, IROpcode op,
+                      int vn1, long long imm1,
+                      int vn2, long long imm2) {
+    unsigned h = gvn_hash(op, vn1, imm1, vn2, imm2);
+    unsigned idx = h % GVN_TABLE_SIZE;
+    for (GVNEntry *e = t->buckets[idx]; e; e = e->next) {
+        if (e->hash == h && e->opcode == op &&
+            e->src1_vn == vn1 && e->src1_imm == imm1 &&
+            e->src2_vn == vn2 && e->src2_imm == imm2)
+            return e->result_vreg;
+    }
+    return -1;
+}
+
+/* Insert a new entry. */
+static void gvn_insert(GVNTable *t, IROpcode op,
+                       int vn1, long long imm1,
+                       int vn2, long long imm2,
+                       int result_vreg) {
+    unsigned h = gvn_hash(op, vn1, imm1, vn2, imm2);
+    unsigned idx = h % GVN_TABLE_SIZE;
+    GVNEntry *e = (GVNEntry *)ir_alloc(sizeof(GVNEntry));
+    e->hash = h;
+    e->opcode = op;
+    e->src1_vn = vn1;
+    e->src1_imm = imm1;
+    e->src2_vn = vn2;
+    e->src2_imm = imm2;
+    e->result_vreg = result_vreg;
+    e->next = t->buckets[idx];
+    t->buckets[idx] = e;
+}
+
+/* Walk blocks in dominator-tree preorder */
+static void gvn_process_block(GVNTable *t, IRFunction *func, int block_id,
+                               int *opt_count) {
+    IRBlock *block = func->blocks[block_id];
+
+    for (IRInstr *instr = block->first; instr; instr = instr->next) {
+        if (instr->dst.kind != IR_OPERAND_VREG) continue;
+        int dst = instr->dst.val.vreg;
+        if (dst < 0 || dst >= t->nv) continue;
+
+        /* Propagate value numbers through copies and consts */
+        if (instr->opcode == IR_COPY && instr->src1.kind == IR_OPERAND_VREG) {
+            int sv = instr->src1.val.vreg;
+            if (sv >= 0 && sv < t->nv) {
+                t->vn[dst] = t->vn[sv];
+            }
+            continue;
+        }
+        if (instr->opcode == IR_CONST || instr->opcode == IR_COPY ||
+            instr->opcode == IR_PHI) {
+            /* These define new values; keep their identity VN */
+            continue;
+        }
+
+        if (!gvn_is_pure(instr->opcode)) continue;
+
+        int vn1 = gvn_get_vn_op(t, &instr->src1);
+        long long imm1 = (instr->src1.kind == IR_OPERAND_IMM_INT)
+                         ? instr->src1.val.imm_int : 0;
+        int vn2 = gvn_get_vn_op(t, &instr->src2);
+        long long imm2 = (instr->src2.kind == IR_OPERAND_IMM_INT)
+                         ? instr->src2.val.imm_int : 0;
+
+        int existing = gvn_lookup(t, instr->opcode, vn1, imm1, vn2, imm2);
+        if (existing >= 0) {
+            /* Replace with copy from existing result */
+            instr->opcode = IR_COPY;
+            instr->src1 = ir_op_vreg(existing, instr->dst.type);
+            instr->src2 = ir_op_none();
+            /* Set value number to same as existing */
+            t->vn[dst] = t->vn[existing];
+            (*opt_count)++;
+        } else {
+            /* Record this computation */
+            gvn_insert(t, instr->opcode, vn1, imm1, vn2, imm2, dst);
+        }
+    }
+
+    /* Recurse into dominated blocks */
+    for (int c = 0; c < func->block_count; c++) {
+        if (c != block_id && func->blocks[c]->idom == block_id) {
+            gvn_process_block(t, func, c, opt_count);
+        }
+    }
+}
+
+void ir_gvn_cse(IRFunction *func) {
+    if (!func || func->block_count == 0 || !func->is_ssa) return;
+    int nv = func->next_vreg;
+    if (nv == 0) return;
+
+    GVNTable table;
+    gvn_init(&table, nv);
+
+    int opt_count = 0;
+    gvn_process_block(&table, func, func->entry_block, &opt_count);
+
+    gvn_free(&table);
+    (void)opt_count;
+}
+
+void ir_gvn_cse_program(IRProgram *prog) {
+    if (!prog) return;
+    for (int i = 0; i < prog->func_count; i++) {
+        ir_gvn_cse(prog->functions[i]);
+    }
+}
+
+/* ================================================================== */
+/* Optimization Pass: Loop-Invariant Code Motion (LICM)               */
+/* ================================================================== */
+
+/*
+ * For each natural loop, identify instructions whose operands are all
+ * defined outside the loop (or are constants/loop-invariants themselves).
+ * Move such instructions to a preheader block inserted before the loop
+ * header.
+ *
+ * Requirements:
+ *   - Dominator tree computed
+ *   - Loop detection done (loop_depth, loop_header set on blocks)
+ *   - SSA form (each vreg defined once → easy to check def location)
+ *
+ * Algorithm:
+ *   1. Build a vreg→(block, instruction) def map
+ *   2. For each loop, find the preheader (unique pred outside the loop,
+ *      or create one)
+ *   3. Mark instructions as invariant if all sources are defined outside
+ *      the loop or are themselves invariant.  Iterate to fixed point.
+ *   4. Move invariant instructions to the preheader.
+ */
+
+/* Find which block defines a given vreg (in SSA, there's exactly one). */
+static int licm_find_def_block(IRFunction *func, int vreg) {
+    for (int b = 0; b < func->block_count; b++) {
+        for (IRInstr *instr = func->blocks[b]->first; instr;
+             instr = instr->next) {
+            if (instr->dst.kind == IR_OPERAND_VREG &&
+                instr->dst.val.vreg == vreg)
+                return b;
+        }
+    }
+    return -1;
+}
+
+/* Check if a block is in a given loop body. */
+static int licm_in_loop(int *loop_body, int body_count, int block_id) {
+    for (int i = 0; i < body_count; i++) {
+        if (loop_body[i] == block_id) return 1;
+    }
+    return 0;
+}
+
+/* Check if an operand is defined outside the loop or is a constant. */
+static int licm_operand_invariant(IRFunction *func, IROperand *op,
+                                  int *loop_body, int body_count,
+                                  int *is_invariant_vreg, int nv) {
+    if (op->kind == IR_OPERAND_NONE ||
+        op->kind == IR_OPERAND_IMM_INT ||
+        op->kind == IR_OPERAND_IMM_FLOAT ||
+        op->kind == IR_OPERAND_LABEL ||
+        op->kind == IR_OPERAND_FUNC ||
+        op->kind == IR_OPERAND_STRING)
+        return 1;
+
+    if (op->kind == IR_OPERAND_VREG) {
+        int v = op->val.vreg;
+        if (v >= 0 && v < nv && is_invariant_vreg[v])
+            return 1;
+        /* Defined outside the loop? */
+        int def_b = licm_find_def_block(func, v);
+        if (def_b < 0)
+            return 1;  /* No definition found — function parameter, always invariant */
+        if (!licm_in_loop(loop_body, body_count, def_b))
+            return 1;
+    }
+    return 0;
+}
+
+/* Find or create a preheader for a loop.
+ * The preheader is the unique predecessor of the header that is NOT
+ * in the loop body.  If there are multiple such predecessors, or
+ * none, we create a new block. */
+static int licm_ensure_preheader(IRFunction *func, int header,
+                                 int *loop_body, int body_count) {
+    IRBlock *hdr = func->blocks[header];
+    int preheader = -1;
+    int outside_pred_count = 0;
+
+    for (int p = 0; p < hdr->pred_count; p++) {
+        if (!licm_in_loop(loop_body, body_count, hdr->preds[p])) {
+            preheader = hdr->preds[p];
+            outside_pred_count++;
+        }
+    }
+
+    /* If exactly one outside predecessor that's not the header itself,
+       use it as the preheader (if its only successor is the header). */
+    if (outside_pred_count == 1 && preheader >= 0) {
+        IRBlock *ph = func->blocks[preheader];
+        if (ph->succ_count == 1 && ph->succs[0] == header) {
+            return preheader;
+        }
+    }
+
+    /* Create a new preheader block */
+    int ph_id = ir_new_block(func, "preheader");
+    IRBlock *ph = func->blocks[ph_id];
+
+    /* Insert a jump from preheader to header */
+    IRInstr *jmp = ir_instr_new(IR_JUMP, 0);
+    jmp->src1 = ir_op_label(header);
+    ir_block_append(ph, jmp);
+
+    /* Redirect all outside predecessors of header to go to preheader */
+    for (int p = 0; p < hdr->pred_count; p++) {
+        if (!licm_in_loop(loop_body, body_count, hdr->preds[p])) {
+            int pred_id = hdr->preds[p];
+            IRBlock *pred = func->blocks[pred_id];
+
+            /* Update the terminator to jump to preheader instead of header */
+            IRInstr *term = pred->last;
+            if (term) {
+                if (term->opcode == IR_JUMP &&
+                    term->src1.kind == IR_OPERAND_LABEL &&
+                    term->src1.val.label == header) {
+                    term->src1.val.label = ph_id;
+                }
+                if (term->opcode == IR_BRANCH) {
+                    if (term->src2.kind == IR_OPERAND_LABEL &&
+                        term->src2.val.label == header)
+                        term->src2.val.label = ph_id;
+                    if (term->false_target == header)
+                        term->false_target = ph_id;
+                }
+            }
+
+            /* Update successor list of pred */
+            for (int s = 0; s < pred->succ_count; s++) {
+                if (pred->succs[s] == header)
+                    pred->succs[s] = ph_id;
+            }
+
+            /* Add pred → preheader edge */
+            if (ph->pred_count < IR_MAX_PREDS)
+                ph->preds[ph->pred_count++] = pred_id;
+        }
+    }
+
+    /* Update header's pred list: remove outside preds, add preheader */
+    int new_pred_count = 0;
+    for (int p = 0; p < hdr->pred_count; p++) {
+        if (licm_in_loop(loop_body, body_count, hdr->preds[p])) {
+            hdr->preds[new_pred_count++] = hdr->preds[p];
+        }
+    }
+    hdr->preds[new_pred_count++] = ph_id;
+    hdr->pred_count = new_pred_count;
+
+    /* Preheader succeeds to header */
+    ph->succ_count = 1;
+    ph->succs[0] = header;
+
+    /* Update PHI nodes in the header: change predecessor references
+       from outside preds to preheader */
+    for (IRInstr *phi = hdr->first; phi && phi->opcode == IR_PHI;
+         phi = phi->next) {
+        for (int p = 0; p < phi->phi_count; p++) {
+            if (!licm_in_loop(loop_body, body_count, phi->phi_preds[p])) {
+                phi->phi_preds[p] = ph_id;
+            }
+        }
+    }
+
+    return ph_id;
+}
+
+void ir_licm(IRFunction *func) {
+    if (!func || func->block_count == 0) return;
+    int nv = func->next_vreg;
+    if (nv == 0) return;
+
+    /* Detect loops */
+    IRLoopInfo *li = ir_detect_loops(func);
+    if (!li || li->loop_count == 0) {
+        ir_free_loop_info(li);
+        return;
+    }
+
+    int *is_invariant = (int *)ir_alloc(nv * sizeof(int));
+    int opt_count = 0;
+
+    /* Process each loop (innermost first — already sorted by body size) */
+    for (int l = li->loop_count - 1; l >= 0; l--) {
+        IRLoop *loop = &li->loops[l];
+        if (loop->body_count == 0) continue;
+
+        memset(is_invariant, 0, nv * sizeof(int));
+
+        /* Iteratively find loop-invariant instructions */
+        int changed = 1;
+        while (changed) {
+            changed = 0;
+            for (int i = 0; i < loop->body_count; i++) {
+                int b = loop->body[i];
+                IRBlock *block = func->blocks[b];
+                for (IRInstr *instr = block->first; instr;
+                     instr = instr->next) {
+                    if (instr->dst.kind != IR_OPERAND_VREG) continue;
+                    int dst = instr->dst.val.vreg;
+                    if (dst < 0 || dst >= nv) continue;
+                    if (is_invariant[dst]) continue;  /* already found */
+
+                    /* Skip non-pure instructions */
+                    if (ir_has_side_effects(instr->opcode)) continue;
+                    if (ir_is_terminator(instr->opcode)) continue;
+                    if (instr->opcode == IR_PHI) continue;
+                    if (instr->opcode == IR_LOAD) continue;  /* may alias */
+                    if (instr->opcode == IR_ALLOCA) continue;
+
+                    /* Check if all sources are invariant */
+                    int inv = 1;
+                    if (instr->src1.kind != IR_OPERAND_NONE) {
+                        if (!licm_operand_invariant(func, &instr->src1,
+                                loop->body, loop->body_count,
+                                is_invariant, nv))
+                            inv = 0;
+                    }
+                    if (inv && instr->src2.kind != IR_OPERAND_NONE) {
+                        if (!licm_operand_invariant(func, &instr->src2,
+                                loop->body, loop->body_count,
+                                is_invariant, nv))
+                            inv = 0;
+                    }
+
+                    if (inv) {
+                        is_invariant[dst] = 1;
+                        changed = 1;
+                    }
+                }
+            }
+        }
+
+        /* Count how many invariant instructions we found */
+        int inv_count = 0;
+        for (int v = 0; v < nv; v++) {
+            if (is_invariant[v]) inv_count++;
+        }
+        if (inv_count == 0) continue;
+
+        /* Get or create preheader */
+        int ph_id = licm_ensure_preheader(func, loop->header,
+                                          loop->body, loop->body_count);
+        IRBlock *ph = func->blocks[ph_id];
+
+        /* Move invariant instructions to preheader (before the jump) */
+        IRInstr *ph_insert_point = ph->last;  /* the jump instruction */
+
+        for (int i = 0; i < loop->body_count; i++) {
+            int b = loop->body[i];
+            IRBlock *block = func->blocks[b];
+            IRInstr *prev = NULL;
+            IRInstr *instr = block->first;
+            while (instr) {
+                IRInstr *next = instr->next;
+                if (instr->dst.kind == IR_OPERAND_VREG &&
+                    instr->dst.val.vreg >= 0 &&
+                    instr->dst.val.vreg < nv &&
+                    is_invariant[instr->dst.val.vreg]) {
+                    /* Remove from current block */
+                    if (prev) {
+                        prev->next = next;
+                    } else {
+                        block->first = next;
+                    }
+                    if (instr == block->last) {
+                        block->last = prev;
+                    }
+                    block->instr_count--;
+
+                    /* Insert before the jump in preheader */
+                    instr->next = ph_insert_point;
+                    if (ph->first == ph_insert_point) {
+                        ph->first = instr;
+                    } else {
+                        /* Find the instruction before ph_insert_point */
+                        IRInstr *scan = ph->first;
+                        while (scan && scan->next != ph_insert_point)
+                            scan = scan->next;
+                        if (scan) scan->next = instr;
+                    }
+                    ph->instr_count++;
+                    opt_count++;
+
+                    /* Don't update prev — it stays the same */
+                } else {
+                    prev = instr;
+                }
+                instr = next;
+            }
+        }
+    }
+
+    free(is_invariant);
+    ir_free_loop_info(li);
+    (void)opt_count;
+}
+
+void ir_licm_program(IRProgram *prog) {
+    if (!prog) return;
+    for (int i = 0; i < prog->func_count; i++) {
+        ir_licm(prog->functions[i]);
+    }
+}
+
+/* ================================================================== */
+/* Optimization Pass: Linear Scan Register Allocation                 */
+/* ================================================================== */
+
+/*
+ * Compute liveness intervals for each virtual register and assign
+ * physical registers using a linear scan algorithm.
+ *
+ * Physical registers (System V AMD64 ABI callee-saved & caller-saved):
+ *   Allocatable GPRs: rax, rcx, rdx, rsi, rdi, r8-r11 (caller-saved)
+ *                     rbx, r12-r15 (callee-saved)
+ *   Excluded: rsp (stack pointer), rbp (frame pointer)
+ *
+ * Each vreg gets either a physical register or a spill slot.
+ * Results stored in IRFunction's regalloc arrays.
+ */
+
+#define RA_NUM_REGS 14    /* Number of allocatable GPRs */
+
+/* Physical register IDs (matching x86_64 encoding) */
+typedef enum {
+    RA_RAX = 0, RA_RCX = 1, RA_RDX = 2, RA_RBX = 3,
+    RA_RSI = 6, RA_RDI = 7,
+    RA_R8 = 8,  RA_R9 = 9,  RA_R10 = 10, RA_R11 = 11,
+    RA_R12 = 12, RA_R13 = 13, RA_R14 = 14, RA_R15 = 15,
+    RA_NONE = -1, RA_SPILL = -2
+} RAPhysReg;
+
+/* Map allocatable register index → physical register */
+static const int ra_alloc_regs[RA_NUM_REGS] = {
+    RA_RAX, RA_RCX, RA_RDX, RA_RBX, RA_RSI, RA_RDI,
+    RA_R8, RA_R9, RA_R10, RA_R11, RA_R12, RA_R13, RA_R14, RA_R15
+};
+
+static const char *ra_reg_name(int phys_reg) {
+    switch (phys_reg) {
+    case RA_RAX: return "rax"; case RA_RCX: return "rcx";
+    case RA_RDX: return "rdx"; case RA_RBX: return "rbx";
+    case RA_RSI: return "rsi"; case RA_RDI: return "rdi";
+    case RA_R8:  return "r8";  case RA_R9:  return "r9";
+    case RA_R10: return "r10"; case RA_R11: return "r11";
+    case RA_R12: return "r12"; case RA_R13: return "r13";
+    case RA_R14: return "r14"; case RA_R15: return "r15";
+    default: return "spill";
+    }
+}
+
+/* Liveness interval: [start, end) in linear instruction order */
+typedef struct {
+    int vreg;
+    int start;     /* first instruction index where vreg is defined */
+    int end;       /* last instruction index where vreg is used */
+    int phys_reg;  /* assigned physical register, or RA_SPILL */
+    int spill_slot;/* spill slot index (-1 if not spilled) */
+} RAInterval;
+
+/* Compute linear instruction positions and liveness intervals. */
+static RAInterval *ra_compute_intervals(IRFunction *func, int *out_count) {
+    int nv = func->next_vreg;
+    *out_count = 0;
+    if (nv == 0) return NULL;
+
+    /* Assign linear positions to instructions */
+    int pos = 0;
+
+    /* Start/end for each vreg. -1 means undefined. */
+    int *start = (int *)malloc(nv * sizeof(int));
+    int *end   = (int *)malloc(nv * sizeof(int));
+    for (int i = 0; i < nv; i++) { start[i] = -1; end[i] = -1; }
+
+    pos = 0;
+    for (int b = 0; b < func->block_count; b++) {
+        for (IRInstr *instr = func->blocks[b]->first; instr;
+             instr = instr->next) {
+            /* Record def */
+            if (instr->dst.kind == IR_OPERAND_VREG) {
+                int v = instr->dst.val.vreg;
+                if (v >= 0 && v < nv) {
+                    if (start[v] < 0) start[v] = pos;
+                    if (pos > end[v]) end[v] = pos;
+                }
+            }
+            /* Record uses */
+            if (instr->src1.kind == IR_OPERAND_VREG) {
+                int v = instr->src1.val.vreg;
+                if (v >= 0 && v < nv) {
+                    if (start[v] < 0) start[v] = pos;
+                    if (pos > end[v]) end[v] = pos;
+                }
+            }
+            if (instr->src2.kind == IR_OPERAND_VREG) {
+                int v = instr->src2.val.vreg;
+                if (v >= 0 && v < nv) {
+                    if (start[v] < 0) start[v] = pos;
+                    if (pos > end[v]) end[v] = pos;
+                }
+            }
+            /* PHI args */
+            if (instr->opcode == IR_PHI) {
+                for (int p = 0; p < instr->phi_count; p++) {
+                    if (instr->phi_args[p].kind == IR_OPERAND_VREG) {
+                        int v = instr->phi_args[p].val.vreg;
+                        if (v >= 0 && v < nv) {
+                            if (start[v] < 0) start[v] = pos;
+                            if (pos > end[v]) end[v] = pos;
+                        }
+                    }
+                }
+            }
+            pos++;
+        }
+    }
+
+    /* Build interval array (only for vregs that are actually used) */
+    RAInterval *intervals = (RAInterval *)ir_alloc(nv * sizeof(RAInterval));
+    int count = 0;
+    for (int v = 0; v < nv; v++) {
+        if (start[v] >= 0) {
+            intervals[count].vreg = v;
+            intervals[count].start = start[v];
+            intervals[count].end = end[v];
+            intervals[count].phys_reg = RA_NONE;
+            intervals[count].spill_slot = -1;
+            count++;
+        }
+    }
+
+    free(start);
+    free(end);
+    *out_count = count;
+    return intervals;
+}
+
+/* Sort intervals by start position (insertion sort for small sizes) */
+static void ra_sort_intervals(RAInterval *intervals, int count) {
+    for (int i = 1; i < count; i++) {
+        RAInterval key = intervals[i];
+        int j = i - 1;
+        while (j >= 0 && intervals[j].start > key.start) {
+            intervals[j + 1] = intervals[j];
+            j--;
+        }
+        intervals[j + 1] = key;
+    }
+}
+
+void ir_regalloc(IRFunction *func) {
+    if (!func || func->block_count == 0) return;
+
+    int interval_count;
+    RAInterval *intervals = ra_compute_intervals(func, &interval_count);
+    if (!intervals || interval_count == 0) {
+        free(intervals);
+        return;
+    }
+
+    ra_sort_intervals(intervals, interval_count);
+
+    /* Active list: intervals currently assigned to a register */
+    int *active = (int *)ir_alloc(interval_count * sizeof(int));
+    int active_count = 0;
+
+    /* Track which physical registers are free */
+    int reg_free[RA_NUM_REGS];
+    for (int i = 0; i < RA_NUM_REGS; i++) reg_free[i] = 1;
+
+    int next_spill_slot = 0;
+
+    for (int i = 0; i < interval_count; i++) {
+        RAInterval *cur = &intervals[i];
+
+        /* Expire old intervals: remove active intervals that end before
+         * the current interval starts */
+        int new_active_count = 0;
+        for (int a = 0; a < active_count; a++) {
+            RAInterval *act = &intervals[active[a]];
+            if (act->end < cur->start) {
+                /* Free the register */
+                if (act->phys_reg >= 0) {
+                    for (int r = 0; r < RA_NUM_REGS; r++) {
+                        if (ra_alloc_regs[r] == act->phys_reg) {
+                            reg_free[r] = 1;
+                            break;
+                        }
+                    }
+                }
+            } else {
+                active[new_active_count++] = active[a];
+            }
+        }
+        active_count = new_active_count;
+
+        /* Try to allocate a free register */
+        int allocated = 0;
+        for (int r = 0; r < RA_NUM_REGS; r++) {
+            if (reg_free[r]) {
+                cur->phys_reg = ra_alloc_regs[r];
+                reg_free[r] = 0;
+                active[active_count++] = i;
+                allocated = 1;
+                break;
+            }
+        }
+
+        if (!allocated) {
+            /* Spill: find the active interval with the farthest end point */
+            int spill_idx = -1;
+            int max_end = -1;
+            for (int a = 0; a < active_count; a++) {
+                if (intervals[active[a]].end > max_end) {
+                    max_end = intervals[active[a]].end;
+                    spill_idx = a;
+                }
+            }
+
+            if (spill_idx >= 0 && max_end > cur->end) {
+                /* Spill the longest-lived active interval */
+                RAInterval *victim = &intervals[active[spill_idx]];
+                cur->phys_reg = victim->phys_reg;
+                victim->phys_reg = RA_SPILL;
+                victim->spill_slot = next_spill_slot++;
+                active[spill_idx] = i;  /* replace victim with cur */
+            } else {
+                /* Spill current interval */
+                cur->phys_reg = RA_SPILL;
+                cur->spill_slot = next_spill_slot++;
+            }
+        }
+    }
+
+    /* Store allocation results on the function */
+    func->regalloc = (int *)ir_alloc(func->next_vreg * sizeof(int));
+    func->regalloc_spill = (int *)ir_alloc(func->next_vreg * sizeof(int));
+    func->spill_count = next_spill_slot;
+    func->has_regalloc = 1;
+
+    for (int v = 0; v < func->next_vreg; v++) {
+        func->regalloc[v] = RA_SPILL;
+        func->regalloc_spill[v] = -1;
+    }
+
+    for (int i = 0; i < interval_count; i++) {
+        int v = intervals[i].vreg;
+        func->regalloc[v] = intervals[i].phys_reg;
+        func->regalloc_spill[v] = intervals[i].spill_slot;
+    }
+
+    free(active);
+    free(intervals);
+}
+
+void ir_regalloc_program(IRProgram *prog) {
+    if (!prog) return;
+    for (int i = 0; i < prog->func_count; i++) {
+        ir_regalloc(prog->functions[i]);
+    }
+}
+
+/* ================================================================== */
+/* Combined optimization driver                                       */
+/* ================================================================== */
+
+void ir_optimize_function(IRFunction *func) {
+    if (!func || func->block_count == 0) return;
+
+    /* 1. Sparse Conditional Constant Propagation */
+    ir_sccp(func);
+
+    /* 2. Global Value Numbering / CSE */
+    ir_gvn_cse(func);
+
+    /* 3. Loop-Invariant Code Motion */
+    ir_licm(func);
+
+    /* 4. Register allocation */
+    ir_regalloc(func);
+}
+
+void ir_optimize_program(IRProgram *prog) {
+    if (!prog) return;
+    for (int i = 0; i < prog->func_count; i++) {
+        ir_optimize_function(prog->functions[i]);
+    }
+}
+
+/* ================================================================== */
 /* Debug Output                                                       */
 /* ================================================================== */
 
@@ -2695,9 +3889,41 @@ void ir_dump_function(IRFunction *func, FILE *out) {
         fprintf(out, "\n");
     }
 
-    fprintf(out, "  ; %d blocks, %d vregs%s\n\n",
+    fprintf(out, "  ; %d blocks, %d vregs%s\n",
             func->block_count, func->next_vreg,
             func->is_ssa ? " (SSA)" : "");
+
+    /* Print register allocation summary */
+    if (func->has_regalloc) {
+        int allocated = 0, spilled = 0;
+        for (int v = 0; v < func->next_vreg; v++) {
+            if (func->regalloc[v] >= 0) allocated++;
+            else if (func->regalloc[v] == -2) spilled++;
+        }
+        fprintf(out, "  ; regalloc: %d in regs, %d spilled (%d slots)\n",
+                allocated, spilled, func->spill_count);
+        /* Show a few assignments */
+        int shown = 0;
+        fprintf(out, "  ; assign:");
+        for (int v = 0; v < func->next_vreg && shown < 16; v++) {
+            if (func->regalloc[v] >= 0) {
+                fprintf(out, " t%d=%s", v, ra_reg_name(func->regalloc[v]));
+                shown++;
+            }
+        }
+        if (spilled > 0) {
+            for (int v = 0; v < func->next_vreg && shown < 20; v++) {
+                if (func->regalloc[v] == -2) {
+                    fprintf(out, " t%d=spill[%d]", v,
+                            func->regalloc_spill[v]);
+                    shown++;
+                }
+            }
+        }
+        fprintf(out, "\n");
+    }
+
+    fprintf(out, "\n");
 
     /* Print all blocks */
     for (int i = 0; i < func->block_count; i++) {
@@ -2790,6 +4016,8 @@ void ir_free_function(IRFunction *func) {
     }
     free(func->vars);
     free(func->ssa_param_vregs);
+    free(func->regalloc);
+    free(func->regalloc_spill);
     free(func);
 }
 
