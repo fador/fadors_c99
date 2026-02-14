@@ -22,6 +22,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* strndup is not available on MSVC */
+#ifdef _WIN32
+static char *strndup(const char *s, size_t n) {
+    size_t len = strlen(s);
+    if (len > n) len = n;
+    char *p = (char *)malloc(len + 1);
+    if (p) { memcpy(p, s, len); p[len] = '\0'; }
+    return p;
+}
+#endif
+
 /* ------------------------------------------------------------------ */
 /*  Constants                                                         */
 /* ------------------------------------------------------------------ */

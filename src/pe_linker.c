@@ -307,6 +307,14 @@ static int read_coff_object(PELinker *l, const unsigned char *data,
             continue;
         }
 
+        /* Skip CodeView debug sections (.debug$S, .debug$T) —
+         * they carry debug info for PDB generation, which we don't
+         * support yet. Skipping prevents unknown-relocation errors. */
+        if (strncmp(sec_name, ".debug$", 7) == 0) {
+            sec_id[i] = SEC_UNDEF;
+            continue;
+        }
+
         if (strcmp(sec_name, ".text") == 0 ||
             (chars & IMAGE_SCN_CNT_CODE)) {
             buffer_pad(&l->text, 16);

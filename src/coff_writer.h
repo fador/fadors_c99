@@ -87,6 +87,11 @@ typedef struct {
     size_t data_relocs_count;
     size_t data_relocs_capacity;
 
+    /* Relocations for .debug$S section */
+    RelocEntry *debugs_relocs;
+    size_t debugs_relocs_count;
+    size_t debugs_relocs_capacity;
+
     /* Debug info (populated when -g is active) */
     char *debug_source_file;         /* source filename for .debug_line */
     char *debug_comp_dir;            /* compilation directory */
