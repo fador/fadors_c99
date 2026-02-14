@@ -932,6 +932,7 @@ static void write_sleb128(Buffer *b, int64_t val) {
 #define DW_FORM_data4           0x06
 #define DW_FORM_data8           0x07
 #define DW_FORM_string          0x08
+#define DW_FORM_strp            0x0e
 #define DW_FORM_flag            0x0c
 #define DW_FORM_sec_offset      0x17
 #define DW_FORM_exprloc         0x18
@@ -962,7 +963,27 @@ static void write_sleb128(Buffer *b, int64_t val) {
 #define DW_LNE_set_address      2
 
 /*
- * Build DWARF 4 .debug_abbrev, .debug_info, and .debug_line sections.
+ * Add a string to the .debug_str pool and return its offset.
+ * If the string already exists, return the existing offset.
+ * Simple linear search — adequate for the small number of strings we emit.
+ */
+static uint32_t debug_str_add(Buffer *str_pool, const char *s) {
+    size_t slen = strlen(s);
+    /* Search for existing occurrence */
+    size_t pos = 0;
+    while (pos < str_pool->size) {
+        if (strcmp((const char *)(str_pool->data + pos), s) == 0)
+            return (uint32_t)pos;
+        pos += strlen((const char *)(str_pool->data + pos)) + 1;
+    }
+    uint32_t off = (uint32_t)str_pool->size;
+    buffer_write_bytes(str_pool, s, slen + 1);
+    return off;
+}
+
+/*
+ * Build DWARF 4 .debug_abbrev, .debug_info, .debug_line, .debug_str,
+ * and .debug_aranges sections.
  * text_vaddr is the virtual address of the .text segment in the final
  * executable.
  *
@@ -979,11 +1000,15 @@ static void build_dwarf_sections(Linker *l, uint64_t text_vaddr,
                                   uint64_t text_size,
                                   Buffer *debug_abbrev,
                                   Buffer *debug_info,
-                                  Buffer *debug_line) {
+                                  Buffer *debug_line,
+                                  Buffer *debug_str,
+                                  Buffer *debug_aranges) {
     size_t i;
     buffer_init(debug_abbrev);
     buffer_init(debug_info);
     buffer_init(debug_line);
+    buffer_init(debug_str);
+    buffer_init(debug_aranges);
 
     int has_funcs = (l->debug_func_count > 0);
 
@@ -993,10 +1018,10 @@ static void build_dwarf_sections(Linker *l, uint64_t text_vaddr,
     write_uleb128(debug_abbrev, 1);
     write_uleb128(debug_abbrev, DW_TAG_compile_unit);
     buffer_write_byte(debug_abbrev, has_funcs ? DW_CHILDREN_yes : DW_CHILDREN_no);
-    write_uleb128(debug_abbrev, DW_AT_producer);  write_uleb128(debug_abbrev, DW_FORM_string);
+    write_uleb128(debug_abbrev, DW_AT_producer);  write_uleb128(debug_abbrev, DW_FORM_strp);
     write_uleb128(debug_abbrev, DW_AT_language);   write_uleb128(debug_abbrev, DW_FORM_data2);
-    write_uleb128(debug_abbrev, DW_AT_name);       write_uleb128(debug_abbrev, DW_FORM_string);
-    write_uleb128(debug_abbrev, DW_AT_comp_dir);   write_uleb128(debug_abbrev, DW_FORM_string);
+    write_uleb128(debug_abbrev, DW_AT_name);       write_uleb128(debug_abbrev, DW_FORM_strp);
+    write_uleb128(debug_abbrev, DW_AT_comp_dir);   write_uleb128(debug_abbrev, DW_FORM_strp);
     write_uleb128(debug_abbrev, DW_AT_low_pc);     write_uleb128(debug_abbrev, DW_FORM_addr);
     write_uleb128(debug_abbrev, DW_AT_high_pc);    write_uleb128(debug_abbrev, DW_FORM_data8);
     write_uleb128(debug_abbrev, DW_AT_stmt_list);  write_uleb128(debug_abbrev, DW_FORM_sec_offset);
@@ -1007,7 +1032,7 @@ static void build_dwarf_sections(Linker *l, uint64_t text_vaddr,
         write_uleb128(debug_abbrev, 2);
         write_uleb128(debug_abbrev, DW_TAG_base_type);
         buffer_write_byte(debug_abbrev, DW_CHILDREN_no);
-        write_uleb128(debug_abbrev, DW_AT_name);      write_uleb128(debug_abbrev, DW_FORM_string);
+        write_uleb128(debug_abbrev, DW_AT_name);      write_uleb128(debug_abbrev, DW_FORM_strp);
         write_uleb128(debug_abbrev, DW_AT_encoding);   write_uleb128(debug_abbrev, DW_FORM_data1);
         write_uleb128(debug_abbrev, DW_AT_byte_size);  write_uleb128(debug_abbrev, DW_FORM_data1);
         write_uleb128(debug_abbrev, 0); write_uleb128(debug_abbrev, 0);
@@ -1023,7 +1048,7 @@ static void build_dwarf_sections(Linker *l, uint64_t text_vaddr,
         write_uleb128(debug_abbrev, 4);
         write_uleb128(debug_abbrev, DW_TAG_subprogram);
         buffer_write_byte(debug_abbrev, DW_CHILDREN_yes);
-        write_uleb128(debug_abbrev, DW_AT_name);       write_uleb128(debug_abbrev, DW_FORM_string);
+        write_uleb128(debug_abbrev, DW_AT_name);       write_uleb128(debug_abbrev, DW_FORM_strp);
         write_uleb128(debug_abbrev, DW_AT_low_pc);     write_uleb128(debug_abbrev, DW_FORM_addr);
         write_uleb128(debug_abbrev, DW_AT_high_pc);    write_uleb128(debug_abbrev, DW_FORM_data8);
         write_uleb128(debug_abbrev, DW_AT_frame_base); write_uleb128(debug_abbrev, DW_FORM_exprloc);
@@ -1035,7 +1060,7 @@ static void build_dwarf_sections(Linker *l, uint64_t text_vaddr,
         write_uleb128(debug_abbrev, 5);
         write_uleb128(debug_abbrev, DW_TAG_formal_parameter);
         buffer_write_byte(debug_abbrev, DW_CHILDREN_no);
-        write_uleb128(debug_abbrev, DW_AT_name);     write_uleb128(debug_abbrev, DW_FORM_string);
+        write_uleb128(debug_abbrev, DW_AT_name);     write_uleb128(debug_abbrev, DW_FORM_strp);
         write_uleb128(debug_abbrev, DW_AT_type);     write_uleb128(debug_abbrev, DW_FORM_ref4);
         write_uleb128(debug_abbrev, DW_AT_location); write_uleb128(debug_abbrev, DW_FORM_exprloc);
         write_uleb128(debug_abbrev, 0); write_uleb128(debug_abbrev, 0);
@@ -1044,7 +1069,7 @@ static void build_dwarf_sections(Linker *l, uint64_t text_vaddr,
         write_uleb128(debug_abbrev, 6);
         write_uleb128(debug_abbrev, DW_TAG_variable);
         buffer_write_byte(debug_abbrev, DW_CHILDREN_no);
-        write_uleb128(debug_abbrev, DW_AT_name);     write_uleb128(debug_abbrev, DW_FORM_string);
+        write_uleb128(debug_abbrev, DW_AT_name);     write_uleb128(debug_abbrev, DW_FORM_strp);
         write_uleb128(debug_abbrev, DW_AT_type);     write_uleb128(debug_abbrev, DW_FORM_ref4);
         write_uleb128(debug_abbrev, DW_AT_location); write_uleb128(debug_abbrev, DW_FORM_exprloc);
         write_uleb128(debug_abbrev, 0); write_uleb128(debug_abbrev, 0);
@@ -1053,7 +1078,7 @@ static void build_dwarf_sections(Linker *l, uint64_t text_vaddr,
         write_uleb128(debug_abbrev, 7);
         write_uleb128(debug_abbrev, DW_TAG_unspecified_type);
         buffer_write_byte(debug_abbrev, DW_CHILDREN_no);
-        write_uleb128(debug_abbrev, DW_AT_name); write_uleb128(debug_abbrev, DW_FORM_string);
+        write_uleb128(debug_abbrev, DW_AT_name); write_uleb128(debug_abbrev, DW_FORM_strp);
         write_uleb128(debug_abbrev, 0); write_uleb128(debug_abbrev, 0);
     }
 
@@ -1070,22 +1095,22 @@ static void build_dwarf_sections(Linker *l, uint64_t text_vaddr,
     /* CU DIE: abbrev code 1 = compile_unit */
     write_uleb128(debug_info, 1);
 
-    /* DW_AT_producer */
+    /* DW_AT_producer (strp) */
     {
         const char *producer = "fadors99 C compiler";
-        buffer_write_bytes(debug_info, producer, strlen(producer) + 1);
+        buffer_write_dword(debug_info, debug_str_add(debug_str, producer));
     }
     /* DW_AT_language */
     buffer_write_word(debug_info, DW_LANG_C99);
-    /* DW_AT_name */
+    /* DW_AT_name (strp) */
     {
         const char *name = l->debug_source_file ? l->debug_source_file : "unknown";
-        buffer_write_bytes(debug_info, name, strlen(name) + 1);
+        buffer_write_dword(debug_info, debug_str_add(debug_str, name));
     }
-    /* DW_AT_comp_dir */
+    /* DW_AT_comp_dir (strp) */
     {
         const char *cdir = l->debug_comp_dir ? l->debug_comp_dir : ".";
-        buffer_write_bytes(debug_info, cdir, strlen(cdir) + 1);
+        buffer_write_dword(debug_info, debug_str_add(debug_str, cdir));
     }
     /* DW_AT_low_pc */
     buffer_write_qword(debug_info, text_vaddr);
@@ -1152,7 +1177,7 @@ static void build_dwarf_sections(Linker *l, uint64_t text_vaddr,
             if (type_slots[ts].tk == DBGTK_VOID) {
                 /* DW_TAG_unspecified_type, abbrev 7 */
                 write_uleb128(debug_info, 7);
-                buffer_write_bytes(debug_info, "void", 5);
+                buffer_write_dword(debug_info, debug_str_add(debug_str, "void"));
             } else if (type_slots[ts].tk == DBGTK_PTR) {
                 /* DW_TAG_pointer_type, abbrev 3 */
                 write_uleb128(debug_info, 3);
@@ -1180,7 +1205,7 @@ static void build_dwarf_sections(Linker *l, uint64_t text_vaddr,
                     case DBGTK_ENUM:       tname = "int";                enc = DW_ATE_signed;       break;
                     default:               tname = "int";                enc = DW_ATE_signed;       break;
                 }
-                buffer_write_bytes(debug_info, tname, strlen(tname) + 1);
+                buffer_write_dword(debug_info, debug_str_add(debug_str, tname));
                 buffer_write_byte(debug_info, enc);
                 buffer_write_byte(debug_info, (uint8_t)(type_slots[ts].tsz > 0 ? type_slots[ts].tsz : 4));
             }
@@ -1192,8 +1217,8 @@ static void build_dwarf_sections(Linker *l, uint64_t text_vaddr,
 
             /* DW_TAG_subprogram, abbrev 4 */
             write_uleb128(debug_info, 4);
-            /* DW_AT_name */
-            buffer_write_bytes(debug_info, fn->name, strlen(fn->name) + 1);
+            /* DW_AT_name (strp) */
+            buffer_write_dword(debug_info, debug_str_add(debug_str, fn->name));
             /* DW_AT_low_pc */
             buffer_write_qword(debug_info, text_vaddr + fn->start_addr);
             /* DW_AT_high_pc (data8 = size) */
@@ -1219,8 +1244,8 @@ static void build_dwarf_sections(Linker *l, uint64_t text_vaddr,
                 LinkDebugVar *v = &fn->vars[vi2];
                 /* abbrev 5 = formal_parameter, abbrev 6 = variable */
                 write_uleb128(debug_info, v->is_param ? 5 : 6);
-                /* DW_AT_name */
-                buffer_write_bytes(debug_info, v->name, strlen(v->name) + 1);
+                /* DW_AT_name (strp) */
+                buffer_write_dword(debug_info, debug_str_add(debug_str, v->name));
                 /* DW_AT_type: ref4 */
                 {
                     uint32_t var_type_off = 0;
@@ -1364,6 +1389,38 @@ static void build_dwarf_sections(Linker *l, uint64_t text_vaddr,
     {
         uint32_t unit_len = (uint32_t)(debug_line->size - line_unit_off - 4);
         memcpy(debug_line->data + line_unit_off, &unit_len, 4);
+    }
+
+    /* ---- .debug_aranges ---- */
+    /* DWARF 4 address range lookup table.
+     * Header: unit_length(4), version(2), debug_info_offset(4),
+     *         address_size(1), segment_size(1)
+     * Padding to 2*address_size alignment, then tuples of (addr, length),
+     * terminated by a (0, 0) tuple.
+     */
+    {
+        size_t ar_len_off = debug_aranges->size;
+        buffer_write_dword(debug_aranges, 0); /* placeholder for unit_length */
+        buffer_write_word(debug_aranges, 2);  /* version = 2 */
+        buffer_write_dword(debug_aranges, 0); /* debug_info_offset = 0 (first CU) */
+        buffer_write_byte(debug_aranges, 8);  /* address_size = 8 */
+        buffer_write_byte(debug_aranges, 0);  /* segment_size = 0 */
+
+        /* Pad to 2*address_size (16) boundary relative to start of header */
+        /* Header so far = 4+2+4+1+1 = 12 bytes. Need to reach 16. */
+        buffer_write_dword(debug_aranges, 0); /* 4 bytes padding → 16 */
+
+        /* Text range tuple */
+        buffer_write_qword(debug_aranges, text_vaddr);
+        buffer_write_qword(debug_aranges, text_size);
+
+        /* Terminator tuple */
+        buffer_write_qword(debug_aranges, 0);
+        buffer_write_qword(debug_aranges, 0);
+
+        /* Patch unit_length */
+        uint32_t ar_len = (uint32_t)(debug_aranges->size - ar_len_off - 4);
+        memcpy(debug_aranges->data + ar_len_off, &ar_len, 4);
     }
 }
 
@@ -1742,14 +1799,17 @@ int linker_link(Linker *l, const char *output_path) {
     }
 
     /* ---- 5b. Build DWARF debug sections (if -g data present) ----- */
-    Buffer debug_abbrev, debug_info, debug_line;
+    Buffer debug_abbrev, debug_info, debug_line, debug_str, debug_aranges;
     int has_debug_output = (l->debug_line_count > 0 && l->debug_source_file);
     buffer_init(&debug_abbrev);
     buffer_init(&debug_info);
     buffer_init(&debug_line);
+    buffer_init(&debug_str);
+    buffer_init(&debug_aranges);
     if (has_debug_output) {
         build_dwarf_sections(l, text_vaddr, text_size,
-                             &debug_abbrev, &debug_info, &debug_line);
+                             &debug_abbrev, &debug_info, &debug_line,
+                             &debug_str, &debug_aranges);
     }
 
     /* ---- 6. Patch _start call displacement ----------------------- */
@@ -1846,12 +1906,14 @@ int linker_link(Linker *l, const char *output_path) {
 
     /* --- Compute debug / section header layout ---- */
     uint64_t dbg_abbrev_foff = 0, dbg_info_foff = 0, dbg_line_foff = 0;
+    uint64_t dbg_str_foff = 0, dbg_aranges_foff = 0;
     uint64_t dbg_shstrtab_foff = 0;
     uint64_t shdr_foff = 0;
     int shnum = 0;
     int shstrtab_idx = 0;
     uint32_t sn_text = 0, sn_data = 0;
     uint32_t sn_dabbrev = 0, sn_dinfo = 0, sn_dline = 0, sn_shstrtab = 0;
+    uint32_t sn_dstr = 0, sn_daranges = 0;
     uint32_t sn_symtab = 0, sn_strtab = 0;
 
     Buffer link_shstrtab;
@@ -1874,14 +1936,16 @@ int linker_link(Linker *l, const char *output_path) {
          *   3: .debug_abbrev
          *   4: .debug_info
          *   5: .debug_line
-         *   6: .symtab
-         *   7: .strtab
-         *   8: .shstrtab
+         *   6: .debug_str
+         *   7: .debug_aranges
+         *   8: .symtab
+         *   9: .strtab
+         *  10: .shstrtab
          */
-        shnum = 9;
-        shstrtab_idx = 8;
-        symtab_shidx = 6;
-        strtab_shidx = 7;
+        shnum = 11;
+        shstrtab_idx = 10;
+        symtab_shidx = 8;
+        strtab_shidx = 9;
 
         buffer_write_byte(&link_shstrtab, 0);
         sn_text = (uint32_t)link_shstrtab.size;
@@ -1894,6 +1958,10 @@ int linker_link(Linker *l, const char *output_path) {
         buffer_write_bytes(&link_shstrtab, ".debug_info", 12);
         sn_dline = (uint32_t)link_shstrtab.size;
         buffer_write_bytes(&link_shstrtab, ".debug_line", 12);
+        sn_dstr = (uint32_t)link_shstrtab.size;
+        buffer_write_bytes(&link_shstrtab, ".debug_str", 11);
+        sn_daranges = (uint32_t)link_shstrtab.size;
+        buffer_write_bytes(&link_shstrtab, ".debug_aranges", 15);
         sn_symtab = (uint32_t)link_shstrtab.size;
         buffer_write_bytes(&link_shstrtab, ".symtab", 8);
         sn_strtab = (uint32_t)link_shstrtab.size;
@@ -1963,6 +2031,10 @@ int linker_link(Linker *l, const char *output_path) {
         dbg_info_foff = doff;   doff += debug_info.size;
         doff = lnk_align_up(doff, 4);
         dbg_line_foff = doff;   doff += debug_line.size;
+        doff = lnk_align_up(doff, 1);
+        dbg_str_foff = doff;    doff += debug_str.size;
+        doff = lnk_align_up(doff, 8);
+        dbg_aranges_foff = doff; doff += debug_aranges.size;
         doff = lnk_align_up(doff, 8);
         dbg_symtab_foff = doff; doff += link_symtab.size;
         dbg_strtab_foff = doff; doff += link_strtab.size;
@@ -2116,6 +2188,14 @@ int linker_link(Linker *l, const char *output_path) {
         { long cur = ftell(f); while ((uint64_t)cur < dbg_line_foff) { fputc(0, f); cur++; } }
         fwrite(debug_line.data, 1, debug_line.size, f);
 
+        /* .debug_str */
+        { long cur = ftell(f); while ((uint64_t)cur < dbg_str_foff) { fputc(0, f); cur++; } }
+        fwrite(debug_str.data, 1, debug_str.size, f);
+
+        /* .debug_aranges */
+        { long cur = ftell(f); while ((uint64_t)cur < dbg_aranges_foff) { fputc(0, f); cur++; } }
+        fwrite(debug_aranges.data, 1, debug_aranges.size, f);
+
         /* .symtab */
         { long cur = ftell(f); while ((uint64_t)cur < dbg_symtab_foff) { fputc(0, f); cur++; } }
         fwrite(link_symtab.data, 1, link_symtab.size, f);
@@ -2200,7 +2280,33 @@ int linker_link(Linker *l, const char *output_path) {
             fwrite(&sh, sizeof(sh), 1, f);
         }
 
-        /* Section 6: .symtab */
+        /* Section 6: .debug_str */
+        {
+            Elf64_Shdr sh;
+            memset(&sh, 0, sizeof(sh));
+            sh.sh_name      = sn_dstr;
+            sh.sh_type      = ELF_SHT_PROGBITS;
+            sh.sh_flags     = ELF_SHF_MERGE | ELF_SHF_STRINGS;
+            sh.sh_offset    = dbg_str_foff;
+            sh.sh_size      = debug_str.size;
+            sh.sh_addralign = 1;
+            sh.sh_entsize   = 1;
+            fwrite(&sh, sizeof(sh), 1, f);
+        }
+
+        /* Section 7: .debug_aranges */
+        {
+            Elf64_Shdr sh;
+            memset(&sh, 0, sizeof(sh));
+            sh.sh_name      = sn_daranges;
+            sh.sh_type      = ELF_SHT_PROGBITS;
+            sh.sh_offset    = dbg_aranges_foff;
+            sh.sh_size      = debug_aranges.size;
+            sh.sh_addralign = 8;
+            fwrite(&sh, sizeof(sh), 1, f);
+        }
+
+        /* Section 8: .symtab */
         {
             Elf64_Shdr sh;
             memset(&sh, 0, sizeof(sh));
@@ -2215,7 +2321,7 @@ int linker_link(Linker *l, const char *output_path) {
             fwrite(&sh, sizeof(sh), 1, f);
         }
 
-        /* Section 7: .strtab */
+        /* Section 9: .strtab */
         {
             Elf64_Shdr sh;
             memset(&sh, 0, sizeof(sh));
@@ -2227,7 +2333,7 @@ int linker_link(Linker *l, const char *output_path) {
             fwrite(&sh, sizeof(sh), 1, f);
         }
 
-        /* Section 8: .shstrtab */
+        /* Section 10: .shstrtab */
         {
             Elf64_Shdr sh;
             memset(&sh, 0, sizeof(sh));
@@ -2265,6 +2371,8 @@ int linker_link(Linker *l, const char *output_path) {
     buffer_free(&debug_abbrev);
     buffer_free(&debug_info);
     buffer_free(&debug_line);
+    buffer_free(&debug_str);
+    buffer_free(&debug_aranges);
     buffer_free(&link_shstrtab);
     buffer_free(&link_symtab);
     buffer_free(&link_strtab);

@@ -32,6 +32,8 @@
 #define ELF_SHF_WRITE     0x1
 #define ELF_SHF_ALLOC     0x2
 #define ELF_SHF_EXECINSTR 0x4
+#define ELF_SHF_MERGE     0x10
+#define ELF_SHF_STRINGS   0x20
 #define ELF_SHF_INFO_LINK 0x40
 
 /* Special section indices */

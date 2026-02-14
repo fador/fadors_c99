@@ -30,7 +30,7 @@ A self-hosting C99-standard compliant compiler written in C99, targeting x86_64 
 ### Backends / Code Generation
 - **Integrated Pipeline**: Full compilation to executable without external tools on Linux. Windows PE linker also built-in.
 - **Built-in x86-64 Encoder**: Direct machine code generation — no external assembler needed. Supports all GPR registers (rax–r15), XMM0–XMM15, REX prefixes, ModR/M, SIB encoding.
-- **Custom ELF Linker**: Built-in static linker for Linux that merges `.o` files and static archives (`.a`) into executables. Includes a `_start` stub (no CRT needed) and supports dynamic linking against `libc.so.6` via PLT/GOT generation. Generates DWARF 4 debug sections (`.debug_info`, `.debug_abbrev`, `.debug_line`) when `-g` is used.
+- **Custom ELF Linker**: Built-in static linker for Linux that merges `.o` files and static archives (`.a`) into executables. Includes a `_start` stub (no CRT needed) and supports dynamic linking against `libc.so.6` via PLT/GOT generation. Generates DWARF 4 debug sections (`.debug_info`, `.debug_abbrev`, `.debug_line`, `.debug_str`, `.debug_aranges`) when `-g` is used.
 - **Custom PE/COFF Linker**: Links COFF `.obj` files into PE executables with DLL import table generation (`kernel32.dll`), `.rdata`, `.data`, `.bss` sections.
 - **Custom COFF Object Writer**: Direct machine code → COFF `.obj` generation on Windows (bypasses MASM).
 - **Custom ELF Object Writer**: Direct machine code → ELF `.o` generation on Linux (bypasses GNU `as`).
@@ -298,8 +298,8 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [x] **Subprogram DIEs**: `DW_TAG_subprogram` for each function — name, low_pc/high_pc, frame_base, return type, external flag.
 - [x] **Variable DIEs**: `DW_TAG_variable` / `DW_TAG_formal_parameter` with location expressions (`DW_OP_fbreg + SLEB128 offset`) for locals and parameters.
 - [x] **Type DIEs**: `DW_TAG_base_type` for int/char/short/long/float/double and unsigned variants, `DW_TAG_pointer_type`, `DW_TAG_unspecified_type` (void). Type deduplication across all functions.
-- [ ] **`.debug_str` section**: Pooled string table for type/variable/function names.
-- [ ] **`.debug_aranges` section**: Address range lookup table.
+- [x] **`.debug_str` section**: Pooled string table for type/variable/function names, referenced via `DW_FORM_strp`.
+- [x] **`.debug_aranges` section**: Address range lookup table mapping text segment to compilation unit.
 
 #### Phase 2b: COFF / CodeView (Windows)
 - [ ] **`.debug$S` section**: Emit CodeView S_GPROC32 / S_LPROC32 (function symbols), S_LOCAL (local variables), S_REGREL32 (stack-relative locations).
