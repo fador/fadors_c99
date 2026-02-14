@@ -312,9 +312,9 @@ This section outlines the implementation plan for compiler optimization flags (`
 #### Phase 2c: Source-Level Debugging Verification
 - [x] **Test `gdb` step-through**: Compile a test program with `-g`, verify `gdb` can `break main`, `step`, `list`, `info line`.
 - [x] **Test `gdb` variable inspection**: Verify `print` and `info locals` work — `print result` shows 30, `info args` shows a=10 b=20, `info locals` shows x/y/z.
-- [ ] **Test `lldb` step-through**: Same with `lldb` on Linux.
+- [x] **Test `lldb` step-through**: Breakpoints resolve to source file:line, `frame variable` shows typed locals (e.g., `(int) x = 0`), step-over advances correctly, `source list` shows correct code with `->` arrow.
 - [ ] **Test Visual Studio debugging**: Compile with `-g --masm`, verify variable inspection in VS debugger.
-- [ ] **Test source mapping accuracy**: Line-by-line stepping matches actual source code.
+- [x] **Test source mapping accuracy**: Line-by-line stepping matches actual source code. Automated test suite (`test_debug.sh`) verifies 39 checks: DWARF sections, .debug_info content, .debug_str strings, .debug_aranges, .debug_line entries, GDB (breakpoints, locals, args, print, backtrace, stepping), LLDB (breakpoints, frame variable, step-over, source list).
 
 ### Phase 3: `-O1` — Basic Optimizations
 
