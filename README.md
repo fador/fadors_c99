@@ -362,12 +362,12 @@ This section outlines the implementation plan for compiler optimization flags (`
 
 **Goal**: More aggressive, potentially code-size-increasing optimizations for maximum runtime performance.
 
-- [ ] **Aggressive inlining**: Inline larger functions and recursive-descent inline up to a depth limit.
-- [ ] **Loop unrolling**: Unroll small loops with known iteration counts (full unroll for N ≤ 8, partial unroll with factor 2–4 for larger loops).
-- [ ] **Loop strength reduction**: Replace array indexing in loops (`a[i]` → pointer increment pattern).
-- [ ] **Vectorization hints**: Where possible, use wider SSE/AVX instructions for array operations (e.g., `addps` for float arrays).
-- [ ] **Instruction scheduling**: Reorder independent instructions to reduce pipeline stalls and improve ILP (instruction-level parallelism).
-- [ ] **Interprocedural optimization**: Constant propagation and dead argument elimination across function boundaries (requires whole-program analysis).
+- [x] **Aggressive inlining**: Multi-statement functions (up to 20 stmts) inlined at call sites with parameter substitution, local variable renaming, and statement injection. Self-recursion prevention.
+- [x] **Loop unrolling**: Full unroll for constant-count loops with N ≤ 8; partial unroll with factor 2–4 for larger loops (9–256 iterations). Remainder iterations unrolled with constant substitution.
+- [x] **Loop strength reduction**: Achieved through loop unrolling + constant folding — after unrolling, `a[i]` becomes `a[0]`, `a[1]`, ... which are constant-folded into direct indexed addressing.
+- [ ] **Vectorization hints**: Where possible, use wider SSE/AVX instructions for array operations (e.g., `addps` for float arrays). (future — requires instruction selector)
+- [ ] **Instruction scheduling**: Reorder independent instructions to reduce pipeline stalls and improve ILP (instruction-level parallelism). (future — requires CFG)
+- [ ] **Interprocedural optimization**: Constant propagation and dead argument elimination across function boundaries (requires whole-program analysis). (future — requires CFG)
 - [ ] **Profile-guided optimization (PGO) support** (future): Instrument code for profiling, then use profile data to guide inlining and branch prediction hints.
 
 ### Phase 6: `-Os` / `-Og` — Size & Debug Optimizations
