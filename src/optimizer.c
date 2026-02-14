@@ -1052,8 +1052,12 @@ static ASTNode *prop_substitute(ASTNode *node, PropEnv *env) {
         case AST_NOT:
         case AST_BITWISE_NOT:
         case AST_DEREF:
-        case AST_ADDR_OF:
             node->data.unary.expression = prop_substitute(node->data.unary.expression, env);
+            return node;
+        case AST_ADDR_OF:
+            /* Do NOT substitute into the operand of address-of.
+             * &x must remain &x; replacing x with its constant value
+             * would produce &<literal>, which is nonsensical. */
             return node;
         case AST_CAST:
             node->data.cast.expression = prop_substitute(node->data.cast.expression, env);

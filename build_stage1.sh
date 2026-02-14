@@ -42,6 +42,9 @@ SOURCES=(
     src/coff_writer.c
     src/elf_writer.c
     src/linker.c
+    src/pe_linker.c
+    src/optimizer.c
+    src/ir.c
     src/main.c
 )
 

@@ -389,6 +389,12 @@ static IROperand ir_lower_expr(IRBuilder *b, ASTNode *expr) {
     case AST_BINARY_EXPR: {
         TokenType op = expr->data.binary_expr.op;
 
+        /* Comma operator: evaluate left for side effects, result is right */
+        if (op == TOKEN_COMMA) {
+            ir_lower_expr(b, expr->data.binary_expr.left);
+            return ir_lower_expr(b, expr->data.binary_expr.right);
+        }
+
         /* Short-circuit logical operators: && and || */
         if (op == TOKEN_AMPERSAND_AMPERSAND || op == TOKEN_PIPE_PIPE) {
             int result_vreg = ir_new_vreg(b->func);
@@ -3403,11 +3409,12 @@ void ir_licm_program(IRProgram *prog) {
 
 /* Physical register IDs (matching x86_64 encoding) */
 typedef enum {
+    RA_NONE = -1,
+    RA_SPILL = -2,
     RA_RAX = 0, RA_RCX = 1, RA_RDX = 2, RA_RBX = 3,
     RA_RSI = 6, RA_RDI = 7,
     RA_R8 = 8,  RA_R9 = 9,  RA_R10 = 10, RA_R11 = 11,
-    RA_R12 = 12, RA_R13 = 13, RA_R14 = 14, RA_R15 = 15,
-    RA_NONE = -1, RA_SPILL = -2
+    RA_R12 = 12, RA_R13 = 13, RA_R14 = 14, RA_R15 = 15
 } RAPhysReg;
 
 /* Map allocatable register index → physical register */

@@ -75,6 +75,7 @@ typedef struct ASTNode {
             char *name;
             struct ASTNode *body;
             int inline_hint;  // 0=none, 1=inline, 2=always_inline/__forceinline, -1=noinline
+            int is_static;    // 1 if declared static (local linkage)
         } function;
         struct {
             long long value;

@@ -2,10 +2,7 @@
 #include "arch_x86_64.h"
 
 // Global compiler options definition
-CompilerOptions g_compiler_options = {
-    .opt_level = OPT_O0,
-    .debug_info = 0
-};
+CompilerOptions g_compiler_options = {.opt_level = OPT_O0, .debug_info = 0};
 
 // Wrapper for the code generator.
 // Currently hardcoded to x86_64, but can be expanded to support other architectures.

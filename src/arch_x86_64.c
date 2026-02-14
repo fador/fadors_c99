@@ -24,6 +24,12 @@ static Type *current_func_return_type = NULL;
 static char *current_func_name = NULL;
 static int static_label_count = 0;
 static int debug_last_line = 0;  /* last line emitted for debug tracking */
+static int sret_offset = 0;      /* stack offset where hidden return pointer is saved (struct returns) */
+
+/* Check if a type requires struct-return ABI (hidden pointer) */
+static int is_struct_return(Type *t) {
+    return t && (t->kind == TYPE_STRUCT || t->kind == TYPE_UNION);
+}
 
 /* Record a debug line entry if -g is active and the source line changed */
 static void debug_record_line(ASTNode *node) {
@@ -989,6 +995,10 @@ static Type *get_expr_type(ASTNode *node) {
         }
     } else if (node->type == AST_BINARY_EXPR) {
         TokenType op = node->data.binary_expr.op;
+        /* Comma operator: type is the type of the right operand */
+        if (op == TOKEN_COMMA) {
+            return get_expr_type(node->data.binary_expr.right);
+        }
         if (op == TOKEN_EQUAL_EQUAL || op == TOKEN_BANG_EQUAL ||
             op == TOKEN_LESS || op == TOKEN_GREATER ||
             op == TOKEN_LESS_EQUAL || op == TOKEN_GREATER_EQUAL ||
@@ -1085,10 +1095,21 @@ static void gen_addr(ASTNode *node) {
         emit_inst1("popq", op_reg("rcx"));
         stack_offset += 8;
         emit_inst2("add", op_reg("rcx"), op_reg("rax"));
+    } else if (node->type == AST_CALL) {
+        /* For struct-returning calls, gen_expression returns a pointer in %rax */
+        gen_expression(node);
     }
 }
 
 static void gen_binary_expr(ASTNode *node) {
+    /* Comma operator: evaluate left for side effects, result is right */
+    if (node->data.binary_expr.op == TOKEN_COMMA) {
+        gen_expression(node->data.binary_expr.left);
+        gen_expression(node->data.binary_expr.right);
+        node->resolved_type = get_expr_type(node->data.binary_expr.right);
+        return;
+    }
+
     if (node->data.binary_expr.op == TOKEN_AMPERSAND_AMPERSAND || node->data.binary_expr.op == TOKEN_PIPE_PIPE) {
         int is_and = (node->data.binary_expr.op == TOKEN_AMPERSAND_AMPERSAND);
         int l_short = label_count++;
@@ -1489,7 +1510,7 @@ static void gen_expression(ASTNode *node) {
         const char *label = get_local_label(node->data.identifier.name);
         if (label) {
             Type *t = get_local_type(node->data.identifier.name);
-            if (t && t->kind == TYPE_ARRAY) {
+            if (t && (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION)) {
                 emit_inst2("lea", op_label(label), op_reg("rax"));
             } else if (is_float_type(t)) {
                 if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_label(label), op_reg("xmm0"));
@@ -1506,8 +1527,8 @@ static void gen_expression(ASTNode *node) {
         int offset = get_local_offset(node->data.identifier.name);
         if (offset != 0) {
             Type *t = get_local_type(node->data.identifier.name);
-            if (t && t->kind == TYPE_ARRAY) {
-                // Array decays to pointer
+            if (t && (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION)) {
+                // Array/struct/union decays to pointer (address)
                 emit_inst2("lea", op_mem("rbp", offset), op_reg("rax"));
             } else if (is_float_type(t)) {
                 if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_mem("rbp", offset), op_reg("xmm0"));
@@ -1522,7 +1543,7 @@ static void gen_expression(ASTNode *node) {
         } else {
             // Global
             Type *t = get_global_type(node->data.identifier.name);
-            if (t && t->kind == TYPE_ARRAY) {
+            if (t && (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION)) {
                 emit_inst2("lea", op_label(node->data.identifier.name), op_reg("rax"));
             } else if (is_float_type(t)) {
                 if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_label(node->data.identifier.name), op_reg("xmm0"));
@@ -1540,6 +1561,8 @@ static void gen_expression(ASTNode *node) {
         Type *t = node->resolved_type; // Element type
         if (t && t->kind == TYPE_ARRAY) {
             // Array element decays to pointer - address is already the value
+        } else if (t && (t->kind == TYPE_STRUCT || t->kind == TYPE_UNION)) {
+            // Struct/union element: address is the value (passed by reference)
         } else if (is_float_type(t)) {
             if (t->size == 4) emit_inst2("movss", op_mem("rax", 0), op_reg("xmm0"));
             else emit_inst2("movsd", op_mem("rax", 0), op_reg("xmm0"));
@@ -1650,19 +1673,45 @@ static void gen_expression(ASTNode *node) {
 
         /* --- Struct / large-type assignment: use memcpy ----------- */
         if (t && t->size > 8) {
-            /* Get source address → push */
+            /* Save stack_offset before the struct assignment so we can
+             * fully restore it afterwards.  gen_addr(value) for struct-returning
+             * calls permanently allocates an sret buffer on the stack;
+             * after memcpy the buffer is no longer needed. */
+            int pre_assign_stack_offset = stack_offset;
+            /* Reserve a stack slot for saving the source address.
+             * We must do this BEFORE gen_addr(value) because for struct-returning
+             * calls, the sret buffer sits at the bottom of the stack frame.
+             * A pushq after the call would overwrite the sret buffer contents. */
+            emit_inst2("sub", op_imm(8), op_reg("rsp"));
+            stack_offset -= 8;
+            int src_save_offset = stack_offset;
+            /* Get source address */
             gen_addr(node->data.assign.value);
-            emit_inst1("pushq", op_reg("rax"));
+            /* Save source address into the reserved slot (above sret buffer) */
+            emit_inst2("mov", op_reg("rax"), op_mem("rbp", src_save_offset));
             /* Get dest address → rdi */
             gen_addr(left_node);
             emit_inst2("mov", op_reg("rax"), op_reg("rdi"));
-            /* source → rsi */
-            emit_inst1("popq", op_reg("rsi"));
+            /* source → rsi (from saved slot) */
+            emit_inst2("mov", op_mem("rbp", src_save_offset), op_reg("rsi"));
             /* size → rdx */
             emit_inst2("mov", op_imm(t->size), op_reg("rdx"));
+            /* Ensure 16-byte alignment before calling memcpy */
+            int cur_depth = abs(stack_offset);
+            int memcpy_pad = (16 - (cur_depth % 16)) % 16;
+            if (memcpy_pad > 0) {
+                emit_inst2("sub", op_imm(memcpy_pad), op_reg("rsp"));
+                stack_offset -= memcpy_pad;
+            }
             /* call memcpy */
             emit_inst2("xor", op_reg("eax"), op_reg("eax"));
             emit_inst0("call memcpy");
+            /* Restore stack fully (save slot + sret buffer + alignment padding) */
+            int total_restore = abs(pre_assign_stack_offset - stack_offset);
+            if (total_restore > 0) {
+                emit_inst2("add", op_imm(total_restore), op_reg("rsp"));
+            }
+            stack_offset = pre_assign_stack_offset;
             node->resolved_type = t;
             return;
         }
@@ -1799,6 +1848,9 @@ static void gen_expression(ASTNode *node) {
         if (mt && mt->kind == TYPE_ARRAY) {
             // Array member decays to pointer - address is already the value
             node->resolved_type = mt;
+        } else if (mt && (mt->kind == TYPE_STRUCT || mt->kind == TYPE_UNION)) {
+            // Struct/union member: address is the value (passed by reference)
+            node->resolved_type = mt;
         } else if (is_float_type(mt)) {
             if (mt->kind == TYPE_FLOAT) emit_inst2("movss", op_mem("rax", 0), op_reg("xmm0"));
             else emit_inst2("movsd", op_mem("rax", 0), op_reg("xmm0"));
@@ -1821,16 +1873,36 @@ static void gen_expression(ASTNode *node) {
         int max_reg = g_max_reg_args;
         int shadow = g_use_shadow_space ? 32 : 0;
         
+        /* Check if the called function returns a struct (needs hidden pointer) */
+        Type *call_ret_type = get_expr_type(node);
+        int call_sret = is_struct_return(call_ret_type);
+        int call_sret_size = call_sret ? call_ret_type->size : 0;
+        int call_sret_shift = call_sret ? 1 : 0;
+        
         int num_args = (int)node->children_count;
-        int extra_args = num_args > max_reg ? num_args - max_reg : 0;
+        int effective_args = num_args + call_sret_shift;
+        int extra_args = effective_args > max_reg ? effective_args - max_reg : 0;
         
         // Calculate padding based on CURRENT stack depth (including any pushed args from outer calls)
         int current_stack_depth = abs(stack_offset);
-        int padding = (16 - ((current_stack_depth + extra_args * 8 + shadow) % 16)) % 16;
+        /* Also account for sret temp space if needed */
+        int sret_alloc = 0;
+        if (call_sret) {
+            sret_alloc = (call_sret_size + 15) & ~15; /* align to 16 */
+        }
+        int padding = (16 - ((current_stack_depth + extra_args * 8 + shadow + sret_alloc) % 16)) % 16;
         
         if (padding > 0) {
             emit_inst2("sub", op_imm(padding), op_reg("rsp"));
             stack_offset -= padding;
+        }
+        
+        /* Allocate stack space for the struct return value */
+        int sret_stack_offset = 0;
+        if (call_sret) {
+            emit_inst2("sub", op_imm(sret_alloc), op_reg("rsp"));
+            stack_offset -= sret_alloc;
+            sret_stack_offset = stack_offset; /* remember where it is */
         }
 
         for (int i = (int)node->children_count - 1; i >= 0; i--) {
@@ -1845,15 +1917,21 @@ static void gen_expression(ASTNode *node) {
             stack_offset -= 8; // Update stack offset for nested calls
         }
         
-        for (int i = 0; i < (int)num_args && i < max_reg; i++) {
+        /* Pop user args into registers, shifted by 1 if sret */
+        for (int i = 0; i < num_args && (i + call_sret_shift) < max_reg; i++) {
             ASTNode *pop_child = node->children[i];
             Type *pop_type = get_expr_type(pop_child);
             if (is_float_type(pop_type)) {
                 emit_pop_xmm(xmm_arg_regs[i]);
             } else {
-                emit_inst1("popq", op_reg(arg_regs[i]));
+                emit_inst1("popq", op_reg(arg_regs[i + call_sret_shift]));
                 stack_offset += 8;
             }
+        }
+        
+        /* Load hidden return pointer into %rdi (first arg) */
+        if (call_sret) {
+            emit_inst2("lea", op_mem("rbp", sret_stack_offset), op_reg("rdi"));
         }
         
         // Shadow space (Win64 only)
@@ -1872,14 +1950,14 @@ static void gen_expression(ASTNode *node) {
         emit_inst1("call", op_label(node->data.call.name));
         if (node->resolved_type == NULL) node->resolved_type = get_expr_type(node);
         
-        // Clean up shadow space + extra args + padding
+        // Clean up shadow space + extra args + padding (but NOT sret space — caller needs %rax valid)
         int cleanup = shadow + extra_args * 8 + padding;
         if (cleanup > 0) {
             emit_inst2("add", op_imm(cleanup), op_reg("rsp"));
         }
         
-        // Restore stack offset
-        stack_offset = initial_stack_offset;
+        // Restore stack offset (sret space remains allocated on stack, cleaned up by leave)
+        stack_offset = initial_stack_offset - sret_alloc;
     } else if (node->type == AST_IF) {
         // Ternary expression: condition ? then_expr : else_expr
         int label_else = label_count++;
@@ -2172,6 +2250,11 @@ static void gen_statement(ASTNode *node) {
                     /* Check return type compatibility */
                     Type *call_ret_type = get_expr_type(ret_expr);
                     int can_tco = 1;
+                    /* Struct-returning calls use hidden sret pointer — TCO is
+                     * not safe because the argument registers are shifted. */
+                    if (is_struct_return(call_ret_type) || is_struct_return(current_func_return_type)) {
+                        can_tco = 0;
+                    }
                     if (current_func_return_type && call_ret_type) {
                         /* int <-> float mismatch: different return register */
                         if (is_float_type(current_func_return_type) != is_float_type(call_ret_type)) {
@@ -2229,6 +2312,26 @@ static void gen_statement(ASTNode *node) {
             }
             /* ---- End tail call optimization ---- */
 
+            /* ---- Struct return: copy to hidden sret pointer ---- */
+            if (is_struct_return(current_func_return_type) && sret_offset != 0) {
+                /* Get address of the struct being returned */
+                if (ret_expr->type == AST_IDENTIFIER) {
+                    gen_addr(ret_expr);
+                } else {
+                    /* For function calls returning structs, gen_expression
+                     * already returns a pointer in %rax */
+                    gen_expression(ret_expr);
+                }
+                /* rax = source address of struct data */
+                /* memcpy(sret_ptr, rax, size) */
+                emit_inst2("mov", op_reg("rax"), op_reg("rsi")); /* source = rax */
+                emit_inst2("mov", op_mem("rbp", sret_offset), op_reg("rdi")); /* dest = hidden ptr */
+                emit_inst2("mov", op_imm(current_func_return_type->size), op_reg("rdx"));
+                emit_inst2("xor", op_reg("eax"), op_reg("eax"));
+                emit_inst0("call memcpy");
+                /* return the hidden pointer in %rax */
+                emit_inst2("mov", op_mem("rbp", sret_offset), op_reg("rax"));
+            } else {
             gen_expression(ret_expr);
             Type *expr_type = get_expr_type(ret_expr);
             
@@ -2250,6 +2353,7 @@ static void gen_statement(ASTNode *node) {
                         emit_inst2("cvtsd2ss", op_reg("xmm0"), op_reg("xmm0"));
                     }
                 }
+            }
             }
         }
         char dest_label[32];
@@ -2733,16 +2837,39 @@ static void gen_statement(ASTNode *node) {
         { int i0 = break_label_ptr; break_label_stack[i0] = label_end; break_label_ptr = i0 + 1; }
         { int i1 = loop_saved_stack_ptr; loop_saved_stack_offset[i1] = stack_offset; loop_saved_locals_count[i1] = locals_count; loop_saved_stack_ptr = i1 + 1; }
         gen_statement(node->data.switch_stmt.body);
+        /* Restore stack_offset and locals_count to pre-switch state BEFORE popping */
+        {
+            int si2 = loop_saved_stack_ptr - 1;
+            if (stack_offset != loop_saved_stack_offset[si2]) {
+                emit_inst2("lea", op_mem("rbp", loop_saved_stack_offset[si2]), op_reg("rsp"));
+            }
+            stack_offset = loop_saved_stack_offset[si2];
+            locals_count = loop_saved_locals_count[si2];
+        }
         break_label_ptr--;
         loop_saved_stack_ptr--;
 
         emit_label_def(l_end);
     } else if (node->type == AST_CASE) {
         if (node->resolved_type) {
+            /* Restore stack_offset to the switch entry value.
+             * At the case label, RSP is at the switch-entry RSP because
+             * we jumped here from the dispatch. Sync stack_offset. */
+            if (loop_saved_stack_ptr > 0) {
+                int si = loop_saved_stack_ptr - 1;
+                stack_offset = loop_saved_stack_offset[si];
+                locals_count = loop_saved_locals_count[si];
+            }
             emit_label_def((char *)node->resolved_type);
         }
     } else if (node->type == AST_DEFAULT) {
         if (node->resolved_type) {
+            /* Same as AST_CASE: restore stack_offset at label entry */
+            if (loop_saved_stack_ptr > 0) {
+                int si = loop_saved_stack_ptr - 1;
+                stack_offset = loop_saved_stack_offset[si];
+                locals_count = loop_saved_locals_count[si];
+            }
             emit_label_def((char *)node->resolved_type);
         }
     } else if (node->type == AST_BLOCK) {
@@ -2796,11 +2923,13 @@ static void gen_function(ASTNode *node) {
     peep_unreachable = 0;
     peep_pending_jmp = 0;
     if (current_syntax == SYNTAX_ATT) {
-        if (out) fprintf(out, ".globl %s\n", node->data.function.name);
+        if (out && !node->data.function.is_static) fprintf(out, ".globl %s\n", node->data.function.name);
         emit_label_def(node->data.function.name);
     } else {
-        if (out) {
+        if (out && !node->data.function.is_static) {
             fprintf(out, "PUBLIC %s\n", node->data.function.name);
+            fprintf(out, "%s PROC\n", node->data.function.name);
+        } else if (out) {
             fprintf(out, "%s PROC\n", node->data.function.name);
         }
     }
@@ -2813,6 +2942,18 @@ static void gen_function(ASTNode *node) {
     current_func_return_type = node->resolved_type;
     current_func_name = node->data.function.name;
     stack_offset = 0;
+    sret_offset = 0;
+    
+    /* If this function returns a struct, %rdi holds the hidden return pointer.
+     * Save it to a local slot and shift all parameter registers by 1. */
+    int sret_reg_shift = 0;
+    if (is_struct_return(current_func_return_type)) {
+        stack_offset -= 8;
+        sret_offset = stack_offset;
+        emit_inst2("sub", op_imm(8), op_reg("rsp"));
+        emit_inst2("mov", op_reg("rdi"), op_mem("rsp", 0));
+        sret_reg_shift = 1;  /* param 0 comes from arg_regs[1], etc. */
+    }
     
     // Handle parameters (platform ABI)
     const char **arg_regs = g_arg_regs;
@@ -2832,7 +2973,8 @@ static void gen_function(ASTNode *node) {
             locals[locals_count].label = NULL;
             locals[locals_count].type = param->resolved_type;
             
-            if ((int)i < max_reg) {
+            int reg_idx = (int)i + sret_reg_shift;
+            if (reg_idx < max_reg) {
                 // Register params: allocate on local stack
                 stack_offset -= alloc_size;
                 locals[locals_count].offset = stack_offset;
@@ -2841,10 +2983,10 @@ static void gen_function(ASTNode *node) {
                     emit_push_xmm(xmm_arg_regs[i]);
                 } else {
                     emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
-                    if (size == 1) emit_inst2("movb", op_reg(get_reg_8(arg_regs[i])), op_mem("rsp", 0));
-                    else if (size == 2) emit_inst2("movw", op_reg(get_reg_16(arg_regs[i])), op_mem("rsp", 0));
-                    else if (size == 4) emit_inst2("movl", op_reg(get_reg_32(arg_regs[i])), op_mem("rsp", 0));
-                    else emit_inst2("mov", op_reg(arg_regs[i]), op_mem("rsp", 0));
+                    if (size == 1) emit_inst2("movb", op_reg(get_reg_8(arg_regs[reg_idx])), op_mem("rsp", 0));
+                    else if (size == 2) emit_inst2("movw", op_reg(get_reg_16(arg_regs[reg_idx])), op_mem("rsp", 0));
+                    else if (size == 4) emit_inst2("movl", op_reg(get_reg_32(arg_regs[reg_idx])), op_mem("rsp", 0));
+                    else emit_inst2("mov", op_reg(arg_regs[reg_idx]), op_mem("rsp", 0));
                 }
             } else {
                 // Stack params: already on caller's stack at positive rbp offset
