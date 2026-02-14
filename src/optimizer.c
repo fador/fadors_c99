@@ -17,6 +17,12 @@
  *   9. Aggressive inlining: inline multi-statement functions (up to ~20 stmts)
  *  10. Loop unrolling: full unroll for N ≤ 8, partial unroll factor 2-4
  *  11. Loop strength reduction: array[i] in loops → pointer increment
+ *
+ * -O3 interprocedural passes:
+ *  12. IPA constant propagation: specialize parameters always passed as same constant
+ *  13. Dead argument elimination: remove parameters never read in function body
+ *  14. Dead function elimination: remove functions with zero callers after inlining
+ *  15. Return value propagation: replace calls to functions that always return same constant
  */
 
 #include "optimizer.h"
@@ -2184,6 +2190,789 @@ static void o3_unroll_loops(ASTNode *node) {
 /* combination of loop unrolling + constant folding + the existing    */
 /* strength reduction pass. No additional code needed here.)          */
 
+/* ================================================================== */
+/* -O3: Interprocedural Optimization (IPA) Passes                     */
+/* ================================================================== */
+
+/* ------------------------------------------------------------------ */
+/* IPA Pass 1: Return Value Propagation                               */
+/*                                                                    */
+/* If a function always returns the same compile-time constant        */
+/* (possibly after O1/O2 constant folding), replace all call sites    */
+/* with that constant value. Only applies to non-void, non-extern     */
+/* functions with a single return statement returning a constant.     */
+/* ------------------------------------------------------------------ */
+
+#define MAX_RVP_CANDIDATES 256
+
+typedef struct {
+    const char *name;
+    long long   return_value;
+} RVPCandidate;
+
+static RVPCandidate g_rvp_cands[MAX_RVP_CANDIDATES];
+static int g_rvp_cand_count;
+
+/* Find functions that always return the same constant. */
+static void find_rvp_candidates(ASTNode *program) {
+    g_rvp_cand_count = 0;
+
+    for (size_t i = 0; i < program->children_count; i++) {
+        ASTNode *fn = program->children[i];
+        if (fn->type != AST_FUNCTION || !fn->data.function.body) continue;
+        if (fn->data.function.inline_hint == -1) continue; /* noinline */
+
+        /* Skip 'main' — its return value is the program exit code, not a constant */
+        if (strcmp(fn->data.function.name, "main") == 0) continue;
+
+        ASTNode *body = fn->data.function.body;
+        if (body->type != AST_BLOCK) continue;
+
+        /* Check all return paths — for simplicity, only handle single-return
+           functions (body is a block with exactly one return at the end) */
+        int return_count = 0;
+        ASTNode *return_expr = NULL;
+
+        for (size_t j = 0; j < body->children_count; j++) {
+            ASTNode *stmt = body->children[j];
+            if (stmt->type == AST_RETURN) {
+                return_count++;
+                return_expr = stmt->data.return_stmt.expression;
+            }
+            /* If there are if/while/for/switch statements, they might contain
+               additional returns, making analysis complex. Skip if body has
+               any control flow statements. */
+            if (stmt->type == AST_IF || stmt->type == AST_WHILE ||
+                stmt->type == AST_DO_WHILE || stmt->type == AST_FOR ||
+                stmt->type == AST_SWITCH) {
+                return_count = -1; /* mark as complex */
+                break;
+            }
+        }
+
+        if (return_count != 1 || !return_expr) continue;
+        if (!is_const_int(return_expr)) continue;
+
+        if (g_rvp_cand_count >= MAX_RVP_CANDIDATES) break;
+
+        g_rvp_cands[g_rvp_cand_count].name = fn->data.function.name;
+        g_rvp_cands[g_rvp_cand_count].return_value = return_expr->data.integer.value;
+        g_rvp_cand_count++;
+    }
+}
+
+/* Look up RVP candidate by name. */
+static RVPCandidate *find_rvp_cand(const char *name) {
+    for (int i = 0; i < g_rvp_cand_count; i++) {
+        if (strcmp(g_rvp_cands[i].name, name) == 0) return &g_rvp_cands[i];
+    }
+    return NULL;
+}
+
+/* Replace calls to constant-returning functions with their return value.
+   Walk an expression tree and substitute matching calls. */
+static ASTNode *rvp_substitute_expr(ASTNode *expr) {
+    if (!expr) return NULL;
+
+    if (expr->type == AST_CALL) {
+        /* First recurse into arguments */
+        for (size_t i = 0; i < expr->children_count; i++)
+            expr->children[i] = rvp_substitute_expr(expr->children[i]);
+
+        /* Check if all arguments have no side effects (safe to eliminate) */
+        int safe = 1;
+        for (size_t i = 0; i < expr->children_count; i++) {
+            if (has_side_effects(expr->children[i])) { safe = 0; break; }
+        }
+
+        if (safe) {
+            RVPCandidate *cand = find_rvp_cand(expr->data.call.name);
+            if (cand) {
+                return make_int(cand->return_value, expr->line);
+            }
+        }
+        return expr;
+    }
+
+    /* Recurse into sub-expressions */
+    switch (expr->type) {
+    case AST_BINARY_EXPR:
+        expr->data.binary_expr.left  = rvp_substitute_expr(expr->data.binary_expr.left);
+        expr->data.binary_expr.right = rvp_substitute_expr(expr->data.binary_expr.right);
+        break;
+    case AST_NEG: case AST_NOT: case AST_BITWISE_NOT:
+    case AST_PRE_INC: case AST_PRE_DEC:
+    case AST_POST_INC: case AST_POST_DEC:
+    case AST_DEREF: case AST_ADDR_OF:
+        expr->data.unary.expression = rvp_substitute_expr(expr->data.unary.expression);
+        break;
+    case AST_CAST:
+        expr->data.cast.expression = rvp_substitute_expr(expr->data.cast.expression);
+        break;
+    case AST_MEMBER_ACCESS:
+        expr->data.member_access.struct_expr = rvp_substitute_expr(expr->data.member_access.struct_expr);
+        break;
+    case AST_ARRAY_ACCESS:
+        expr->data.array_access.array = rvp_substitute_expr(expr->data.array_access.array);
+        expr->data.array_access.index = rvp_substitute_expr(expr->data.array_access.index);
+        break;
+    case AST_IF:
+        expr->data.if_stmt.condition   = rvp_substitute_expr(expr->data.if_stmt.condition);
+        expr->data.if_stmt.then_branch = rvp_substitute_expr(expr->data.if_stmt.then_branch);
+        expr->data.if_stmt.else_branch = rvp_substitute_expr(expr->data.if_stmt.else_branch);
+        break;
+    case AST_ASSIGN:
+        expr->data.assign.left  = rvp_substitute_expr(expr->data.assign.left);
+        expr->data.assign.value = rvp_substitute_expr(expr->data.assign.value);
+        break;
+    default:
+        break;
+    }
+    return expr;
+}
+
+/* Walk a statement tree and apply RVP substitution in all expressions. */
+static void rvp_substitute_stmt(ASTNode *stmt) {
+    if (!stmt) return;
+    switch (stmt->type) {
+    case AST_BLOCK:
+        for (size_t i = 0; i < stmt->children_count; i++)
+            rvp_substitute_stmt(stmt->children[i]);
+        break;
+    case AST_RETURN:
+        if (stmt->data.return_stmt.expression)
+            stmt->data.return_stmt.expression = rvp_substitute_expr(stmt->data.return_stmt.expression);
+        break;
+    case AST_VAR_DECL:
+        if (stmt->data.var_decl.initializer)
+            stmt->data.var_decl.initializer = rvp_substitute_expr(stmt->data.var_decl.initializer);
+        break;
+    case AST_ASSIGN:
+        stmt->data.assign.value = rvp_substitute_expr(stmt->data.assign.value);
+        break;
+    case AST_IF:
+        stmt->data.if_stmt.condition = rvp_substitute_expr(stmt->data.if_stmt.condition);
+        rvp_substitute_stmt(stmt->data.if_stmt.then_branch);
+        if (stmt->data.if_stmt.else_branch)
+            rvp_substitute_stmt(stmt->data.if_stmt.else_branch);
+        break;
+    case AST_WHILE:
+    case AST_DO_WHILE:
+        stmt->data.while_stmt.condition = rvp_substitute_expr(stmt->data.while_stmt.condition);
+        rvp_substitute_stmt(stmt->data.while_stmt.body);
+        break;
+    case AST_FOR:
+        if (stmt->data.for_stmt.init) rvp_substitute_stmt(stmt->data.for_stmt.init);
+        if (stmt->data.for_stmt.condition)
+            stmt->data.for_stmt.condition = rvp_substitute_expr(stmt->data.for_stmt.condition);
+        if (stmt->data.for_stmt.increment)
+            stmt->data.for_stmt.increment = rvp_substitute_expr(stmt->data.for_stmt.increment);
+        rvp_substitute_stmt(stmt->data.for_stmt.body);
+        break;
+    case AST_SWITCH:
+        stmt->data.switch_stmt.condition = rvp_substitute_expr(stmt->data.switch_stmt.condition);
+        rvp_substitute_stmt(stmt->data.switch_stmt.body);
+        break;
+    default:
+        if (stmt->type == AST_CALL) {
+            for (size_t i = 0; i < stmt->children_count; i++)
+                stmt->children[i] = rvp_substitute_expr(stmt->children[i]);
+        }
+        break;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* IPA Pass 2: IPA Constant Propagation                               */
+/*                                                                    */
+/* For each function, check all call sites. If a particular parameter */
+/* is always passed the same constant value across every call site,   */
+/* substitute that constant for the parameter throughout the function */
+/* body, enabling further constant folding.                           */
+/* ------------------------------------------------------------------ */
+
+#define MAX_IPA_FUNC 256
+
+typedef struct {
+    const char *func_name;
+    int         param_count;
+    long long   const_values[MAX_INLINE_PARAMS];  /* constant value for each param */
+    int         is_constant[MAX_INLINE_PARAMS];    /* 1 if always same constant */
+    int         call_count;                        /* number of call sites found */
+} IPAConstInfo;
+
+static IPAConstInfo g_ipa_funcs[MAX_IPA_FUNC];
+static int g_ipa_func_count;
+
+/* Forward declaration */
+static void ipa_scan_calls_in_expr(ASTNode *expr);
+static void ipa_scan_calls_in_stmt(ASTNode *stmt);
+
+/* Register or update IPA info for a function call. */
+static void ipa_register_call(const char *func_name, ASTNode **args, int arg_count) {
+    /* Find or create entry */
+    IPAConstInfo *info = NULL;
+    for (int i = 0; i < g_ipa_func_count; i++) {
+        if (strcmp(g_ipa_funcs[i].func_name, func_name) == 0) {
+            info = &g_ipa_funcs[i];
+            break;
+        }
+    }
+
+    if (!info) {
+        if (g_ipa_func_count >= MAX_IPA_FUNC) return;
+        info = &g_ipa_funcs[g_ipa_func_count++];
+        info->func_name = func_name;
+        info->param_count = arg_count;
+        info->call_count = 0;
+        for (int i = 0; i < arg_count && i < MAX_INLINE_PARAMS; i++) {
+            if (is_const_int(args[i])) {
+                info->const_values[i] = args[i]->data.integer.value;
+                info->is_constant[i] = 1;
+            } else {
+                info->is_constant[i] = 0;
+            }
+        }
+        info->call_count = 1;
+        return;
+    }
+
+    /* Update existing entry */
+    info->call_count++;
+    if (info->param_count != arg_count) {
+        /* Mismatched call — invalidate all */
+        for (int i = 0; i < info->param_count && i < MAX_INLINE_PARAMS; i++)
+            info->is_constant[i] = 0;
+        return;
+    }
+
+    for (int i = 0; i < arg_count && i < MAX_INLINE_PARAMS; i++) {
+        if (!info->is_constant[i]) continue;
+        if (!is_const_int(args[i]) ||
+            args[i]->data.integer.value != info->const_values[i]) {
+            info->is_constant[i] = 0;
+        }
+    }
+}
+
+/* Scan expressions for calls to collect IPA info. */
+static void ipa_scan_calls_in_expr(ASTNode *expr) {
+    if (!expr) return;
+    if (expr->type == AST_CALL) {
+        ipa_register_call(expr->data.call.name, expr->children, (int)expr->children_count);
+        for (size_t i = 0; i < expr->children_count; i++)
+            ipa_scan_calls_in_expr(expr->children[i]);
+        return;
+    }
+    switch (expr->type) {
+    case AST_BINARY_EXPR:
+        ipa_scan_calls_in_expr(expr->data.binary_expr.left);
+        ipa_scan_calls_in_expr(expr->data.binary_expr.right);
+        break;
+    case AST_NEG: case AST_NOT: case AST_BITWISE_NOT:
+    case AST_PRE_INC: case AST_PRE_DEC:
+    case AST_POST_INC: case AST_POST_DEC:
+    case AST_DEREF: case AST_ADDR_OF:
+        ipa_scan_calls_in_expr(expr->data.unary.expression);
+        break;
+    case AST_CAST:
+        ipa_scan_calls_in_expr(expr->data.cast.expression);
+        break;
+    case AST_MEMBER_ACCESS:
+        ipa_scan_calls_in_expr(expr->data.member_access.struct_expr);
+        break;
+    case AST_ARRAY_ACCESS:
+        ipa_scan_calls_in_expr(expr->data.array_access.array);
+        ipa_scan_calls_in_expr(expr->data.array_access.index);
+        break;
+    case AST_IF:
+        ipa_scan_calls_in_expr(expr->data.if_stmt.condition);
+        ipa_scan_calls_in_expr(expr->data.if_stmt.then_branch);
+        ipa_scan_calls_in_expr(expr->data.if_stmt.else_branch);
+        break;
+    case AST_ASSIGN:
+        ipa_scan_calls_in_expr(expr->data.assign.left);
+        ipa_scan_calls_in_expr(expr->data.assign.value);
+        break;
+    default:
+        break;
+    }
+}
+
+/* Scan statements for calls. */
+static void ipa_scan_calls_in_stmt(ASTNode *stmt) {
+    if (!stmt) return;
+    switch (stmt->type) {
+    case AST_BLOCK:
+        for (size_t i = 0; i < stmt->children_count; i++)
+            ipa_scan_calls_in_stmt(stmt->children[i]);
+        break;
+    case AST_RETURN:
+        if (stmt->data.return_stmt.expression)
+            ipa_scan_calls_in_expr(stmt->data.return_stmt.expression);
+        break;
+    case AST_VAR_DECL:
+        if (stmt->data.var_decl.initializer)
+            ipa_scan_calls_in_expr(stmt->data.var_decl.initializer);
+        break;
+    case AST_ASSIGN:
+        ipa_scan_calls_in_expr(stmt->data.assign.value);
+        break;
+    case AST_IF:
+        ipa_scan_calls_in_expr(stmt->data.if_stmt.condition);
+        ipa_scan_calls_in_stmt(stmt->data.if_stmt.then_branch);
+        if (stmt->data.if_stmt.else_branch)
+            ipa_scan_calls_in_stmt(stmt->data.if_stmt.else_branch);
+        break;
+    case AST_WHILE: case AST_DO_WHILE:
+        ipa_scan_calls_in_expr(stmt->data.while_stmt.condition);
+        ipa_scan_calls_in_stmt(stmt->data.while_stmt.body);
+        break;
+    case AST_FOR:
+        if (stmt->data.for_stmt.init) ipa_scan_calls_in_stmt(stmt->data.for_stmt.init);
+        if (stmt->data.for_stmt.condition)
+            ipa_scan_calls_in_expr(stmt->data.for_stmt.condition);
+        if (stmt->data.for_stmt.increment)
+            ipa_scan_calls_in_expr(stmt->data.for_stmt.increment);
+        ipa_scan_calls_in_stmt(stmt->data.for_stmt.body);
+        break;
+    case AST_SWITCH:
+        ipa_scan_calls_in_expr(stmt->data.switch_stmt.condition);
+        ipa_scan_calls_in_stmt(stmt->data.switch_stmt.body);
+        break;
+    default:
+        if (stmt->type == AST_CALL) {
+            ipa_register_call(stmt->data.call.name, stmt->children, (int)stmt->children_count);
+            for (size_t i = 0; i < stmt->children_count; i++)
+                ipa_scan_calls_in_expr(stmt->children[i]);
+        }
+        break;
+    }
+}
+
+/* Apply IPA constant propagation: for each function where a parameter
+   is always the same constant, substitute it in the function body. */
+static void ipa_propagate_constants(ASTNode *program) {
+    g_ipa_func_count = 0;
+
+    /* Step 1: Scan all call sites in all functions */
+    for (size_t i = 0; i < program->children_count; i++) {
+        ASTNode *fn = program->children[i];
+        if (fn->type == AST_FUNCTION && fn->data.function.body) {
+            ipa_scan_calls_in_stmt(fn->data.function.body);
+        }
+    }
+
+    /* Step 2: For each function with constant parameters, substitute */
+    for (int ci = 0; ci < g_ipa_func_count; ci++) {
+        IPAConstInfo *info = &g_ipa_funcs[ci];
+        if (info->call_count < 1) continue;
+
+        /* Check if any parameter is always constant */
+        int any_const = 0;
+        for (int p = 0; p < info->param_count && p < MAX_INLINE_PARAMS; p++) {
+            if (info->is_constant[p]) { any_const = 1; break; }
+        }
+        if (!any_const) continue;
+
+        /* Find the function definition */
+        ASTNode *fn = NULL;
+        for (size_t i = 0; i < program->children_count; i++) {
+            ASTNode *child = program->children[i];
+            if (child->type == AST_FUNCTION && child->data.function.body &&
+                strcmp(child->data.function.name, info->func_name) == 0) {
+                fn = child;
+                break;
+            }
+        }
+        if (!fn) continue;
+
+        /* Skip main — its parameters are argc/argv */
+        if (strcmp(fn->data.function.name, "main") == 0) continue;
+
+        /* Substitute constant parameters in the function body */
+        if ((int)fn->children_count != info->param_count) continue;
+
+        PropEnv subst_env;
+        prop_env_init(&subst_env);
+
+        for (int p = 0; p < info->param_count && p < MAX_INLINE_PARAMS; p++) {
+            if (!info->is_constant[p]) continue;
+            const char *pname = fn->children[p]->data.var_decl.name;
+            ASTNode *cval = make_int(info->const_values[p], fn->line);
+            prop_env_set(&subst_env, pname, cval, -1);
+        }
+
+        /* Apply substitution to the function body using prop_substitute */
+        if (fn->data.function.body->type == AST_BLOCK) {
+            for (size_t j = 0; j < fn->data.function.body->children_count; j++) {
+                ASTNode *stmt = fn->data.function.body->children[j];
+                if (stmt->type == AST_RETURN && stmt->data.return_stmt.expression) {
+                    stmt->data.return_stmt.expression =
+                        prop_substitute(stmt->data.return_stmt.expression, &subst_env);
+                    stmt->data.return_stmt.expression =
+                        opt_expr(stmt->data.return_stmt.expression);
+                }
+                if (stmt->type == AST_VAR_DECL && stmt->data.var_decl.initializer) {
+                    stmt->data.var_decl.initializer =
+                        prop_substitute(stmt->data.var_decl.initializer, &subst_env);
+                    stmt->data.var_decl.initializer =
+                        opt_expr(stmt->data.var_decl.initializer);
+                }
+                if (stmt->type == AST_ASSIGN) {
+                    stmt->data.assign.value =
+                        prop_substitute(stmt->data.assign.value, &subst_env);
+                    stmt->data.assign.value = opt_expr(stmt->data.assign.value);
+                }
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* IPA Pass 3: Dead Argument Elimination                              */
+/*                                                                    */
+/* For each function, check if any parameter is never referenced in   */
+/* the function body. If so, remove it from the parameter list and    */
+/* update all call sites to drop the corresponding argument.          */
+/* Skips main, extern, and variadic functions.                        */
+/* ------------------------------------------------------------------ */
+
+/* Check if a parameter name is referenced anywhere in an expression. */
+static int param_is_used_in_expr(ASTNode *expr, const char *param_name) {
+    if (!expr) return 0;
+    if (expr->type == AST_IDENTIFIER &&
+        strcmp(expr->data.identifier.name, param_name) == 0)
+        return 1;
+    switch (expr->type) {
+    case AST_BINARY_EXPR:
+        return param_is_used_in_expr(expr->data.binary_expr.left, param_name) ||
+               param_is_used_in_expr(expr->data.binary_expr.right, param_name);
+    case AST_NEG: case AST_NOT: case AST_BITWISE_NOT:
+    case AST_PRE_INC: case AST_PRE_DEC:
+    case AST_POST_INC: case AST_POST_DEC:
+    case AST_DEREF: case AST_ADDR_OF:
+        return param_is_used_in_expr(expr->data.unary.expression, param_name);
+    case AST_CAST:
+        return param_is_used_in_expr(expr->data.cast.expression, param_name);
+    case AST_CALL:
+        for (size_t i = 0; i < expr->children_count; i++)
+            if (param_is_used_in_expr(expr->children[i], param_name)) return 1;
+        return 0;
+    case AST_MEMBER_ACCESS:
+        return param_is_used_in_expr(expr->data.member_access.struct_expr, param_name);
+    case AST_ARRAY_ACCESS:
+        return param_is_used_in_expr(expr->data.array_access.array, param_name) ||
+               param_is_used_in_expr(expr->data.array_access.index, param_name);
+    case AST_IF:
+        return param_is_used_in_expr(expr->data.if_stmt.condition, param_name) ||
+               param_is_used_in_expr(expr->data.if_stmt.then_branch, param_name) ||
+               param_is_used_in_expr(expr->data.if_stmt.else_branch, param_name);
+    case AST_ASSIGN:
+        return param_is_used_in_expr(expr->data.assign.left, param_name) ||
+               param_is_used_in_expr(expr->data.assign.value, param_name);
+    default:
+        return 0;
+    }
+}
+
+/* Check if a parameter name is referenced anywhere in a statement tree. */
+static int param_is_used_in_stmt(ASTNode *stmt, const char *param_name) {
+    if (!stmt) return 0;
+    switch (stmt->type) {
+    case AST_BLOCK:
+        for (size_t i = 0; i < stmt->children_count; i++)
+            if (param_is_used_in_stmt(stmt->children[i], param_name)) return 1;
+        return 0;
+    case AST_RETURN:
+        return param_is_used_in_expr(stmt->data.return_stmt.expression, param_name);
+    case AST_VAR_DECL:
+        return param_is_used_in_expr(stmt->data.var_decl.initializer, param_name);
+    case AST_ASSIGN:
+        return param_is_used_in_expr(stmt->data.assign.left, param_name) ||
+               param_is_used_in_expr(stmt->data.assign.value, param_name);
+    case AST_IF:
+        return param_is_used_in_expr(stmt->data.if_stmt.condition, param_name) ||
+               param_is_used_in_stmt(stmt->data.if_stmt.then_branch, param_name) ||
+               param_is_used_in_stmt(stmt->data.if_stmt.else_branch, param_name);
+    case AST_WHILE: case AST_DO_WHILE:
+        return param_is_used_in_expr(stmt->data.while_stmt.condition, param_name) ||
+               param_is_used_in_stmt(stmt->data.while_stmt.body, param_name);
+    case AST_FOR:
+        return param_is_used_in_stmt(stmt->data.for_stmt.init, param_name) ||
+               param_is_used_in_expr(stmt->data.for_stmt.condition, param_name) ||
+               param_is_used_in_expr(stmt->data.for_stmt.increment, param_name) ||
+               param_is_used_in_stmt(stmt->data.for_stmt.body, param_name);
+    case AST_SWITCH:
+        return param_is_used_in_expr(stmt->data.switch_stmt.condition, param_name) ||
+               param_is_used_in_stmt(stmt->data.switch_stmt.body, param_name);
+    default:
+        if (stmt->type == AST_CALL) {
+            for (size_t i = 0; i < stmt->children_count; i++)
+                if (param_is_used_in_expr(stmt->children[i], param_name)) return 1;
+        }
+        return param_is_used_in_expr(stmt, param_name);
+    }
+}
+
+/* Remove argument at position `arg_idx` from all calls to `func_name` in an expression. */
+static void dae_remove_arg_in_expr(ASTNode *expr, const char *func_name, int arg_idx) {
+    if (!expr) return;
+    if (expr->type == AST_CALL) {
+        if (strcmp(expr->data.call.name, func_name) == 0 &&
+            (int)expr->children_count > arg_idx) {
+            /* Remove the argument by shifting subsequent args down */
+            for (int j = arg_idx; j < (int)expr->children_count - 1; j++)
+                expr->children[j] = expr->children[j + 1];
+            expr->children_count--;
+        }
+        for (size_t i = 0; i < expr->children_count; i++)
+            dae_remove_arg_in_expr(expr->children[i], func_name, arg_idx);
+        return;
+    }
+    switch (expr->type) {
+    case AST_BINARY_EXPR:
+        dae_remove_arg_in_expr(expr->data.binary_expr.left, func_name, arg_idx);
+        dae_remove_arg_in_expr(expr->data.binary_expr.right, func_name, arg_idx);
+        break;
+    case AST_NEG: case AST_NOT: case AST_BITWISE_NOT:
+    case AST_PRE_INC: case AST_PRE_DEC:
+    case AST_POST_INC: case AST_POST_DEC:
+    case AST_DEREF: case AST_ADDR_OF:
+        dae_remove_arg_in_expr(expr->data.unary.expression, func_name, arg_idx);
+        break;
+    case AST_CAST:
+        dae_remove_arg_in_expr(expr->data.cast.expression, func_name, arg_idx);
+        break;
+    case AST_MEMBER_ACCESS:
+        dae_remove_arg_in_expr(expr->data.member_access.struct_expr, func_name, arg_idx);
+        break;
+    case AST_ARRAY_ACCESS:
+        dae_remove_arg_in_expr(expr->data.array_access.array, func_name, arg_idx);
+        dae_remove_arg_in_expr(expr->data.array_access.index, func_name, arg_idx);
+        break;
+    case AST_IF:
+        dae_remove_arg_in_expr(expr->data.if_stmt.condition, func_name, arg_idx);
+        dae_remove_arg_in_expr(expr->data.if_stmt.then_branch, func_name, arg_idx);
+        dae_remove_arg_in_expr(expr->data.if_stmt.else_branch, func_name, arg_idx);
+        break;
+    case AST_ASSIGN:
+        dae_remove_arg_in_expr(expr->data.assign.left, func_name, arg_idx);
+        dae_remove_arg_in_expr(expr->data.assign.value, func_name, arg_idx);
+        break;
+    default:
+        break;
+    }
+}
+
+/* Remove argument at position `arg_idx` from all calls to `func_name` in a statement. */
+static void dae_remove_arg_in_stmt(ASTNode *stmt, const char *func_name, int arg_idx) {
+    if (!stmt) return;
+    switch (stmt->type) {
+    case AST_BLOCK:
+        for (size_t i = 0; i < stmt->children_count; i++)
+            dae_remove_arg_in_stmt(stmt->children[i], func_name, arg_idx);
+        break;
+    case AST_RETURN:
+        dae_remove_arg_in_expr(stmt->data.return_stmt.expression, func_name, arg_idx);
+        break;
+    case AST_VAR_DECL:
+        dae_remove_arg_in_expr(stmt->data.var_decl.initializer, func_name, arg_idx);
+        break;
+    case AST_ASSIGN:
+        dae_remove_arg_in_expr(stmt->data.assign.value, func_name, arg_idx);
+        break;
+    case AST_IF:
+        dae_remove_arg_in_expr(stmt->data.if_stmt.condition, func_name, arg_idx);
+        dae_remove_arg_in_stmt(stmt->data.if_stmt.then_branch, func_name, arg_idx);
+        if (stmt->data.if_stmt.else_branch)
+            dae_remove_arg_in_stmt(stmt->data.if_stmt.else_branch, func_name, arg_idx);
+        break;
+    case AST_WHILE: case AST_DO_WHILE:
+        dae_remove_arg_in_expr(stmt->data.while_stmt.condition, func_name, arg_idx);
+        dae_remove_arg_in_stmt(stmt->data.while_stmt.body, func_name, arg_idx);
+        break;
+    case AST_FOR:
+        if (stmt->data.for_stmt.init) dae_remove_arg_in_stmt(stmt->data.for_stmt.init, func_name, arg_idx);
+        dae_remove_arg_in_expr(stmt->data.for_stmt.condition, func_name, arg_idx);
+        dae_remove_arg_in_expr(stmt->data.for_stmt.increment, func_name, arg_idx);
+        dae_remove_arg_in_stmt(stmt->data.for_stmt.body, func_name, arg_idx);
+        break;
+    case AST_SWITCH:
+        dae_remove_arg_in_expr(stmt->data.switch_stmt.condition, func_name, arg_idx);
+        dae_remove_arg_in_stmt(stmt->data.switch_stmt.body, func_name, arg_idx);
+        break;
+    default:
+        if (stmt->type == AST_CALL) {
+            if (strcmp(stmt->data.call.name, func_name) == 0 &&
+                (int)stmt->children_count > arg_idx) {
+                for (int j = arg_idx; j < (int)stmt->children_count - 1; j++)
+                    stmt->children[j] = stmt->children[j + 1];
+                stmt->children_count--;
+            }
+            for (size_t i = 0; i < stmt->children_count; i++)
+                dae_remove_arg_in_expr(stmt->children[i], func_name, arg_idx);
+        }
+        break;
+    }
+}
+
+/* Dead argument elimination pass. */
+static void ipa_dead_arg_elimination(ASTNode *program) {
+    for (size_t fi = 0; fi < program->children_count; fi++) {
+        ASTNode *fn = program->children[fi];
+        if (fn->type != AST_FUNCTION || !fn->data.function.body) continue;
+        if (strcmp(fn->data.function.name, "main") == 0) continue;
+        if (fn->children_count == 0) continue;
+
+        /* Check each parameter from right to left (to avoid index shifting issues) */
+        for (int p = (int)fn->children_count - 1; p >= 0; p--) {
+            ASTNode *param = fn->children[p];
+            if (param->type != AST_VAR_DECL) continue;
+
+            const char *param_name = param->data.var_decl.name;
+
+            /* Check if the parameter is used anywhere in the function body */
+            if (param_is_used_in_stmt(fn->data.function.body, param_name))
+                continue;
+
+            /* Parameter is dead — remove it from the function definition */
+            for (int j = p; j < (int)fn->children_count - 1; j++)
+                fn->children[j] = fn->children[j + 1];
+            fn->children_count--;
+
+            /* Remove corresponding argument from all call sites */
+            for (size_t ci = 0; ci < program->children_count; ci++) {
+                ASTNode *caller = program->children[ci];
+                if (caller->type == AST_FUNCTION && caller->data.function.body) {
+                    dae_remove_arg_in_stmt(caller->data.function.body,
+                                           fn->data.function.name, p);
+                }
+            }
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* IPA Pass 4: Dead Function Elimination                              */
+/*                                                                    */
+/* After inlining and other IPA passes, some functions may have zero  */
+/* remaining call sites. Remove their definitions from the program    */
+/* to reduce code size. Skips 'main' and functions with external      */
+/* linkage that could be called from other translation units.         */
+/* ------------------------------------------------------------------ */
+
+/* Check if `func_name` is called anywhere in an expression tree. */
+static int func_is_called_in_expr(ASTNode *expr, const char *func_name) {
+    if (!expr) return 0;
+    if (expr->type == AST_CALL &&
+        strcmp(expr->data.call.name, func_name) == 0)
+        return 1;
+    switch (expr->type) {
+    case AST_CALL:
+        for (size_t i = 0; i < expr->children_count; i++)
+            if (func_is_called_in_expr(expr->children[i], func_name)) return 1;
+        return 0;
+    case AST_BINARY_EXPR:
+        return func_is_called_in_expr(expr->data.binary_expr.left, func_name) ||
+               func_is_called_in_expr(expr->data.binary_expr.right, func_name);
+    case AST_NEG: case AST_NOT: case AST_BITWISE_NOT:
+    case AST_PRE_INC: case AST_PRE_DEC:
+    case AST_POST_INC: case AST_POST_DEC:
+    case AST_DEREF: case AST_ADDR_OF:
+        return func_is_called_in_expr(expr->data.unary.expression, func_name);
+    case AST_CAST:
+        return func_is_called_in_expr(expr->data.cast.expression, func_name);
+    case AST_MEMBER_ACCESS:
+        return func_is_called_in_expr(expr->data.member_access.struct_expr, func_name);
+    case AST_ARRAY_ACCESS:
+        return func_is_called_in_expr(expr->data.array_access.array, func_name) ||
+               func_is_called_in_expr(expr->data.array_access.index, func_name);
+    case AST_IF:
+        return func_is_called_in_expr(expr->data.if_stmt.condition, func_name) ||
+               func_is_called_in_expr(expr->data.if_stmt.then_branch, func_name) ||
+               func_is_called_in_expr(expr->data.if_stmt.else_branch, func_name);
+    case AST_ASSIGN:
+        return func_is_called_in_expr(expr->data.assign.left, func_name) ||
+               func_is_called_in_expr(expr->data.assign.value, func_name);
+    default:
+        return 0;
+    }
+}
+
+/* Check if `func_name` is called anywhere in a statement tree. */
+static int func_is_called_in_stmt(ASTNode *stmt, const char *func_name) {
+    if (!stmt) return 0;
+    switch (stmt->type) {
+    case AST_BLOCK:
+        for (size_t i = 0; i < stmt->children_count; i++)
+            if (func_is_called_in_stmt(stmt->children[i], func_name)) return 1;
+        return 0;
+    case AST_RETURN:
+        return func_is_called_in_expr(stmt->data.return_stmt.expression, func_name);
+    case AST_VAR_DECL:
+        return func_is_called_in_expr(stmt->data.var_decl.initializer, func_name);
+    case AST_ASSIGN:
+        return func_is_called_in_expr(stmt->data.assign.left, func_name) ||
+               func_is_called_in_expr(stmt->data.assign.value, func_name);
+    case AST_IF:
+        return func_is_called_in_expr(stmt->data.if_stmt.condition, func_name) ||
+               func_is_called_in_stmt(stmt->data.if_stmt.then_branch, func_name) ||
+               func_is_called_in_stmt(stmt->data.if_stmt.else_branch, func_name);
+    case AST_WHILE: case AST_DO_WHILE:
+        return func_is_called_in_expr(stmt->data.while_stmt.condition, func_name) ||
+               func_is_called_in_stmt(stmt->data.while_stmt.body, func_name);
+    case AST_FOR:
+        return func_is_called_in_stmt(stmt->data.for_stmt.init, func_name) ||
+               func_is_called_in_expr(stmt->data.for_stmt.condition, func_name) ||
+               func_is_called_in_expr(stmt->data.for_stmt.increment, func_name) ||
+               func_is_called_in_stmt(stmt->data.for_stmt.body, func_name);
+    case AST_SWITCH:
+        return func_is_called_in_expr(stmt->data.switch_stmt.condition, func_name) ||
+               func_is_called_in_stmt(stmt->data.switch_stmt.body, func_name);
+    default:
+        if (stmt->type == AST_CALL &&
+            strcmp(stmt->data.call.name, func_name) == 0) return 1;
+        if (stmt->type == AST_CALL) {
+            for (size_t i = 0; i < stmt->children_count; i++)
+                if (func_is_called_in_expr(stmt->children[i], func_name)) return 1;
+        }
+        return 0;
+    }
+}
+
+/* Dead function elimination pass. */
+static void ipa_dead_function_elimination(ASTNode *program) {
+    for (size_t fi = 0; fi < program->children_count; fi++) {
+        ASTNode *fn = program->children[fi];
+        if (fn->type != AST_FUNCTION || !fn->data.function.body) continue;
+
+        /* Never remove main */
+        if (strcmp(fn->data.function.name, "main") == 0) continue;
+
+        /* Check if any other function calls this one */
+        int is_called = 0;
+        for (size_t ci = 0; ci < program->children_count; ci++) {
+            if (ci == fi) continue; /* skip self */
+            ASTNode *caller = program->children[ci];
+            if (caller->type == AST_FUNCTION && caller->data.function.body) {
+                if (func_is_called_in_stmt(caller->data.function.body, fn->data.function.name)) {
+                    is_called = 1;
+                    break;
+                }
+            }
+        }
+
+        if (!is_called) {
+            /* Remove the function by shifting subsequent children down */
+            for (size_t j = fi; j < program->children_count - 1; j++)
+                program->children[j] = program->children[j + 1];
+            program->children_count--;
+            fi--; /* re-check the slot (new function moved here) */
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Top-level entry point                                              */
 /* ------------------------------------------------------------------ */
@@ -2284,6 +3073,42 @@ ASTNode *optimize(ASTNode *program, OptLevel level) {
         }
 
         /* Re-run O1 + O2 passes after unrolling (fold constants, eliminate dead code) */
+        for (size_t i = 0; i < program->children_count; i++) {
+            ASTNode *child = program->children[i];
+            if (child->type == AST_FUNCTION && child->data.function.body) {
+                opt_stmt(child->data.function.body);
+                o2_propagate_block(child->data.function.body);
+            }
+        }
+
+        /* Pass 3: Interprocedural optimization */
+
+        /* IPA 3a: Return value propagation — replace calls to functions that
+           always return the same constant with that constant value. */
+        find_rvp_candidates(program);
+        if (g_rvp_cand_count > 0) {
+            for (size_t i = 0; i < program->children_count; i++) {
+                ASTNode *child = program->children[i];
+                if (child->type == AST_FUNCTION && child->data.function.body) {
+                    rvp_substitute_stmt(child->data.function.body);
+                }
+            }
+        }
+
+        /* IPA 3b: Interprocedural constant propagation — if a parameter is
+           always passed the same constant across all call sites, substitute
+           it in the function body. */
+        ipa_propagate_constants(program);
+
+        /* IPA 3c: Dead argument elimination — remove unused parameters from
+           function definitions and their corresponding arguments from call sites. */
+        ipa_dead_arg_elimination(program);
+
+        /* IPA 3d: Dead function elimination — remove functions with zero
+           callers remaining after inlining and RVP. */
+        ipa_dead_function_elimination(program);
+
+        /* Final cleanup: re-run O1 + O2 after IPA passes */
         for (size_t i = 0; i < program->children_count; i++) {
             ASTNode *child = program->children[i];
             if (child->type == AST_FUNCTION && child->data.function.body) {

@@ -365,9 +365,9 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [x] **Aggressive inlining**: Multi-statement functions (up to 20 stmts) inlined at call sites with parameter substitution, local variable renaming, and statement injection. Self-recursion prevention.
 - [x] **Loop unrolling**: Full unroll for constant-count loops with N ≤ 8; partial unroll with factor 2–4 for larger loops (9–256 iterations). Remainder iterations unrolled with constant substitution.
 - [x] **Loop strength reduction**: Achieved through loop unrolling + constant folding — after unrolling, `a[i]` becomes `a[0]`, `a[1]`, ... which are constant-folded into direct indexed addressing.
+- [x] **Interprocedural optimization**: IPA constant propagation (specialize parameters always passed as the same constant across all call sites), dead argument elimination (remove unused parameters from definitions and call sites), dead function elimination (remove functions with zero callers after inlining), and return value propagation (replace calls to always-constant-returning functions with the constant).
 - [ ] **Vectorization hints**: Where possible, use wider SSE/AVX instructions for array operations (e.g., `addps` for float arrays). (future — requires instruction selector)
-- [ ] **Instruction scheduling**: Reorder independent instructions to reduce pipeline stalls and improve ILP (instruction-level parallelism). (future — requires CFG)
-- [ ] **Interprocedural optimization**: Constant propagation and dead argument elimination across function boundaries (requires whole-program analysis). (future — requires CFG)
+- [ ] **Instruction scheduling**: Reorder independent instructions to reduce pipeline stalls and improve ILP (instruction-level parallelism). (future — requires instruction buffer + CFG)
 - [ ] **Profile-guided optimization (PGO) support** (future): Instrument code for profiling, then use profile data to guide inlining and branch prediction hints.
 
 ### Phase 6: `-Os` / `-Og` — Size & Debug Optimizations
