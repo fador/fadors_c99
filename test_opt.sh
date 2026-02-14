@@ -240,6 +240,158 @@ else
     fail "xor not found for zero-init"
 fi
 
+# ---- 8. Immediate Operand Optimization ----
+echo ""
+echo "--- Immediate Operand Optimization ---"
+
+# Test: add with immediate — should use add $imm,%eax instead of push/pop
+cat > "$TMPDIR/imm1.c" << 'EOF'
+int main() {
+    int x = 10;
+    int y = x + 5;
+    int z = x - 3;
+    int w = x * 2;
+    return y + z + w;
+}
+EOF
+check_exit "imm_arith" "$TMPDIR/imm1.c" 42 "-O1"
+
+# Check that O1 generates smaller code (no push/pop for constants)
+"$CC" "$TMPDIR/imm1.c" -o "$TMPDIR/imm1_o0" 2>&1 | grep -oP 'text=\K[0-9]+' > "$TMPDIR/isz0"
+"$CC" -O1 "$TMPDIR/imm1.c" -o "$TMPDIR/imm1_o1" 2>&1 | grep -oP 'text=\K[0-9]+' > "$TMPDIR/isz1"
+IMM_O0=$(cat "$TMPDIR/isz0")
+IMM_O1=$(cat "$TMPDIR/isz1")
+if [ "$IMM_O1" -lt "$IMM_O0" ]; then
+    pass "Immediate opt smaller code ($IMM_O1 < $IMM_O0)"
+else
+    fail "Immediate opt not smaller ($IMM_O1 >= $IMM_O0)"
+fi
+
+# Test: comparison with immediate
+cat > "$TMPDIR/imm2.c" << 'EOF'
+int main() {
+    int x = 7;
+    int a = (x > 3);
+    int b = (x == 7);
+    int c = (x < 10);
+    int d = (x != 5);
+    return a + b + c + d;
+}
+EOF
+check_exit "imm_compare" "$TMPDIR/imm2.c" 4 "-O1"
+
+# Test: bitwise with immediate
+cat > "$TMPDIR/imm3.c" << 'EOF'
+int main() {
+    int x = 0xFF;
+    int a = x & 0x0F;
+    int b = x | 0x100;
+    int c = x ^ 0x55;
+    int d = x << 2;
+    int e = x >> 4;
+    return a + (b & 0xFF) + c + d + e;
+}
+EOF
+check_exit "imm_bitwise" "$TMPDIR/imm3.c" 195 "-O1"
+
+# Test: verify assembly uses immediate operands (no pushq/popq around constant ops)
+cat > "$TMPDIR/imm4.c" << 'EOF'
+int main() {
+    int x = 10;
+    return x + 5;
+}
+EOF
+"$CC" -O1 -S "$TMPDIR/imm4.c" -o "$TMPDIR/imm4.s" 2>/dev/null
+if grep -qE 'add[l]? \$5' "$TMPDIR/imm4.s" 2>/dev/null; then
+    pass "Assembly uses add \$5 immediate"
+else
+    fail "Assembly missing immediate operand"
+fi
+
+# ---- 9. Branch Optimization ----
+echo ""
+echo "--- Branch Optimization ---"
+
+# Test: if-else correctness with -O1
+cat > "$TMPDIR/br1.c" << 'EOF'
+int main() {
+    int x = 5;
+    int r;
+    if (x > 3) {
+        r = 10;
+    } else {
+        r = 20;
+    }
+    if (x < 2) {
+        r = r + 100;
+    }
+    return r;
+}
+EOF
+check_exit "br_if_else" "$TMPDIR/br1.c" 10 "-O1"
+
+# Test: switch correctness with -O1
+cat > "$TMPDIR/br2.c" << 'EOF'
+int main() {
+    int x = 3;
+    int r = 0;
+    switch (x) {
+        case 1: r = 10; break;
+        case 2: r = 20; break;
+        case 3: r = 30; break;
+        case 4: r = 40; break;
+        default: r = 50; break;
+    }
+    return r;
+}
+EOF
+check_exit "br_switch" "$TMPDIR/br2.c" 30 "-O1"
+
+# Test: nested if-else with -O1
+cat > "$TMPDIR/br3.c" << 'EOF'
+int main() {
+    int x = 7;
+    int r = 0;
+    if (x > 10) {
+        r = 1;
+    } else if (x > 5) {
+        r = 2;
+    } else if (x > 0) {
+        r = 3;
+    } else {
+        r = 4;
+    }
+    return r;
+}
+EOF
+check_exit "br_nested_if" "$TMPDIR/br3.c" 2 "-O1"
+
+# Test: while loop with -O1
+cat > "$TMPDIR/br4.c" << 'EOF'
+int main() {
+    int i = 0;
+    int sum = 0;
+    while (i < 10) {
+        sum = sum + i;
+        i = i + 1;
+    }
+    return sum;
+}
+EOF
+check_exit "br_while_loop" "$TMPDIR/br4.c" 45 "-O1"
+
+# Test: for loop with -O1
+cat > "$TMPDIR/br5.c" << 'EOF'
+int main() {
+    int sum = 0;
+    for (int i = 1; i <= 5; i = i + 1) {
+        sum = sum + i * i;
+    }
+    return sum;
+}
+EOF
+check_exit "br_for_loop" "$TMPDIR/br5.c" 55 "-O1"
+
 # ---- Summary ----
 echo ""
 echo "=== Results ==="

@@ -437,11 +437,23 @@ static void opt_block(ASTNode *block) {
         opt_stmt(block->children[i]);
     }
 
-    /* Second: find the first return/break/continue/goto and truncate */
+    /* Second: find the first return/break/continue/goto and truncate.
+     * Be careful not to truncate across case/default labels in switch bodies,
+     * because those labels are reachable via the switch jump table. */
     for (size_t i = 0; i < block->children_count; i++) {
         ASTNode *child = block->children[i];
         if (child->type == AST_RETURN || child->type == AST_BREAK ||
             child->type == AST_CONTINUE || child->type == AST_GOTO) {
+            /* Check if any remaining sibling is a case/default label */
+            int has_case_label = 0;
+            for (size_t j = i + 1; j < block->children_count; j++) {
+                if (block->children[j]->type == AST_CASE ||
+                    block->children[j]->type == AST_DEFAULT) {
+                    has_case_label = 1;
+                    break;
+                }
+            }
+            if (has_case_label) continue;  /* don't truncate — more cases follow */
             /* Everything after this statement is dead code — truncate */
             if (i + 1 < block->children_count) {
                 block->children_count = i + 1;

@@ -103,6 +103,64 @@ static int peep_pending_jmp = 0;     // 1 if there's a buffered jmp to emit
 static char peep_jmp_target[64];     // target label of the buffered jmp
 static int peep_in_flush = 0;        // prevent recursion during flush
 
+// Branch optimization: buffer jcc for jcc-over-jmp pattern
+// Detects: jcc L1; jmp L2; L1: → inverted-jcc L2
+// State machine: buffer jcc, then if jmp follows, store both as a candidate pair.
+// Only invert when emit_label_def sees L1 as the very next label.
+static int peep_pending_jcc = 0;     // 1 if there's a buffered conditional jump
+static char peep_jcc_mnemonic[16];   // mnemonic of the buffered jcc (e.g., "je")
+static char peep_jcc_target[64];     // target label of the buffered jcc
+// Combined jcc-over-jmp candidate pair:
+static int peep_jcc_jmp_pair = 0;    // 1 if we have a jcc+jmp pair waiting for label confirmation
+static char peep_pair_jcc_mn[16];    // jcc mnemonic in the pair
+static char peep_pair_jcc_tgt[64];   // jcc target (L1 — must match next label)
+static char peep_pair_jmp_tgt[64];   // jmp target (L2 — becomes inverted jcc target)
+
+static const char *peep_invert_jcc(const char *jcc) {
+    if (strcmp(jcc, "je")  == 0) return "jne";
+    if (strcmp(jcc, "jne") == 0) return "je";
+    if (strcmp(jcc, "jl")  == 0) return "jge";
+    if (strcmp(jcc, "jge") == 0) return "jl";
+    if (strcmp(jcc, "jg")  == 0) return "jle";
+    if (strcmp(jcc, "jle") == 0) return "jg";
+    if (strcmp(jcc, "ja")  == 0) return "jbe";
+    if (strcmp(jcc, "jbe") == 0) return "ja";
+    if (strcmp(jcc, "jae") == 0) return "jb";
+    if (strcmp(jcc, "jb")  == 0) return "jae";
+    if (strcmp(jcc, "jz")  == 0) return "jnz";
+    if (strcmp(jcc, "jnz") == 0) return "jz";
+    return NULL;  // unknown — can't invert
+}
+
+static void peep_flush_jcc(void) {
+    if (peep_pending_jcc) {
+        peep_pending_jcc = 0;
+        peep_in_flush = 1;
+        Operand flush_op;
+        flush_op.type = OP_LABEL;
+        flush_op.data.label = peep_jcc_target;
+        emit_inst1(peep_jcc_mnemonic, &flush_op);
+        peep_in_flush = 0;
+    }
+}
+
+/* Flush a pending jcc+jmp pair without optimization (pattern didn't match) */
+static void peep_flush_pair(void) {
+    if (peep_jcc_jmp_pair) {
+        peep_jcc_jmp_pair = 0;
+        peep_in_flush = 1;
+        Operand op1;
+        op1.type = OP_LABEL;
+        op1.data.label = peep_pair_jcc_tgt;
+        emit_inst1(peep_pair_jcc_mn, &op1);
+        Operand op2;
+        op2.type = OP_LABEL;
+        op2.data.label = peep_pair_jmp_tgt;
+        emit_inst1("jmp", &op2);
+        peep_in_flush = 0;
+    }
+}
+
 static void peep_flush_jmp(void) {
     if (peep_pending_jmp) {
         peep_pending_jmp = 0;
@@ -158,6 +216,48 @@ void arch_x86_64_set_writer(COFFWriter *writer) {
 static void emit_label_def(const char *name) {
     // Peephole: only apply to text section labels
     if (current_section == SECTION_TEXT) {
+        // Resolve pending jcc+jmp pair: jcc L1; jmp L2; L1: → j!cc L2
+        if (peep_jcc_jmp_pair) {
+            const char *cmp_name = name;
+            if (current_syntax == SYNTAX_INTEL && name[0] == '.') cmp_name = name + 1;
+            if (strcmp(cmp_name, peep_pair_jcc_tgt) == 0) {
+                /* Pattern confirmed: jcc L1; jmp L2; L1: → emit inverted-jcc L2 */
+                const char *inv = peep_invert_jcc(peep_pair_jcc_mn);
+                peep_jcc_jmp_pair = 0;
+                if (inv) {
+                    peep_in_flush = 1;
+                    Operand inv_op;
+                    inv_op.type = OP_LABEL;
+                    inv_op.data.label = peep_pair_jmp_tgt;
+                    emit_inst1(inv, &inv_op);
+                    peep_in_flush = 0;
+                } else {
+                    /* Can't invert — flush both original instructions */
+                    peep_in_flush = 1;
+                    Operand op1;
+                    op1.type = OP_LABEL;
+                    op1.data.label = peep_pair_jcc_tgt;
+                    emit_inst1(peep_pair_jcc_mn, &op1);
+                    Operand op2;
+                    op2.type = OP_LABEL;
+                    op2.data.label = peep_pair_jmp_tgt;
+                    emit_inst1("jmp", &op2);
+                    peep_in_flush = 0;
+                }
+            } else {
+                peep_flush_pair();  // different label — pattern didn't match, flush both
+            }
+        }
+        // Flush or cancel pending conditional jump
+        if (peep_pending_jcc) {
+            const char *cmp_name = name;
+            if (current_syntax == SYNTAX_INTEL && name[0] == '.') cmp_name = name + 1;
+            if (strcmp(cmp_name, peep_jcc_target) == 0) {
+                peep_pending_jcc = 0;  // jcc to next instruction — always taken or no-op, cancel it
+            } else {
+                peep_flush_jcc();      // different label — flush the pending jcc
+            }
+        }
         if (peep_pending_jmp) {
             const char *cmp_name = name;
             if (current_syntax == SYNTAX_INTEL && name[0] == '.') cmp_name = name + 1;
@@ -623,6 +723,8 @@ static void print_operand_jmp(Operand *op) {
 static void emit_inst0(const char *mnemonic) {
     // Peephole: suppress dead code after unconditional jmp
     if (!peep_in_flush && current_section == SECTION_TEXT) {
+        peep_flush_jcc();
+        peep_flush_pair();
         peep_flush_jmp();
         if (peep_unreachable) return;
     }
@@ -645,14 +747,56 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
     if (!peep_in_flush && current_section == SECTION_TEXT &&
         strcmp(mnemonic, "jmp") == 0 && op1->type == OP_LABEL) {
         if (peep_unreachable) return;  // dead code after previous jmp
+        
+        /* Branch optimization: jcc L1; jmp L2 → candidate pair
+         * Don't invert yet — defer to emit_label_def to confirm L1 is next. */
+        if (g_compiler_options.opt_level >= OPT_O1 && peep_pending_jcc) {
+            const char *inv = peep_invert_jcc(peep_jcc_mnemonic);
+            if (inv) {
+                /* Store as a candidate pair; emit_label_def will resolve */
+                peep_jcc_jmp_pair = 1;
+                strncpy(peep_pair_jcc_mn, peep_jcc_mnemonic, 15);
+                peep_pair_jcc_mn[15] = '\0';
+                strncpy(peep_pair_jcc_tgt, peep_jcc_target, 63);
+                peep_pair_jcc_tgt[63] = '\0';
+                strncpy(peep_pair_jmp_tgt, op1->data.label, 63);
+                peep_pair_jmp_tgt[63] = '\0';
+                peep_pending_jcc = 0;
+                peep_unreachable = 1;  // code after jmp is unreachable
+                return;
+            }
+        }
+        
+        peep_flush_jcc();
+        peep_flush_pair();
         peep_pending_jmp = 1;
         strncpy(peep_jmp_target, op1->data.label, 63);
         peep_jmp_target[63] = '\0';
         peep_unreachable = 1;
         return;
     }
+    
+    /* Peephole: buffer conditional jumps at -O1 for jcc-over-jmp detection */
+    if (!peep_in_flush && current_section == SECTION_TEXT &&
+        g_compiler_options.opt_level >= OPT_O1 &&
+        op1->type == OP_LABEL &&
+        mnemonic[0] == 'j' && strcmp(mnemonic, "jmp") != 0) {
+        peep_flush_jcc();  /* flush any previous buffered jcc first */
+        peep_flush_pair();
+        peep_flush_jmp();
+        if (peep_unreachable) return;
+        peep_pending_jcc = 1;
+        strncpy(peep_jcc_mnemonic, mnemonic, 15);
+        peep_jcc_mnemonic[15] = '\0';
+        strncpy(peep_jcc_target, op1->data.label, 63);
+        peep_jcc_target[63] = '\0';
+        return;
+    }
+    
     // Peephole: suppress dead code after unconditional jmp
     if (!peep_in_flush && current_section == SECTION_TEXT) {
+        peep_flush_jcc();
+        peep_flush_pair();
         peep_flush_jmp();
         if (peep_unreachable) return;
     }
@@ -693,6 +837,8 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
 static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
     // Peephole: suppress dead code after unconditional jmp
     if (!peep_in_flush && current_section == SECTION_TEXT) {
+        peep_flush_jcc();
+        peep_flush_pair();
         peep_flush_jmp();
         if (peep_unreachable) return;
     }
@@ -1014,6 +1160,115 @@ static void gen_binary_expr(ASTNode *node) {
     }
 
     // Integer branch
+
+    /* -O1: Immediate operand optimization.
+     * When the right operand is a small integer constant, avoid push/pop
+     * and use the immediate directly with the instruction:
+     *   Before: mov $K,%rax; push %rax; gen(left); pop %rcx; OP %rcx,%rax
+     *   After:  gen(left); OP $K,%rax
+     * This saves 2 memory ops + several bytes per binary expression with a constant.
+     * Only for ops that support immediate operands (not div/mod, which need %rcx).
+     */
+    ASTNode *right_node = node->data.binary_expr.right;
+    if (g_compiler_options.opt_level >= OPT_O1 &&
+        right_node->type == AST_INTEGER &&
+        node->data.binary_expr.op != TOKEN_SLASH &&
+        node->data.binary_expr.op != TOKEN_PERCENT &&
+        node->data.binary_expr.op != TOKEN_AMPERSAND_AMPERSAND &&
+        node->data.binary_expr.op != TOKEN_PIPE_PIPE) {
+        
+        long long imm = right_node->data.integer.value;
+        Type *left_type = get_expr_type(node->data.binary_expr.left);
+        Type *right_type = get_expr_type(right_node);
+        
+        int use_32bit = 0;
+        if (left_type && right_type &&
+            left_type->kind != TYPE_PTR && left_type->kind != TYPE_ARRAY &&
+            right_type->kind != TYPE_PTR && right_type->kind != TYPE_ARRAY &&
+            left_type->size <= 4 && right_type->size <= 4) {
+            use_32bit = 1;
+        }
+        
+        gen_expression(node->data.binary_expr.left);
+        
+        switch (node->data.binary_expr.op) {
+            case TOKEN_PLUS:
+                if (left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY)) {
+                    int psize = 1;
+                    if (left_type->data.ptr_to) psize = left_type->data.ptr_to->size;
+                    if (psize > 1) imm *= psize;
+                    node->resolved_type = left_type;
+                } else {
+                    node->resolved_type = left_type ? left_type : right_type;
+                }
+                if (use_32bit) emit_inst2("addl", op_imm(imm), op_reg("eax"));
+                else emit_inst2("add", op_imm(imm), op_reg("rax"));
+                return;
+            case TOKEN_MINUS:
+                if (left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY)) {
+                    int psize = 1;
+                    if (left_type->data.ptr_to) psize = left_type->data.ptr_to->size;
+                    if (psize > 1) imm *= psize;
+                    node->resolved_type = left_type;
+                } else {
+                    node->resolved_type = left_type;
+                }
+                if (use_32bit) emit_inst2("subl", op_imm(imm), op_reg("eax"));
+                else emit_inst2("sub", op_imm(imm), op_reg("rax"));
+                return;
+            case TOKEN_STAR:
+                if (use_32bit) emit_inst2("imull", op_imm(imm), op_reg("eax"));
+                else emit_inst2("imul", op_imm(imm), op_reg("rax"));
+                node->resolved_type = left_type;
+                return;
+            case TOKEN_AMPERSAND:
+                if (use_32bit) emit_inst2("andl", op_imm(imm), op_reg("eax"));
+                else emit_inst2("and", op_imm(imm), op_reg("rax"));
+                node->resolved_type = left_type;
+                return;
+            case TOKEN_PIPE:
+                if (use_32bit) emit_inst2("orl", op_imm(imm), op_reg("eax"));
+                else emit_inst2("or", op_imm(imm), op_reg("rax"));
+                node->resolved_type = left_type;
+                return;
+            case TOKEN_CARET:
+                if (use_32bit) emit_inst2("xorl", op_imm(imm), op_reg("eax"));
+                else emit_inst2("xor", op_imm(imm), op_reg("rax"));
+                node->resolved_type = left_type;
+                return;
+            case TOKEN_LESS_LESS:
+                emit_inst2("shl", op_imm(imm), op_reg("rax"));
+                node->resolved_type = left_type;
+                return;
+            case TOKEN_GREATER_GREATER:
+                emit_inst2("sar", op_imm(imm), op_reg("rax"));
+                node->resolved_type = left_type;
+                return;
+            case TOKEN_EQUAL_EQUAL:
+            case TOKEN_BANG_EQUAL:
+            case TOKEN_LESS:
+            case TOKEN_GREATER:
+            case TOKEN_LESS_EQUAL:
+            case TOKEN_GREATER_EQUAL: {
+                Type *cmp_type = left_type ? left_type : right_type;
+                if (cmp_type && cmp_type->size == 4) emit_inst2("cmpl", op_imm(imm), op_reg("eax"));
+                else emit_inst2("cmp", op_imm(imm), op_reg("rax"));
+                
+                if (node->data.binary_expr.op == TOKEN_EQUAL_EQUAL) emit_inst1("sete", op_reg("al"));
+                else if (node->data.binary_expr.op == TOKEN_BANG_EQUAL) emit_inst1("setne", op_reg("al"));
+                else if (node->data.binary_expr.op == TOKEN_LESS) emit_inst1("setl", op_reg("al"));
+                else if (node->data.binary_expr.op == TOKEN_GREATER) emit_inst1("setg", op_reg("al"));
+                else if (node->data.binary_expr.op == TOKEN_LESS_EQUAL) emit_inst1("setle", op_reg("al"));
+                else if (node->data.binary_expr.op == TOKEN_GREATER_EQUAL) emit_inst1("setge", op_reg("al"));
+                
+                emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
+                node->resolved_type = type_int();
+                return;
+            }
+            default: break;  /* fall through to general path */
+        }
+    }
+
     gen_expression(node->data.binary_expr.right);
     emit_inst1("pushq", op_reg("rax"));
     stack_offset -= 8;

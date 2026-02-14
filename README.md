@@ -322,12 +322,12 @@ This section outlines the implementation plan for compiler optimization flags (`
 
 - [x] **Constant folding**: Evaluate constant expressions at compile time (e.g., `3 + 4` → `7`, `(2+3)*(4-1)` → `15`). Handles all binary operators, unary `-`, `!`, `~`, and nested expressions. Also folds comparisons (`10 > 5` → `1`) and logical operators (`&&`, `||`). Reduces code size ~36% on constant-heavy code (222→142 bytes text).
 - [x] **Dead code elimination (basic)**: Remove statements after unconditional `return`, `break`, `continue`, `goto` in blocks. Remove unreachable branches when `if`/`while`/`for` condition is a compile-time constant (`if(0){...}` → eliminated, `while(0){...}` → eliminated, `if(1){...} else{...}` → then-branch only).
-- [ ] **Redundant load/store elimination**: Track register contents; skip reload if value already in register from prior instruction.
+- [x] **Immediate operand optimization**: When a binary operation's right operand is a compile-time integer constant, emit `OP $imm, %reg` directly instead of `mov $imm, %rax; push; pop %rcx; OP %rcx, %rax`. Covers `+`, `-`, `*`, `&`, `|`, `^`, `<<`, `>>`, and all 6 comparison operators. Handles pointer arithmetic scaling. Excludes `/` and `%` (require `idiv` with register operands). Reduces code size and eliminates unnecessary stack traffic.
 - [x] **Strength reduction (simple)**: Replace `x * 2^n` with `x << n`, `x / 2^n` with `x >> n`, `x % 2^n` with `x & (2^n-1)`. Works for any power-of-two constant on either side of multiplication.
-- [ ] **Branch optimization**: Extend existing peephole — remove redundant jumps, convert `jcc` over `jmp` to inverted `jcc`.
+- [x] **Branch optimization**: Extend existing peephole — remove redundant jumps, convert `jcc` over `jmp` to inverted `jcc`. Buffers conditional jumps and detects `jcc L1; jmp L2; L1:` patterns, emitting `j!cc L2` (inverted condition) instead. Only fires when L1 is confirmed as the immediately following label. Also eliminates `jcc L; L:` (conditional jump to next instruction). Fixed dead-code elimination to preserve switch `case`/`default` labels after `break` statements.
 - [x] **Zero-initialization optimization**: Use `xor %eax, %eax` instead of `mov $0, %rax` for integer zero-init at `-O1` and above. Also applied to pre-call register zeroing.
 - [x] **Boolean simplification**: All condition tests (`if`, `while`, `do-while`, `for`, ternary) use `test %rax, %rax` instead of `cmp $0, %rax` (shorter encoding, 2 bytes vs 7). Applied unconditionally (always an improvement).
-- [x] **Algebraic simplification**: Identity (`x+0→x`, `x*1→x`, `x/1→x`, `x|0→x`, `x^0→x`, `x<<0→x`) and annihilator (`x*0→0`, `x&0→0`) rules. Also double-negation removal (`-(-x)→x`, `~~x→x`). Automated test suite: `test_opt.sh` (20 tests).
+- [x] **Algebraic simplification**: Identity (`x+0→x`, `x*1→x`, `x/1→x`, `x|0→x`, `x^0→x`, `x<<0→x`) and annihilator (`x*0→0`, `x&0→0`) rules. Also double-negation removal (`-(-x)→x`, `~~x→x`). Automated test suite: `test_opt.sh` (30 tests).
 
 ### Phase 4: `-O2` — Standard Optimizations
 
