@@ -43,6 +43,27 @@ typedef struct {
     uint8_t  end_seq;
 } LinkDebugLine;
 
+/* Debug variable entry (parameter or local) */
+typedef struct {
+    char    *name;
+    int32_t  rbp_offset;
+    uint8_t  is_param;
+    uint8_t  type_kind;
+    int32_t  type_size;
+    char    *type_name;    /* for struct/union/enum; NULL otherwise */
+} LinkDebugVar;
+
+/* Debug function entry with variables */
+typedef struct {
+    char    *name;
+    uint32_t start_addr;   /* offset within merged .text */
+    uint32_t end_addr;
+    uint8_t  ret_type_kind;
+    int32_t  ret_type_size;
+    LinkDebugVar *vars;
+    size_t   var_count;
+} LinkDebugFunc;
+
 typedef struct {
     Buffer   text;
     Buffer   data;
@@ -68,6 +89,9 @@ typedef struct {
     LinkDebugLine  *debug_lines;
     size_t          debug_line_count;
     size_t          debug_line_cap;
+    LinkDebugFunc  *debug_funcs;
+    size_t          debug_func_count;
+    size_t          debug_func_cap;
 } Linker;
 
 /* Create / destroy */

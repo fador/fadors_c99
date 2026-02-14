@@ -295,9 +295,9 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [x] **ELF writer integration**: Custom `.fadors_debug` section in `.o` files carries raw line entries; linker generates proper DWARF 4 sections (`.debug_abbrev`, `.debug_info`, `.debug_line`) in final executable.
 - [x] **DWARF version**: DWARF 4 (compatible with gdb 7.5+, lldb).
 - [x] **GDB verification**: `break main`, `step`, `list`, `info line` all work correctly with source-level mapping.
-- [ ] **Subprogram DIEs**: `DW_TAG_subprogram` for each function — name, low_pc/high_pc, return type.
-- [ ] **Variable DIEs**: `DW_TAG_variable` / `DW_TAG_formal_parameter` with location expressions (`DW_OP_fbreg + offset`) for locals and parameters.
-- [ ] **Type DIEs**: `DW_TAG_base_type` for int/char/float/double, `DW_TAG_pointer_type`, `DW_TAG_structure_type`, `DW_TAG_array_type`, `DW_TAG_typedef`, `DW_TAG_enumeration_type`, `DW_TAG_union_type`.
+- [x] **Subprogram DIEs**: `DW_TAG_subprogram` for each function — name, low_pc/high_pc, frame_base, return type, external flag.
+- [x] **Variable DIEs**: `DW_TAG_variable` / `DW_TAG_formal_parameter` with location expressions (`DW_OP_fbreg + SLEB128 offset`) for locals and parameters.
+- [x] **Type DIEs**: `DW_TAG_base_type` for int/char/short/long/float/double and unsigned variants, `DW_TAG_pointer_type`, `DW_TAG_unspecified_type` (void). Type deduplication across all functions.
 - [ ] **`.debug_str` section**: Pooled string table for type/variable/function names.
 - [ ] **`.debug_aranges` section**: Address range lookup table.
 
@@ -311,7 +311,7 @@ This section outlines the implementation plan for compiler optimization flags (`
 
 #### Phase 2c: Source-Level Debugging Verification
 - [x] **Test `gdb` step-through**: Compile a test program with `-g`, verify `gdb` can `break main`, `step`, `list`, `info line`.
-- [ ] **Test `gdb` variable inspection**: Verify `print` and `info locals` work (requires Variable/Type DIEs from Phase 2a).
+- [x] **Test `gdb` variable inspection**: Verify `print` and `info locals` work — `print result` shows 30, `info args` shows a=10 b=20, `info locals` shows x/y/z.
 - [ ] **Test `lldb` step-through**: Same with `lldb` on Linux.
 - [ ] **Test Visual Studio debugging**: Compile with `-g --masm`, verify variable inspection in VS debugger.
 - [ ] **Test source mapping accuracy**: Line-by-line stepping matches actual source code.

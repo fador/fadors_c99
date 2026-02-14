@@ -36,6 +36,45 @@ static void debug_record_line(ASTNode *node) {
                                (uint32_t)node->line, 1);
 }
 
+/* Map a Type* to a DebugTypeKind for the debug info pipeline */
+static uint8_t debug_type_kind(Type *t) {
+    if (!t) return DBG_TYPE_VOID;
+    switch (t->kind) {
+        case TYPE_VOID:      return DBG_TYPE_VOID;
+        case TYPE_CHAR:      return DBG_TYPE_CHAR;
+        case TYPE_SHORT:     return DBG_TYPE_SHORT;
+        case TYPE_INT:       return DBG_TYPE_INT;
+        case TYPE_LONG:      return DBG_TYPE_LONG;
+        case TYPE_LONG_LONG: return DBG_TYPE_LONGLONG;
+        case TYPE_FLOAT:     return DBG_TYPE_FLOAT;
+        case TYPE_DOUBLE:    return DBG_TYPE_DOUBLE;
+        case TYPE_PTR:       return DBG_TYPE_PTR;
+        case TYPE_ARRAY:     return DBG_TYPE_ARRAY;
+        case TYPE_STRUCT:    return DBG_TYPE_STRUCT;
+        case TYPE_UNION:     return DBG_TYPE_UNION;
+        case TYPE_ENUM:      return DBG_TYPE_ENUM;
+        default:             return DBG_TYPE_INT;
+    }
+}
+
+/* Get the struct/union/enum name from a Type*, or NULL */
+static const char *debug_type_name(Type *t) {
+    if (!t) return NULL;
+    if (t->kind == TYPE_STRUCT || t->kind == TYPE_UNION || t->kind == TYPE_ENUM)
+        return t->data.struct_data.name;
+    return NULL;
+}
+
+/* Record a local variable or parameter for debug info */
+static void debug_record_var(const char *name, int rbp_offset, int is_param, Type *t) {
+    if (!obj_writer || !g_compiler_options.debug_info) return;
+    if (!name) return;
+    coff_writer_add_debug_var(obj_writer, name, (int32_t)rbp_offset,
+                               (uint8_t)is_param, debug_type_kind(t),
+                               t ? (int32_t)t->size : 0,
+                               debug_type_name(t));
+}
+
 // ABI register parameter arrays
 static const char *g_arg_regs[6];
 static const char *g_xmm_arg_regs[8];
@@ -1791,6 +1830,7 @@ static void gen_statement(ASTNode *node) {
             locals[locals_count].label = NULL;
             locals[locals_count].type = node->resolved_type;
             locals_count++;
+            debug_record_var(node->data.var_decl.name, stack_offset, 0, node->resolved_type);
             
             // Allocate space on stack
             emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
@@ -1868,6 +1908,7 @@ static void gen_statement(ASTNode *node) {
             locals[locals_count].label = NULL;
             locals[locals_count].type = node->resolved_type;
             locals_count++;
+            debug_record_var(node->data.var_decl.name, stack_offset, 0, node->resolved_type);
             
             if (is_float_type(node->resolved_type)) {
                 // Don't use emit_push_xmm here - stack_offset already adjusted above
@@ -2161,6 +2202,15 @@ static void gen_function(ASTNode *node) {
     }
     debug_last_line = 0;  /* reset for each function */
     debug_record_line(node);
+
+    /* Record function start for debug info */
+    if (obj_writer && g_compiler_options.debug_info) {
+        coff_writer_begin_debug_func(obj_writer, node->data.function.name,
+                                      (uint32_t)obj_writer->text_section.size,
+                                      debug_type_kind(node->resolved_type),
+                                      node->resolved_type ? (int32_t)node->resolved_type->size : 0);
+    }
+
     current_function_end_label = label_count++;
 
     // Reset peephole state for new function
@@ -2232,6 +2282,13 @@ static void gen_function(ASTNode *node) {
             }
         }
     }
+
+    /* Record parameters as debug variables */
+    if (obj_writer && g_compiler_options.debug_info) {
+        for (int pi = 0; pi < locals_count; pi++) {
+            debug_record_var(locals[pi].name, locals[pi].offset, 1, locals[pi].type);
+        }
+    }
     
     gen_statement(node->data.function.body);
     // Epilogue label
@@ -2241,6 +2298,11 @@ static void gen_function(ASTNode *node) {
     
     emit_inst0("leave");
     emit_inst0("ret");
+
+    /* Record function end for debug info */
+    if (obj_writer && g_compiler_options.debug_info) {
+        coff_writer_end_debug_func(obj_writer, (uint32_t)obj_writer->text_section.size);
+    }
     
     if (out && current_syntax == SYNTAX_INTEL) {
         fprintf(out, "%s ENDP\n", node->data.function.name);

@@ -31,6 +31,9 @@ void coff_writer_init(COFFWriter *w) {
     w->debug_lines = NULL;
     w->debug_line_count = 0;
     w->debug_line_capacity = 0;
+    w->debug_funcs = NULL;
+    w->debug_func_count = 0;
+    w->debug_func_capacity = 0;
 }
 
 void coff_writer_free(COFFWriter *w) {
@@ -49,6 +52,17 @@ void coff_writer_free(COFFWriter *w) {
     free(w->debug_source_file);
     free(w->debug_comp_dir);
     free(w->debug_lines);
+    if (w->debug_funcs) {
+        for (size_t fi = 0; fi < w->debug_func_count; fi++) {
+            free(w->debug_funcs[fi].name);
+            for (size_t vi = 0; vi < w->debug_funcs[fi].var_count; vi++) {
+                free(w->debug_funcs[fi].vars[vi].name);
+                free(w->debug_funcs[fi].vars[vi].type_name);
+            }
+            free(w->debug_funcs[fi].vars);
+        }
+        free(w->debug_funcs);
+    }
 }
 
 int32_t coff_writer_find_symbol(COFFWriter *w, const char *name) {
@@ -126,6 +140,46 @@ void coff_writer_add_debug_line(COFFWriter *w, uint32_t address, uint32_t line, 
     e->line = line;
     e->is_stmt = is_stmt;
     e->end_seq = 0;
+}
+
+void coff_writer_begin_debug_func(COFFWriter *w, const char *name, uint32_t start_addr,
+                                   uint8_t ret_type_kind, int32_t ret_type_size) {
+    if (w->debug_func_count >= w->debug_func_capacity) {
+        w->debug_func_capacity = w->debug_func_capacity ? w->debug_func_capacity * 2 : 16;
+        w->debug_funcs = realloc(w->debug_funcs, w->debug_func_capacity * sizeof(DebugFuncEntry));
+    }
+    DebugFuncEntry *fn = &w->debug_funcs[w->debug_func_count++];
+    fn->name = strdup(name);
+    fn->start_addr = start_addr;
+    fn->end_addr = start_addr; /* updated by end_debug_func */
+    fn->ret_type_kind = ret_type_kind;
+    fn->ret_type_size = ret_type_size;
+    fn->vars = NULL;
+    fn->var_count = 0;
+    fn->var_capacity = 0;
+}
+
+void coff_writer_end_debug_func(COFFWriter *w, uint32_t end_addr) {
+    if (w->debug_func_count == 0) return;
+    w->debug_funcs[w->debug_func_count - 1].end_addr = end_addr;
+}
+
+void coff_writer_add_debug_var(COFFWriter *w, const char *name, int32_t rbp_offset,
+                                uint8_t is_param, uint8_t type_kind, int32_t type_size,
+                                const char *type_name) {
+    if (w->debug_func_count == 0) return;
+    DebugFuncEntry *fn = &w->debug_funcs[w->debug_func_count - 1];
+    if (fn->var_count >= fn->var_capacity) {
+        fn->var_capacity = fn->var_capacity ? fn->var_capacity * 2 : 16;
+        fn->vars = realloc(fn->vars, fn->var_capacity * sizeof(DebugVarEntry));
+    }
+    DebugVarEntry *v = &fn->vars[fn->var_count++];
+    v->name = strdup(name);
+    v->rbp_offset = rbp_offset;
+    v->is_param = is_param;
+    v->type_kind = type_kind;
+    v->type_size = type_size;
+    v->type_name = type_name ? strdup(type_name) : NULL;
 }
 
 void coff_writer_write(COFFWriter *w, const char *filename) {

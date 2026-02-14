@@ -133,6 +133,70 @@ void elf_writer_write(COFFWriter *w, const char *filename) {
             buffer_write_byte(&fadors_debug_sec, w->debug_lines[di].is_stmt);
             buffer_write_byte(&fadors_debug_sec, w->debug_lines[di].end_seq);
         }
+
+        /* Function entries:
+         *   u32 func_count
+         *   For each function:
+         *     u32 name_len (incl null)
+         *     char[] name
+         *     u32 start_addr
+         *     u32 end_addr
+         *     u8  ret_type_kind
+         *     i32 ret_type_size
+         *     u32 var_count
+         *     For each variable:
+         *       u32 name_len (incl null)
+         *       char[] name
+         *       i32 rbp_offset
+         *       u8  is_param
+         *       u8  type_kind
+         *       i32 type_size
+         *       u32 type_name_len (0 if no name)
+         *       char[] type_name (if type_name_len > 0)
+         */
+        uint32_t fcount = (uint32_t)w->debug_func_count;
+        buffer_write_dword(&fadors_debug_sec, fcount);
+        for (size_t fi = 0; fi < w->debug_func_count; fi++) {
+            DebugFuncEntry *fn = &w->debug_funcs[fi];
+            uint32_t nlen = (uint32_t)(strlen(fn->name) + 1);
+            buffer_write_dword(&fadors_debug_sec, nlen);
+            buffer_write_bytes(&fadors_debug_sec, fn->name, nlen);
+            buffer_write_dword(&fadors_debug_sec, fn->start_addr);
+            buffer_write_dword(&fadors_debug_sec, fn->end_addr);
+            buffer_write_byte(&fadors_debug_sec, fn->ret_type_kind);
+            {
+                uint32_t rts;
+                memcpy(&rts, &fn->ret_type_size, 4);
+                buffer_write_dword(&fadors_debug_sec, rts);
+            }
+            uint32_t vcount = (uint32_t)fn->var_count;
+            buffer_write_dword(&fadors_debug_sec, vcount);
+            for (size_t vi = 0; vi < fn->var_count; vi++) {
+                DebugVarEntry *v = &fn->vars[vi];
+                uint32_t vnlen = (uint32_t)(strlen(v->name) + 1);
+                buffer_write_dword(&fadors_debug_sec, vnlen);
+                buffer_write_bytes(&fadors_debug_sec, v->name, vnlen);
+                {
+                    uint32_t rbpo;
+                    memcpy(&rbpo, &v->rbp_offset, 4);
+                    buffer_write_dword(&fadors_debug_sec, rbpo);
+                }
+                buffer_write_byte(&fadors_debug_sec, v->is_param);
+                buffer_write_byte(&fadors_debug_sec, v->type_kind);
+                {
+                    uint32_t tsz;
+                    memcpy(&tsz, &v->type_size, 4);
+                    buffer_write_dword(&fadors_debug_sec, tsz);
+                }
+                if (v->type_name) {
+                    uint32_t tnlen = (uint32_t)(strlen(v->type_name) + 1);
+                    buffer_write_dword(&fadors_debug_sec, tnlen);
+                    buffer_write_bytes(&fadors_debug_sec, v->type_name, tnlen);
+                } else {
+                    buffer_write_dword(&fadors_debug_sec, 0);
+                }
+            }
+        }
     }
 
     /* ---- Build .strtab and .symtab ---- */
