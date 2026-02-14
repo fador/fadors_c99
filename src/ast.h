@@ -47,12 +47,26 @@ typedef enum {
     AST_FLOAT
 } ASTNodeType;
 
+/* Vectorization metadata (set by optimizer O3 pass) */
+typedef struct VecInfo {
+    int width;            /* Vector width: 4 for SSE (128-bit, 4x32-bit) */
+    int elem_size;        /* Element size in bytes (4 for int/float) */
+    int is_float;         /* 1 = float elements, 0 = int elements */
+    int op;               /* TokenType: TOKEN_PLUS, TOKEN_MINUS, etc. */
+    int iterations;       /* Total loop iteration count */
+    const char *loop_var; /* Loop variable name */
+    const char *dst;      /* Destination array variable name */
+    const char *src1;     /* Source array 1 variable name */
+    const char *src2;     /* Source array 2 variable name */
+} VecInfo;
+
 typedef struct ASTNode {
     ASTNodeType type;
     struct ASTNode **children;
     size_t children_count;
     Type *resolved_type;
     int line;  // Source line number (for debug info / -g)
+    VecInfo *vec_info;  // Vectorization info (NULL = not vectorized)
     
     // For specific nodes
     union {

@@ -1928,6 +1928,151 @@ static void collect_cases(ASTNode *node, ASTNode **cases, int *case_count, ASTNo
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Vectorized loop codegen — emits SSE packed instructions             */
+/*                                                                     */
+/* For a loop annotated with VecInfo (set by optimizer), generates:    */
+/*   1. Prologue: save callee-saved regs, compute array base addrs    */
+/*   2. Vector loop: process 4 elements per iteration with movups/    */
+/*      movdqu + packed arithmetic                                    */
+/*   3. Scalar remainder: process remaining 0-3 elements              */
+/*   4. Epilogue: restore callee-saved regs                           */
+/*                                                                     */
+/* Uses rbx, r14, r15 as pointer registers (callee-saved, no SIB      */
+/* encoding issues). ecx as element counter.                           */
+/* ------------------------------------------------------------------ */
+static void gen_vectorized_loop(ASTNode *node) {
+    VecInfo *vi = node->vec_info;
+    if (!vi) return;
+
+    int lbl_vec = label_count++;
+    int lbl_scalar = label_count++;
+    int lbl_scalar_loop = label_count++;
+    int lbl_done = label_count++;
+
+    char l_vec[32], l_scalar[32], l_scalar_loop[32], l_done[32];
+    sprintf(l_vec, ".L%d", lbl_vec);
+    sprintf(l_scalar, ".L%d", lbl_scalar);
+    sprintf(l_scalar_loop, ".L%d", lbl_scalar_loop);
+    sprintf(l_done, ".L%d", lbl_done);
+
+    /* Pick move/op mnemonics based on element type */
+    const char *vec_mov  = vi->is_float ? "movups" : "movdqu";
+    const char *scl_mov  = vi->is_float ? "movss"  : "mov";
+    const char *vec_op   = NULL;
+    const char *scl_op   = NULL;
+
+    if (vi->is_float) {
+        switch (vi->op) {
+        case TOKEN_PLUS:  vec_op = "addps"; scl_op = "addss"; break;
+        case TOKEN_MINUS: vec_op = "subps"; scl_op = "subss"; break;
+        case TOKEN_STAR:  vec_op = "mulps"; scl_op = "mulss"; break;
+        case TOKEN_SLASH: vec_op = "divps"; scl_op = "divss"; break;
+        default: return;
+        }
+    } else {
+        switch (vi->op) {
+        case TOKEN_PLUS:  vec_op = "paddd"; scl_op = "add"; break;
+        case TOKEN_MINUS: vec_op = "psubd"; scl_op = "sub"; break;
+        default: return;
+        }
+    }
+
+    /* --- Prologue: save callee-saved registers --- */
+    emit_inst1("pushq", op_reg("rbx"));
+    emit_inst1("pushq", op_reg("r14"));
+    emit_inst1("pushq", op_reg("r15"));
+
+    /* --- Compute base addresses of dst, src1, src2 --- */
+    /* dst → rbx */
+    int off_dst = get_local_offset(vi->dst);
+    Type *t_dst = get_local_type(vi->dst);
+    if (t_dst && t_dst->kind == TYPE_ARRAY) {
+        emit_inst2("lea", op_mem("rbp", off_dst), op_reg("rbx"));
+    } else {
+        emit_inst2("mov", op_mem("rbp", off_dst), op_reg("rbx"));
+    }
+
+    /* src1 → r14 */
+    int off_s1 = get_local_offset(vi->src1);
+    Type *t_s1 = get_local_type(vi->src1);
+    if (t_s1 && t_s1->kind == TYPE_ARRAY) {
+        emit_inst2("lea", op_mem("rbp", off_s1), op_reg("r14"));
+    } else {
+        emit_inst2("mov", op_mem("rbp", off_s1), op_reg("r14"));
+    }
+
+    /* src2 → r15 */
+    int off_s2 = get_local_offset(vi->src2);
+    Type *t_s2 = get_local_type(vi->src2);
+    if (t_s2 && t_s2->kind == TYPE_ARRAY) {
+        emit_inst2("lea", op_mem("rbp", off_s2), op_reg("r15"));
+    } else {
+        emit_inst2("mov", op_mem("rbp", off_s2), op_reg("r15"));
+    }
+
+    /* --- Initialize counter --- */
+    emit_inst2("xor", op_reg("ecx"), op_reg("ecx"));  /* ecx = 0 */
+
+    int vec_limit = vi->iterations - 3;  /* can do vector if ecx <= limit-1 */
+
+    /* --- Vector loop: process 4 elements per iteration --- */
+    emit_label_def(l_vec);
+    emit_inst2("cmp", op_imm(vec_limit), op_reg("ecx"));
+    emit_inst1("jg", op_label(l_scalar));
+
+    /* Load 4 elements from src1 and src2 */
+    emit_inst2(vec_mov, op_mem("r14", 0), op_reg("xmm0"));
+    emit_inst2(vec_mov, op_mem("r15", 0), op_reg("xmm1"));
+
+    /* Perform packed operation: xmm0 = xmm0 OP xmm1 */
+    emit_inst2(vec_op, op_reg("xmm1"), op_reg("xmm0"));
+
+    /* Store 4 elements to dst */
+    emit_inst2(vec_mov, op_reg("xmm0"), op_mem("rbx", 0));
+
+    /* Advance pointers by 16 bytes (4 × 4-byte elements) */
+    emit_inst2("add", op_imm(16), op_reg("rbx"));
+    emit_inst2("add", op_imm(16), op_reg("r14"));
+    emit_inst2("add", op_imm(16), op_reg("r15"));
+    emit_inst2("add", op_imm(4), op_reg("ecx"));
+    emit_inst1("jmp", op_label(l_vec));
+
+    /* --- Scalar remainder loop: process remaining 0-3 elements --- */
+    emit_label_def(l_scalar);
+    emit_inst2("cmp", op_imm(vi->iterations), op_reg("ecx"));
+    emit_inst1("jge", op_label(l_done));
+
+    emit_label_def(l_scalar_loop);
+
+    if (vi->is_float) {
+        /* Float scalar: use SSE scalar instructions */
+        emit_inst2(scl_mov, op_mem("r14", 0), op_reg("xmm0"));
+        emit_inst2(scl_mov, op_mem("r15", 0), op_reg("xmm1"));
+        emit_inst2(scl_op, op_reg("xmm1"), op_reg("xmm0"));
+        emit_inst2(scl_mov, op_reg("xmm0"), op_mem("rbx", 0));
+    } else {
+        /* Integer scalar: use GPR instructions */
+        emit_inst2("mov", op_mem("r14", 0), op_reg("eax"));
+        emit_inst2(scl_op, op_mem("r15", 0), op_reg("eax"));
+        emit_inst2("mov", op_reg("eax"), op_mem("rbx", 0));
+    }
+
+    /* Advance pointers by 4 bytes (1 × 4-byte element) */
+    emit_inst2("add", op_imm(4), op_reg("rbx"));
+    emit_inst2("add", op_imm(4), op_reg("r14"));
+    emit_inst2("add", op_imm(4), op_reg("r15"));
+    emit_inst2("add", op_imm(1), op_reg("ecx"));
+    emit_inst2("cmp", op_imm(vi->iterations), op_reg("ecx"));
+    emit_inst1("jl", op_label(l_scalar_loop));
+
+    /* --- Epilogue: restore callee-saved registers --- */
+    emit_label_def(l_done);
+    emit_inst1("popq", op_reg("r15"));
+    emit_inst1("popq", op_reg("r14"));
+    emit_inst1("popq", op_reg("rbx"));
+}
+
 static void gen_statement(ASTNode *node) {
     if (!node) return;
     debug_record_line(node);
@@ -2387,6 +2532,11 @@ static void gen_statement(ASTNode *node) {
         
         emit_label_def(l_end);
     } else if (node->type == AST_FOR) {
+        /* Vectorized loop: emit SSE packed instructions */
+        if (node->vec_info) {
+            gen_vectorized_loop(node);
+            return;
+        }
         int label_start = label_count++;
         int label_continue = label_count++; // increment
         int label_end = label_count++;

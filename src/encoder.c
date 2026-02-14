@@ -675,5 +675,116 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             buffer_write_byte(buf, 0x5A);
             emit_modrm(buf, 3, d, s);
         }
+    /* ---- Packed SSE/SSE2 instructions for vectorization ---- */
+    } else if (strcmp(mnemonic, "movups") == 0) {
+        /* Unaligned packed single-precision float move */
+        /* No mandatory prefix (NP) + 0x0F 0x10 (load) / 0x0F 0x11 (store) */
+        if (src->type == OP_REG && dest->type == OP_REG) {
+            int s = get_reg_id(src->data.reg);
+            int d = get_reg_id(dest->data.reg);
+            emit_rex(buf, 0, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x10);
+            emit_modrm(buf, 3, d, s);
+        } else if (src->type == OP_MEM && dest->type == OP_REG) {
+            int s = get_reg_id(src->data.mem.base);
+            int d = get_reg_id(dest->data.reg);
+            emit_rex(buf, 0, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x10);
+            if ((s & 7) == 5 && src->data.mem.offset == 0) {
+                emit_modrm(buf, 1, d, s); buffer_write_byte(buf, 0);
+            } else if (src->data.mem.offset == 0) {
+                emit_modrm(buf, 0, d, s);
+            } else if (src->data.mem.offset >= -128 && src->data.mem.offset <= 127) {
+                emit_modrm(buf, 1, d, s); buffer_write_byte(buf, (uint8_t)src->data.mem.offset);
+            } else {
+                emit_modrm(buf, 2, d, s); buffer_write_dword(buf, src->data.mem.offset);
+            }
+        } else if (src->type == OP_REG && dest->type == OP_MEM) {
+            int s = get_reg_id(src->data.reg);
+            int d = get_reg_id(dest->data.mem.base);
+            emit_rex(buf, 0, s >= 8, 0, d >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x11);
+            if ((d & 7) == 5 && dest->data.mem.offset == 0) {
+                emit_modrm(buf, 1, s, d); buffer_write_byte(buf, 0);
+            } else if (dest->data.mem.offset == 0) {
+                emit_modrm(buf, 0, s, d);
+            } else if (dest->data.mem.offset >= -128 && dest->data.mem.offset <= 127) {
+                emit_modrm(buf, 1, s, d); buffer_write_byte(buf, (uint8_t)dest->data.mem.offset);
+            } else {
+                emit_modrm(buf, 2, s, d); buffer_write_dword(buf, dest->data.mem.offset);
+            }
+        }
+    } else if (strcmp(mnemonic, "movdqu") == 0) {
+        /* Unaligned packed integer move: F3 0F 6F (load) / F3 0F 7F (store) */
+        buffer_write_byte(buf, 0xF3);
+        if (src->type == OP_REG && dest->type == OP_REG) {
+            int s = get_reg_id(src->data.reg);
+            int d = get_reg_id(dest->data.reg);
+            emit_rex(buf, 0, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x6F);
+            emit_modrm(buf, 3, d, s);
+        } else if (src->type == OP_MEM && dest->type == OP_REG) {
+            int s = get_reg_id(src->data.mem.base);
+            int d = get_reg_id(dest->data.reg);
+            emit_rex(buf, 0, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x6F);
+            if ((s & 7) == 5 && src->data.mem.offset == 0) {
+                emit_modrm(buf, 1, d, s); buffer_write_byte(buf, 0);
+            } else if (src->data.mem.offset == 0) {
+                emit_modrm(buf, 0, d, s);
+            } else if (src->data.mem.offset >= -128 && src->data.mem.offset <= 127) {
+                emit_modrm(buf, 1, d, s); buffer_write_byte(buf, (uint8_t)src->data.mem.offset);
+            } else {
+                emit_modrm(buf, 2, d, s); buffer_write_dword(buf, src->data.mem.offset);
+            }
+        } else if (src->type == OP_REG && dest->type == OP_MEM) {
+            int s = get_reg_id(src->data.reg);
+            int d = get_reg_id(dest->data.mem.base);
+            emit_rex(buf, 0, s >= 8, 0, d >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x7F);
+            if ((d & 7) == 5 && dest->data.mem.offset == 0) {
+                emit_modrm(buf, 1, s, d); buffer_write_byte(buf, 0);
+            } else if (dest->data.mem.offset == 0) {
+                emit_modrm(buf, 0, s, d);
+            } else if (dest->data.mem.offset >= -128 && dest->data.mem.offset <= 127) {
+                emit_modrm(buf, 1, s, d); buffer_write_byte(buf, (uint8_t)dest->data.mem.offset);
+            } else {
+                emit_modrm(buf, 2, s, d); buffer_write_dword(buf, dest->data.mem.offset);
+            }
+        }
+    } else if (strcmp(mnemonic, "addps") == 0 || strcmp(mnemonic, "subps") == 0 ||
+               strcmp(mnemonic, "mulps") == 0 || strcmp(mnemonic, "divps") == 0) {
+        /* Packed single-precision float arithmetic: NP 0F {58,5C,59,5E} */
+        uint8_t opcode = 0x58; /* addps */
+        if (mnemonic[0] == 's') opcode = 0x5C;
+        else if (mnemonic[0] == 'm') opcode = 0x59;
+        else if (mnemonic[0] == 'd') opcode = 0x5E;
+        /* No mandatory prefix for packed single */
+        if (src->type == OP_REG && dest->type == OP_REG) {
+            int s = get_reg_id(src->data.reg);
+            int d = get_reg_id(dest->data.reg);
+            emit_rex(buf, 0, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, opcode);
+            emit_modrm(buf, 3, d, s);
+        }
+    } else if (strcmp(mnemonic, "paddd") == 0 || strcmp(mnemonic, "psubd") == 0) {
+        /* Packed int32 add/sub: 66 0F FE (paddd) / 66 0F FA (psubd) */
+        uint8_t opcode = (mnemonic[1] == 'a') ? 0xFE : 0xFA;
+        buffer_write_byte(buf, 0x66);
+        if (src->type == OP_REG && dest->type == OP_REG) {
+            int s = get_reg_id(src->data.reg);
+            int d = get_reg_id(dest->data.reg);
+            emit_rex(buf, 0, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, opcode);
+            emit_modrm(buf, 3, d, s);
+        }
     }
 }

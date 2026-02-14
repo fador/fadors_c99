@@ -18,6 +18,10 @@
  *  10. Loop unrolling: full unroll for N ≤ 8, partial unroll factor 2-4
  *  11. Loop strength reduction: array[i] in loops → pointer increment
  *
+ * -O3 vectorization pass:
+ *  16. Vectorization hints: detect simple a[i] = b[i] OP c[i] loops and
+ *      annotate them for SSE packed instruction codegen.
+ *
  * -O3 interprocedural passes:
  *  12. IPA constant propagation: specialize parameters always passed as same constant
  *  13. Dead argument elimination: remove parameters never read in function body
@@ -2191,6 +2195,169 @@ static void o3_unroll_loops(ASTNode *node) {
 /* strength reduction pass. No additional code needed here.)          */
 
 /* ================================================================== */
+/* -O3: Vectorization Hints (SSE Packed Operations)                   */
+/* ================================================================== */
+
+/* ------------------------------------------------------------------ */
+/* Vectorization Pass: Detect and annotate vectorizable loops         */
+/*                                                                    */
+/* Detects simple patterns of the form:                               */
+/*   for (i = 0; i < N; i++) { a[i] = b[i] OP c[i]; }               */
+/* where OP is +, -, *, / and all arrays are the same element type    */
+/* (int or float, both 4 bytes). Annotates the AST_FOR node with     */
+/* VecInfo so the codegen can emit packed SSE/SSE2 instructions       */
+/* instead of scalar code, processing 4 elements at a time.           */
+/* ------------------------------------------------------------------ */
+
+/* Check if an expression is a simple array access arr[var] where
+   var matches the given loop variable name. Returns the array
+   identifier name, or NULL if the pattern doesn't match. */
+static const char *vec_match_array_access(ASTNode *expr, const char *loop_var) {
+    if (!expr || expr->type != AST_ARRAY_ACCESS) return NULL;
+    ASTNode *arr = expr->data.array_access.array;
+    ASTNode *idx = expr->data.array_access.index;
+    if (!arr || !idx) return NULL;
+    if (arr->type != AST_IDENTIFIER) return NULL;
+    if (idx->type != AST_IDENTIFIER) return NULL;
+    if (strcmp(idx->data.identifier.name, loop_var) != 0) return NULL;
+    return arr->data.identifier.name;
+}
+
+/* Get the element type kind and size for an array access expression.
+   Returns 1 on success (and fills out_kind, out_size), 0 on failure. */
+static int vec_get_elem_type(ASTNode *array_ident, int *out_kind, int *out_size) {
+    if (!array_ident || !array_ident->resolved_type) return 0;
+    Type *t = array_ident->resolved_type;
+    /* Array or pointer type — element type is in ptr_to */
+    if (t->kind == TYPE_ARRAY || t->kind == TYPE_PTR) {
+        if (!t->data.ptr_to) return 0;
+        *out_kind = t->data.ptr_to->kind;
+        *out_size = t->data.ptr_to->size;
+        return 1;
+    }
+    return 0;
+}
+
+/* Try to vectorize a for-loop. Returns 1 if successfully annotated. */
+static int try_vectorize_loop(ASTNode *for_node) {
+    const char *var_name;
+    long long start_val, end_val, iterations;
+
+    if (!analyze_for_loop(for_node, &var_name, &start_val, &end_val, &iterations))
+        return 0;
+
+    /* Must start at 0 for simple pointer arithmetic */
+    if (start_val != 0) return 0;
+
+    /* Need at least 4 iterations to benefit from vectorization */
+    if (iterations < 4) return 0;
+
+    /* Body must be a single statement (possibly wrapped in a block) */
+    ASTNode *body = for_node->data.for_stmt.body;
+    if (!body) return 0;
+    if (body->type == AST_BLOCK) {
+        if (body->children_count != 1) return 0;
+        body = body->children[0];
+    }
+
+    /* Must be an assignment: a[i] = expr */
+    if (body->type != AST_ASSIGN) return 0;
+    ASTNode *lhs = body->data.assign.left;
+    ASTNode *rhs = body->data.assign.value;
+    if (!lhs || !rhs) return 0;
+
+    /* LHS must be arr[loop_var] */
+    const char *dst = vec_match_array_access(lhs, var_name);
+    if (!dst) return 0;
+
+    /* Check element type: must be int (4 bytes) or float (4 bytes) */
+    int elem_kind = 0, elem_size = 0;
+    if (!vec_get_elem_type(lhs->data.array_access.array, &elem_kind, &elem_size))
+        return 0;
+    int is_float;
+    if (elem_kind == TYPE_FLOAT && elem_size == 4) is_float = 1;
+    else if (elem_kind == TYPE_INT && elem_size == 4) is_float = 0;
+    else return 0;
+
+    /* RHS must be binary expr: b[i] OP c[i] */
+    if (rhs->type != AST_BINARY_EXPR) return 0;
+    TokenType op = rhs->data.binary_expr.op;
+
+    /* Check for supported operations */
+    if (is_float) {
+        if (op != TOKEN_PLUS && op != TOKEN_MINUS &&
+            op != TOKEN_STAR && op != TOKEN_SLASH)
+            return 0;
+    } else {
+        /* Integer: only + and - (SSE2 has no packed int32 multiply) */
+        if (op != TOKEN_PLUS && op != TOKEN_MINUS)
+            return 0;
+    }
+
+    /* Both operands must be arr[loop_var] */
+    const char *src1 = vec_match_array_access(rhs->data.binary_expr.left, var_name);
+    const char *src2 = vec_match_array_access(rhs->data.binary_expr.right, var_name);
+    if (!src1 || !src2) return 0;
+
+    /* Check that source arrays have matching element type */
+    int s1_kind, s1_size, s2_kind, s2_size;
+    if (!vec_get_elem_type(rhs->data.binary_expr.left->data.array_access.array,
+                           &s1_kind, &s1_size))
+        return 0;
+    if (!vec_get_elem_type(rhs->data.binary_expr.right->data.array_access.array,
+                           &s2_kind, &s2_size))
+        return 0;
+    if (s1_kind != elem_kind || s2_kind != elem_kind) return 0;
+    if (s1_size != 4 || s2_size != 4) return 0;
+
+    /* All checks passed — annotate the loop for vectorization */
+    VecInfo *vi = (VecInfo *)calloc(1, sizeof(VecInfo));
+    vi->width = 4;
+    vi->elem_size = 4;
+    vi->is_float = is_float;
+    vi->op = op;
+    vi->iterations = (int)iterations;
+    vi->loop_var = var_name;
+    vi->dst = dst;
+    vi->src1 = src1;
+    vi->src2 = src2;
+    for_node->vec_info = vi;
+    return 1;
+}
+
+/* Walk a statement tree and try to vectorize eligible for-loops */
+static void o3_vectorize_loops(ASTNode *node) {
+    if (!node) return;
+    switch (node->type) {
+    case AST_BLOCK:
+        for (size_t i = 0; i < node->children_count; i++)
+            o3_vectorize_loops(node->children[i]);
+        break;
+    case AST_FOR:
+        try_vectorize_loop(node);
+        /* Don't recurse into vectorized loop body — it will be handled
+           entirely by the codegen's vector path */
+        if (!node->vec_info)
+            o3_vectorize_loops(node->data.for_stmt.body);
+        break;
+    case AST_IF:
+        o3_vectorize_loops(node->data.if_stmt.then_branch);
+        if (node->data.if_stmt.else_branch)
+            o3_vectorize_loops(node->data.if_stmt.else_branch);
+        break;
+    case AST_WHILE:
+    case AST_DO_WHILE:
+        o3_vectorize_loops(node->data.while_stmt.body);
+        break;
+    case AST_SWITCH:
+        o3_vectorize_loops(node->data.switch_stmt.body);
+        break;
+    default:
+        break;
+    }
+}
+
+/* ================================================================== */
 /* -O3: Interprocedural Optimization (IPA) Passes                     */
 /* ================================================================== */
 
@@ -3078,6 +3245,16 @@ ASTNode *optimize(ASTNode *program, OptLevel level) {
             if (child->type == AST_FUNCTION && child->data.function.body) {
                 opt_stmt(child->data.function.body);
                 o2_propagate_block(child->data.function.body);
+            }
+        }
+
+        /* Pass 2b: Vectorization — annotate eligible loops for SSE codegen.
+           Must run after unrolling + cleanup so loops are in canonical form,
+           and before IPA which may modify function boundaries. */
+        for (size_t i = 0; i < program->children_count; i++) {
+            ASTNode *child = program->children[i];
+            if (child->type == AST_FUNCTION && child->data.function.body) {
+                o3_vectorize_loops(child->data.function.body);
             }
         }
 
