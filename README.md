@@ -331,29 +331,31 @@ This section outlines the implementation plan for compiler optimization flags (`
 
 ### Phase 4: `-O2` — Standard Optimizations
 
-**Goal**: Medium-cost optimizations that require analysis passes. This is where most of the performance improvement comes from for typical code. Requires an intermediate representation (IR) or enhanced AST annotations.
+**Goal**: Medium-cost optimizations that require analysis passes. Implemented as within-block analysis in the AST optimizer (`optimizer.c`) and codegen-level transforms in `arch_x86_64.c`. More advanced optimizations (CSE, LICM, register allocation) require IR/CFG infrastructure.
 
-#### Phase 4a: IR / CFG Construction
+#### Phase 4a: Within-Block Optimization (implemented)
+- [x] **Constant propagation**: Track `var = const` assignments within a basic block. Substitute known constants into subsequent uses, enabling further constant folding. Handles chained propagation (`x = 5; y = x + 3 → y = 8; z = y * 2 → z = 16`). Correctly avoids propagating into loop conditions to prevent infinite loops.
+- [x] **Copy propagation**: Track `var = othervar` assignments. Replace uses of the copy with the original variable when the source hasn't been invalidated. Conservative invalidation on calls, pointer writes, and control flow.
+- [x] **Dead store elimination**: Detect assignments to variables that are overwritten before being read. Remove the dead store (converted to no-op). Preserves stores with side effects. Only eliminates assignment statements, not variable declarations (which are still needed for stack allocation).
+- [ ] **Tail call optimization**: Convert `return f(args)` to a jump when stack frame can be reused.
+- [ ] **Function inlining** (small functions): Inline functions with small body size (threshold: ~20 instructions or compiler heuristic).
+
+#### Phase 4b: IR / CFG Construction (future)
 - [ ] **Basic block identification**: Split function bodies into basic blocks at branch targets and after jumps/returns.
 - [ ] **Control Flow Graph (CFG)**: Build directed graph of basic blocks with predecessor/successor edges.
 - [ ] **SSA construction** (optional, for later): Convert variables to Static Single Assignment form with φ-functions for more powerful analyses.
 
-#### Phase 4b: Analysis Passes
+#### Phase 4c: Analysis Passes (future — requires CFG)
 - [ ] **Liveness analysis**: Compute live variable sets at each basic block entry/exit. Identify dead stores.
 - [ ] **Reaching definitions**: Track which assignments reach each use of a variable.
 - [ ] **Dominator tree**: Compute dominance relationships for loop detection and placement of φ-functions.
 - [ ] **Loop detection**: Identify natural loops (back edges in CFG) for loop-focused optimizations.
 
-#### Phase 4c: Optimization Passes
-- [ ] **Global constant propagation**: Propagate known-constant values across basic blocks.
-- [ ] **Dead store elimination**: Remove writes to variables that are never subsequently read.
+#### Phase 4d: Advanced Optimization Passes (future — requires analysis)
+- [ ] **Global constant propagation**: Propagate known-constant values across basic blocks (current implementation is within-block only).
 - [ ] **Common subexpression elimination (CSE)**: Detect repeated computations (`a + b` computed twice) and reuse the first result.
 - [ ] **Loop-invariant code motion (LICM)**: Move computations that don't change within a loop to the preheader.
 - [ ] **Register allocation**: Replace naive stack-spill-everything with a graph-coloring or linear-scan register allocator. Use liveness analysis to minimize spills.
-- [ ] **Function inlining** (small functions): Inline functions with small body size (threshold: ~20 instructions or compiler heuristic).
-- [ ] **Tail call optimization**: Convert `return f(args)` to a jump when stack frame can be reused.
-- [ ] **Copy propagation**: Replace `a = b; ... use a` with `... use b` when `b` is unchanged.
-- [ ] **Algebraic simplification**: `x + 0` → `x`, `x * 1` → `x`, `x & 0xFF..FF` → `x`, `x | 0` → `x`, double negation removal.
 
 ### Phase 5: `-O3` — Aggressive Optimizations
 

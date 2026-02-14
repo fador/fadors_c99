@@ -6,6 +6,11 @@
  *   2. Strength reduction: x * 2 → x << 1, x / 4 → x >> 2, x % 2 → x & 1
  *   3. Dead code elimination: remove statements after return/break/continue/goto in a block
  *   4. Algebraic simplification: x + 0 → x, x * 1 → x, x * 0 → 0, etc.
+ *
+ * -O2 additional passes (within basic blocks):
+ *   5. Constant propagation: x = 5; y = x + 3 → y = 8
+ *   6. Copy propagation: x = a; ... use x → ... use a (when a unchanged)
+ *   7. Dead store elimination: x = 5; x = 10; → x = 10 (remove first store)
  */
 
 #include "optimizer.h"
@@ -473,6 +478,383 @@ static void opt_function(ASTNode *func) {
     opt_stmt(func->data.function.body);
 }
 
+/* ================================================================== */
+/* -O2: Within-block constant/copy propagation and dead store elim.   */
+/* ================================================================== */
+
+/* A tracked variable binding: variable name → known value */
+#define MAX_BINDINGS 256
+typedef struct {
+    const char *name;         /* variable name */
+    ASTNode    *value;        /* AST_INTEGER, AST_IDENTIFIER, or NULL (unknown) */
+    int         store_idx;    /* index in block where last written (-1 if none) */
+    int         was_read;     /* whether the variable was read since last write */
+} VarBinding;
+
+typedef struct {
+    VarBinding entries[MAX_BINDINGS];
+    int count;
+} PropEnv;
+
+static void prop_env_init(PropEnv *env) {
+    env->count = 0;
+}
+
+static VarBinding *prop_env_find(PropEnv *env, const char *name) {
+    for (int i = 0; i < env->count; i++) {
+        if (strcmp(env->entries[i].name, name) == 0) return &env->entries[i];
+    }
+    return NULL;
+}
+
+static void prop_env_set(PropEnv *env, const char *name, ASTNode *value, int store_idx) {
+    VarBinding *b = prop_env_find(env, name);
+    if (b) {
+        b->value = value;
+        b->store_idx = store_idx;
+        b->was_read = 0;
+        return;
+    }
+    if (env->count < MAX_BINDINGS) {
+        env->entries[env->count].name = name;
+        env->entries[env->count].value = value;
+        env->entries[env->count].store_idx = store_idx;
+        env->entries[env->count].was_read = 0;
+        env->count++;
+    }
+}
+
+static void prop_env_mark_read(PropEnv *env, const char *name) {
+    VarBinding *b = prop_env_find(env, name);
+    if (b) b->was_read = 1;
+}
+
+/* Invalidate a binding (variable modified in unknown way) */
+static void prop_env_invalidate(PropEnv *env, const char *name) {
+    VarBinding *b = prop_env_find(env, name);
+    if (b) {
+        b->value = NULL;
+        b->was_read = 1; /* conservative: assume it was needed */
+    }
+}
+
+/* Invalidate all bindings (call, pointer write, etc.) */
+static void prop_env_invalidate_all(PropEnv *env) {
+    for (int i = 0; i < env->count; i++) {
+        env->entries[i].value = NULL;
+        env->entries[i].was_read = 1;
+    }
+}
+
+/* Check if an expression has side effects (calls, increments, etc.) */
+static int has_side_effects(ASTNode *node) {
+    if (!node) return 0;
+    switch (node->type) {
+        case AST_CALL:
+        case AST_PRE_INC:
+        case AST_PRE_DEC:
+        case AST_POST_INC:
+        case AST_POST_DEC:
+        case AST_ASSIGN:
+            return 1;
+        case AST_BINARY_EXPR:
+            return has_side_effects(node->data.binary_expr.left) ||
+                   has_side_effects(node->data.binary_expr.right);
+        case AST_NEG:
+        case AST_NOT:
+        case AST_BITWISE_NOT:
+        case AST_DEREF:
+        case AST_ADDR_OF:
+            return has_side_effects(node->data.unary.expression);
+        case AST_CAST:
+            return has_side_effects(node->data.cast.expression);
+        case AST_ARRAY_ACCESS:
+            return has_side_effects(node->data.array_access.array) ||
+                   has_side_effects(node->data.array_access.index);
+        case AST_MEMBER_ACCESS:
+            return has_side_effects(node->data.member_access.struct_expr);
+        default:
+            return 0;
+    }
+}
+
+/* Collect all variable names read by an expression */
+static void collect_reads(ASTNode *node, PropEnv *env) {
+    if (!node) return;
+    switch (node->type) {
+        case AST_IDENTIFIER:
+            prop_env_mark_read(env, node->data.identifier.name);
+            return;
+        case AST_BINARY_EXPR:
+            collect_reads(node->data.binary_expr.left, env);
+            collect_reads(node->data.binary_expr.right, env);
+            return;
+        case AST_NEG:
+        case AST_NOT:
+        case AST_BITWISE_NOT:
+        case AST_DEREF:
+        case AST_ADDR_OF:
+        case AST_PRE_INC:
+        case AST_PRE_DEC:
+        case AST_POST_INC:
+        case AST_POST_DEC:
+            collect_reads(node->data.unary.expression, env);
+            return;
+        case AST_CAST:
+            collect_reads(node->data.cast.expression, env);
+            return;
+        case AST_CALL:
+            for (size_t i = 0; i < node->children_count; i++)
+                collect_reads(node->children[i], env);
+            return;
+        case AST_ARRAY_ACCESS:
+            collect_reads(node->data.array_access.array, env);
+            collect_reads(node->data.array_access.index, env);
+            return;
+        case AST_MEMBER_ACCESS:
+            collect_reads(node->data.member_access.struct_expr, env);
+            return;
+        case AST_ASSIGN:
+            collect_reads(node->data.assign.value, env);
+            /* also read the target if it's complex (array, deref, member) */
+            if (node->data.assign.left && node->data.assign.left->type != AST_IDENTIFIER)
+                collect_reads(node->data.assign.left, env);
+            return;
+        default:
+            return;
+    }
+}
+
+/* Substitute known bindings in an expression (returns modified expression).
+ * Only substitutes AST_IDENTIFIER references to propagated constants/copies. */
+static ASTNode *prop_substitute(ASTNode *node, PropEnv *env) {
+    if (!node) return NULL;
+    switch (node->type) {
+        case AST_IDENTIFIER: {
+            VarBinding *b = prop_env_find(env, node->data.identifier.name);
+            if (b && b->value) {
+                prop_env_mark_read(env, node->data.identifier.name);
+                if (b->value->type == AST_INTEGER) {
+                    /* constant propagation: replace x with known const */
+                    return make_int(b->value->data.integer.value, node->line);
+                }
+                if (b->value->type == AST_IDENTIFIER) {
+                    /* copy propagation: check that the source var hasn't been invalidated */
+                    VarBinding *src = prop_env_find(env, b->value->data.identifier.name);
+                    if (src && src->value == NULL) {
+                        /* Source was invalidated — the copy binding is stale. Can still use
+                         * the source variable name, just can't transitively propagate. */
+                    }
+                    /* Replace with source identifier */
+                    ASTNode *copy = (ASTNode *)calloc(1, sizeof(ASTNode));
+                    copy->type = AST_IDENTIFIER;
+                    copy->data.identifier.name = b->value->data.identifier.name;
+                    copy->resolved_type = node->resolved_type;
+                    copy->line = node->line;
+                    prop_env_mark_read(env, b->value->data.identifier.name);
+                    return copy;
+                }
+            }
+            return node;
+        }
+        case AST_BINARY_EXPR:
+            node->data.binary_expr.left = prop_substitute(node->data.binary_expr.left, env);
+            node->data.binary_expr.right = prop_substitute(node->data.binary_expr.right, env);
+            return node;
+        case AST_NEG:
+        case AST_NOT:
+        case AST_BITWISE_NOT:
+        case AST_DEREF:
+        case AST_ADDR_OF:
+            node->data.unary.expression = prop_substitute(node->data.unary.expression, env);
+            return node;
+        case AST_CAST:
+            node->data.cast.expression = prop_substitute(node->data.cast.expression, env);
+            return node;
+        case AST_CALL:
+            for (size_t i = 0; i < node->children_count; i++)
+                node->children[i] = prop_substitute(node->children[i], env);
+            return node;
+        case AST_ARRAY_ACCESS:
+            node->data.array_access.array = prop_substitute(node->data.array_access.array, env);
+            node->data.array_access.index = prop_substitute(node->data.array_access.index, env);
+            return node;
+        case AST_MEMBER_ACCESS:
+            node->data.member_access.struct_expr = prop_substitute(node->data.member_access.struct_expr, env);
+            return node;
+        default:
+            return node;
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* O2: Propagation + dead store elimination on a block                */
+/* ------------------------------------------------------------------ */
+static void o2_propagate_block(ASTNode *block) {
+    if (!block || block->type != AST_BLOCK) return;
+
+    PropEnv env;
+    prop_env_init(&env);
+
+    for (size_t i = 0; i < block->children_count; i++) {
+        ASTNode *stmt = block->children[i];
+        if (!stmt) continue;
+
+        /* ---- Variable declaration with initializer ---- */
+        if (stmt->type == AST_VAR_DECL && stmt->data.var_decl.initializer) {
+            /* Don't propagate address-of (pointer aliasing) */
+            if (stmt->data.var_decl.initializer->type == AST_ADDR_OF) {
+                prop_env_invalidate(&env, stmt->data.var_decl.name);
+                collect_reads(stmt->data.var_decl.initializer, &env);
+                continue;
+            }
+            /* Substitute in the initializer expression */
+            stmt->data.var_decl.initializer = prop_substitute(stmt->data.var_decl.initializer, &env);
+            /* Then run O1 opts on the substituted result */
+            stmt->data.var_decl.initializer = opt_expr(stmt->data.var_decl.initializer);
+            collect_reads(stmt->data.var_decl.initializer, &env);
+
+            /* Record the binding: name → value */
+            ASTNode *val = stmt->data.var_decl.initializer;
+            if (val->type == AST_INTEGER || val->type == AST_IDENTIFIER) {
+                prop_env_set(&env, stmt->data.var_decl.name, val, (int)i);
+            } else {
+                prop_env_set(&env, stmt->data.var_decl.name, NULL, (int)i);
+            }
+            continue;
+        }
+
+        /* ---- Simple assignment: identifier = expr ---- */
+        if (stmt->type == AST_ASSIGN && stmt->data.assign.left &&
+            stmt->data.assign.left->type == AST_IDENTIFIER) {
+            const char *varname = stmt->data.assign.left->data.identifier.name;
+
+            /* Don't propagate if RHS takes address */
+            if (stmt->data.assign.value->type == AST_ADDR_OF) {
+                prop_env_invalidate(&env, varname);
+                collect_reads(stmt->data.assign.value, &env);
+                continue;
+            }
+
+            /* Substitute in RHS */
+            stmt->data.assign.value = prop_substitute(stmt->data.assign.value, &env);
+            stmt->data.assign.value = opt_expr(stmt->data.assign.value);
+            collect_reads(stmt->data.assign.value, &env);
+
+            /* Dead store: if previous write to this var was not read, mark it dead */
+            VarBinding *prev = prop_env_find(&env, varname);
+            if (prev && prev->store_idx >= 0 && !prev->was_read) {
+                /* Previous store is dead — convert to empty block (no-op) */
+                ASTNode *dead = block->children[prev->store_idx];
+                if (dead->type == AST_ASSIGN && !has_side_effects(dead->data.assign.value)) {
+                    dead->type = AST_BLOCK;
+                    dead->children = NULL;
+                    dead->children_count = 0;
+                }
+                /* Don't eliminate var_decl dead stores — the declaration is still needed */
+            }
+
+            /* Record new binding */
+            ASTNode *val = stmt->data.assign.value;
+            if (val->type == AST_INTEGER || val->type == AST_IDENTIFIER) {
+                prop_env_set(&env, varname, val, (int)i);
+            } else {
+                prop_env_set(&env, varname, NULL, (int)i);
+            }
+            continue;
+        }
+
+        /* ---- Return: substitute and mark reads ---- */
+        if (stmt->type == AST_RETURN && stmt->data.return_stmt.expression) {
+            stmt->data.return_stmt.expression = prop_substitute(stmt->data.return_stmt.expression, &env);
+            stmt->data.return_stmt.expression = opt_expr(stmt->data.return_stmt.expression);
+            collect_reads(stmt->data.return_stmt.expression, &env);
+            prop_env_invalidate_all(&env); /* can't propagate past return */
+            continue;
+        }
+
+        /* ---- Control flow: invalidate for safety ---- */
+        if (stmt->type == AST_IF || stmt->type == AST_WHILE ||
+            stmt->type == AST_DO_WHILE || stmt->type == AST_FOR ||
+            stmt->type == AST_SWITCH) {
+            /* Only substitute in conditions of non-looping constructs (if/switch).
+             * Loop conditions (while/for/do-while) must NOT be substituted because
+             * the loop body may modify variables used in the condition — propagating
+             * a pre-loop value would make the condition constant, causing infinite loops. */
+            if (stmt->type == AST_IF && stmt->data.if_stmt.condition) {
+                stmt->data.if_stmt.condition = prop_substitute(stmt->data.if_stmt.condition, &env);
+                stmt->data.if_stmt.condition = opt_expr(stmt->data.if_stmt.condition);
+                collect_reads(stmt->data.if_stmt.condition, &env);
+            }
+            if (stmt->type == AST_SWITCH && stmt->data.switch_stmt.condition) {
+                stmt->data.switch_stmt.condition = prop_substitute(stmt->data.switch_stmt.condition, &env);
+                stmt->data.switch_stmt.condition = opt_expr(stmt->data.switch_stmt.condition);
+                collect_reads(stmt->data.switch_stmt.condition, &env);
+            }
+            /* Invalidate all — branches/loops may modify any variable */
+            prop_env_invalidate_all(&env);
+            continue;
+        }
+
+        /* ---- Function calls as statements: invalidate all ---- */
+        if (stmt->type == AST_CALL) {
+            for (size_t j = 0; j < stmt->children_count; j++) {
+                stmt->children[j] = prop_substitute(stmt->children[j], &env);
+                stmt->children[j] = opt_expr(stmt->children[j]);
+                collect_reads(stmt->children[j], &env);
+            }
+            prop_env_invalidate_all(&env);
+            continue;
+        }
+
+        /* ---- Break/continue/goto: stop propagation ---- */
+        if (stmt->type == AST_BREAK || stmt->type == AST_CONTINUE ||
+            stmt->type == AST_GOTO) {
+            prop_env_invalidate_all(&env);
+            continue;
+        }
+
+        /* ---- Labels/case: jump target, invalidate ---- */
+        if (stmt->type == AST_LABEL || stmt->type == AST_CASE ||
+            stmt->type == AST_DEFAULT) {
+            prop_env_invalidate_all(&env);
+            continue;
+        }
+
+        /* ---- Increment/decrement expressions ---- */
+        if (stmt->type == AST_PRE_INC || stmt->type == AST_PRE_DEC ||
+            stmt->type == AST_POST_INC || stmt->type == AST_POST_DEC) {
+            if (stmt->data.unary.expression &&
+                stmt->data.unary.expression->type == AST_IDENTIFIER) {
+                prop_env_invalidate(&env, stmt->data.unary.expression->data.identifier.name);
+            }
+            continue;
+        }
+
+        /* ---- Complex assignments (deref, struct, array) ---- */
+        if (stmt->type == AST_ASSIGN) {
+            /* Non-simple LHS — can't track, but substitute in both sides */
+            collect_reads(stmt->data.assign.left, &env);
+            stmt->data.assign.value = prop_substitute(stmt->data.assign.value, &env);
+            stmt->data.assign.value = opt_expr(stmt->data.assign.value);
+            collect_reads(stmt->data.assign.value, &env);
+            /* Pointer/deref write might alias anything */
+            prop_env_invalidate_all(&env);
+            continue;
+        }
+
+        /* ---- Blocks: recurse ---- */
+        if (stmt->type == AST_BLOCK) {
+            o2_propagate_block(stmt);
+            prop_env_invalidate_all(&env);
+            continue;
+        }
+
+        /* ---- Anything else: conservative invalidation ---- */
+        prop_env_invalidate_all(&env);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Top-level entry point                                              */
 /* ------------------------------------------------------------------ */
@@ -480,14 +862,28 @@ ASTNode *optimize(ASTNode *program, OptLevel level) {
     if (level < OPT_O1) return program;  /* -O0: no optimization */
     if (!program) return program;
 
+    /* -O1: AST-level optimizations (constant folding, DCE, strength reduction, algebraic) */
     for (size_t i = 0; i < program->children_count; i++) {
         ASTNode *child = program->children[i];
         if (child->type == AST_FUNCTION) {
-            opt_function(child);
+            if (child->data.function.body) {
+                opt_stmt(child->data.function.body);
+            }
         }
         /* Global variable initializers */
         if (child->type == AST_VAR_DECL && child->data.var_decl.initializer) {
             child->data.var_decl.initializer = opt_expr(child->data.var_decl.initializer);
+        }
+    }
+
+    /* -O2: Within-block constant/copy propagation and dead store elimination */
+    if (level >= OPT_O2) {
+        for (size_t i = 0; i < program->children_count; i++) {
+            ASTNode *child = program->children[i];
+            if (child->type == AST_FUNCTION && child->data.function.body) {
+                /* Propagate within the function body block */
+                o2_propagate_block(child->data.function.body);
+            }
         }
     }
 
