@@ -1293,6 +1293,31 @@ static void gen_addr(ASTNode *node) {
     }
 }
 
+/* Instruction scheduling helper: check if an expression, when generated,
+ * only uses %rax/%eax (and not %rcx or the stack).  When true, the binary
+ * expression codegen can schedule the independent loads closer together
+ * by using "mov %rax, %rcx" instead of "pushq %rax ... popq %rcx".
+ * This eliminates 2 memory operations and improves ILP. */
+static int gen_expr_is_rax_only(ASTNode *node) {
+    if (!node) return 0;
+    switch (node->type) {
+        case AST_INTEGER:
+        case AST_IDENTIFIER:
+            return 1;
+        case AST_NEG:
+        case AST_NOT:
+        case AST_BITWISE_NOT:
+        case AST_ADDR_OF:
+            return gen_expr_is_rax_only(node->data.unary.expression);
+        case AST_CAST:
+            return gen_expr_is_rax_only(node->data.cast.expression);
+        case AST_DEREF:
+            return gen_expr_is_rax_only(node->data.unary.expression);
+        default:
+            return 0;
+    }
+}
+
 static void gen_binary_expr(ASTNode *node) {
     /* Comma operator: evaluate left for side effects, result is right */
     if (node->data.binary_expr.op == TOKEN_COMMA) {
@@ -1532,11 +1557,25 @@ static void gen_binary_expr(ASTNode *node) {
     }
 
     gen_expression(node->data.binary_expr.right);
-    emit_inst1("pushq", op_reg("rax"));
-    stack_offset -= 8;
-    gen_expression(node->data.binary_expr.left);
-    emit_inst1("popq", op_reg("rcx"));
-    stack_offset += 8;
+
+    /* Instruction scheduling: when the left operand is a simple expression
+     * (only uses %rax), use "mov %rax, %rcx" instead of push/pop to save
+     * the right operand.  This eliminates 2 memory operations (push write +
+     * pop read) and schedules independent loads closer together for better
+     * instruction-level parallelism on modern out-of-order CPUs.
+     *   Before: gen(R); pushq %rax; gen(L); popq %rcx
+     *   After:  gen(R); mov %rax,%rcx; gen(L)                */
+    if (g_compiler_options.opt_level >= OPT_O3 &&
+        gen_expr_is_rax_only(node->data.binary_expr.left)) {
+        emit_inst2("mov", op_reg("rax"), op_reg("rcx"));
+        gen_expression(node->data.binary_expr.left);
+    } else {
+        emit_inst1("pushq", op_reg("rax"));
+        stack_offset -= 8;
+        gen_expression(node->data.binary_expr.left);
+        emit_inst1("popq", op_reg("rcx"));
+        stack_offset += 8;
+    }
     
     Type *left_type = get_expr_type(node->data.binary_expr.left);
     Type *right_type = get_expr_type(node->data.binary_expr.right);

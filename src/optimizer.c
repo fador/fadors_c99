@@ -1818,6 +1818,16 @@ static int is_safe_for_aggressive_inline(ASTNode *body) {
     ASTNode *last = body->children[body->children_count - 1];
     if (last->type != AST_RETURN || !last->data.return_stmt.expression) return 0;
 
+    /* No loops allowed — inlining functions with loops can corrupt the
+       caller's variables because parameter substitution replaces the
+       parameter with the argument expression, and loop bodies that
+       modify the parameter would modify the caller's variable. */
+    for (size_t i = 0; i < body->children_count; i++) {
+        ASTNode *s = body->children[i];
+        if (s->type == AST_WHILE || s->type == AST_DO_WHILE ||
+            s->type == AST_FOR) return 0;
+    }
+
     /* Check all statements for illegal constructs */
     for (size_t i = 0; i < body->children_count; i++) {
         ASTNode *s = body->children[i];
@@ -1989,13 +1999,17 @@ static int collect_local_names(ASTNode *stmt, const char **names, int max_names)
    Returns the number of statements injected (0 if not inlined).
    The call expression is replaced with a reference to the result variable. */
 static int try_aggressive_inline_in_block(ASTNode *block, size_t stmt_idx,
-                                           ASTNode **call_ref) {
+                                           ASTNode **call_ref,
+                                           const char *cur_func_name) {
     ASTNode *call = *call_ref;
     if (!call || call->type != AST_CALL) return 0;
 
+    /* Don't inline a function into itself (prevent infinite recursion) */
+    if (cur_func_name && strcmp(call->data.call.name, cur_func_name) == 0) return 0;
+
     AggressiveInlineCandidate *cand = find_agg_inline_cand(call->data.call.name);
-    if (!cand) return 0;
-    if ((int)call->children_count != cand->param_count) return 0;
+    if (!cand) { return 0; }
+    if ((int)call->children_count != cand->param_count) { return 0; }
 
     /* Safety: don't inline if args have side effects */
     for (size_t i = 0; i < call->children_count; i++) {
@@ -2057,9 +2071,47 @@ static int try_aggressive_inline_in_block(ASTNode *block, size_t stmt_idx,
     return inject_count;
 }
 
+/* Recursively search an expression tree for the first AST_CALL node.
+   Returns a pointer to the slot holding the call (so it can be replaced
+   in-place by the inliner), or NULL if no call is found.
+   This enables inlining of calls nested inside binary expressions, casts,
+   unary operators, etc. — not just top-level calls. */
+static ASTNode **find_call_in_expr(ASTNode **expr_ref) {
+    ASTNode *expr = *expr_ref;
+    if (!expr) return NULL;
+
+    if (expr->type == AST_CALL) return expr_ref;
+
+    switch (expr->type) {
+    case AST_BINARY_EXPR: {
+        ASTNode **found = find_call_in_expr(&expr->data.binary_expr.left);
+        if (found) return found;
+        return find_call_in_expr(&expr->data.binary_expr.right);
+    }
+    case AST_NEG:
+    case AST_NOT:
+    case AST_BITWISE_NOT:
+    case AST_DEREF:
+    case AST_ADDR_OF:
+        return find_call_in_expr(&expr->data.unary.expression);
+    case AST_CAST:
+        return find_call_in_expr(&expr->data.cast.expression);
+    case AST_ARRAY_ACCESS: {
+        ASTNode **found = find_call_in_expr(&expr->data.array_access.array);
+        if (found) return found;
+        return find_call_in_expr(&expr->data.array_access.index);
+    }
+    case AST_MEMBER_ACCESS:
+        return find_call_in_expr(&expr->data.member_access.struct_expr);
+    default:
+        return NULL;
+    }
+}
+
 /* Walk a block and aggressively inline calls in var_decl initializers,
-   assignments, and return statements. */
-static void o3_aggressive_inline_block(ASTNode *block) {
+   assignments, and return statements.  Uses find_call_in_expr to find
+   calls nested inside expression trees (e.g. sum = sum + f(x)). */
+static void o3_aggressive_inline_block(ASTNode *block, const char *cur_func_name) {
     if (!block || block->type != AST_BLOCK) return;
 
     for (size_t i = 0; i < block->children_count; i++) {
@@ -2068,62 +2120,71 @@ static void o3_aggressive_inline_block(ASTNode *block) {
 
         /* Recurse into sub-blocks first */
         if (stmt->type == AST_BLOCK) {
-            o3_aggressive_inline_block(stmt);
+            o3_aggressive_inline_block(stmt, cur_func_name);
             continue;
         }
         if (stmt->type == AST_IF) {
             if (stmt->data.if_stmt.then_branch)
-                o3_aggressive_inline_block(stmt->data.if_stmt.then_branch);
+                o3_aggressive_inline_block(stmt->data.if_stmt.then_branch, cur_func_name);
             if (stmt->data.if_stmt.else_branch)
-                o3_aggressive_inline_block(stmt->data.if_stmt.else_branch);
+                o3_aggressive_inline_block(stmt->data.if_stmt.else_branch, cur_func_name);
             continue;
         }
         if (stmt->type == AST_WHILE || stmt->type == AST_DO_WHILE) {
             if (stmt->data.while_stmt.body)
-                o3_aggressive_inline_block(stmt->data.while_stmt.body);
+                o3_aggressive_inline_block(stmt->data.while_stmt.body, cur_func_name);
             continue;
         }
         if (stmt->type == AST_FOR) {
             if (stmt->data.for_stmt.body)
-                o3_aggressive_inline_block(stmt->data.for_stmt.body);
+                o3_aggressive_inline_block(stmt->data.for_stmt.body, cur_func_name);
             continue;
         }
         if (stmt->type == AST_SWITCH) {
             if (stmt->data.switch_stmt.body)
-                o3_aggressive_inline_block(stmt->data.switch_stmt.body);
+                o3_aggressive_inline_block(stmt->data.switch_stmt.body, cur_func_name);
             continue;
         }
 
-        /* Try to inline in var_decl initializer */
-        if (stmt->type == AST_VAR_DECL && stmt->data.var_decl.initializer &&
-            stmt->data.var_decl.initializer->type == AST_CALL) {
-            int injected = try_aggressive_inline_in_block(
-                block, i, &stmt->data.var_decl.initializer);
-            if (injected > 0) {
-                i += injected; /* skip past injected statements */
-                continue;
+        /* Try to inline calls in var_decl initializer (may be nested) */
+        if (stmt->type == AST_VAR_DECL && stmt->data.var_decl.initializer) {
+            ASTNode **call_ref = find_call_in_expr(&stmt->data.var_decl.initializer);
+            if (call_ref) {
+                int injected = try_aggressive_inline_in_block(
+                    block, i, call_ref, cur_func_name);
+                if (injected > 0) {
+                    i += injected; /* skip past injected statements */
+                    i--; /* re-examine this stmt for more nested calls */
+                    continue;
+                }
             }
         }
 
-        /* Try to inline in assignment RHS */
-        if (stmt->type == AST_ASSIGN && stmt->data.assign.value &&
-            stmt->data.assign.value->type == AST_CALL) {
-            int injected = try_aggressive_inline_in_block(
-                block, i, &stmt->data.assign.value);
-            if (injected > 0) {
-                i += injected;
-                continue;
+        /* Try to inline calls in assignment RHS (may be nested) */
+        if (stmt->type == AST_ASSIGN && stmt->data.assign.value) {
+            ASTNode **call_ref = find_call_in_expr(&stmt->data.assign.value);
+            if (call_ref) {
+                int injected = try_aggressive_inline_in_block(
+                    block, i, call_ref, cur_func_name);
+                if (injected > 0) {
+                    i += injected;
+                    i--; /* re-examine for more nested calls */
+                    continue;
+                }
             }
         }
 
-        /* Try to inline in return expression */
-        if (stmt->type == AST_RETURN && stmt->data.return_stmt.expression &&
-            stmt->data.return_stmt.expression->type == AST_CALL) {
-            int injected = try_aggressive_inline_in_block(
-                block, i, &stmt->data.return_stmt.expression);
-            if (injected > 0) {
-                i += injected;
-                continue;
+        /* Try to inline calls in return expression (may be nested) */
+        if (stmt->type == AST_RETURN && stmt->data.return_stmt.expression) {
+            ASTNode **call_ref = find_call_in_expr(&stmt->data.return_stmt.expression);
+            if (call_ref) {
+                int injected = try_aggressive_inline_in_block(
+                    block, i, call_ref, cur_func_name);
+                if (injected > 0) {
+                    i += injected;
+                    i--; /* re-examine for more nested calls */
+                    continue;
+                }
             }
         }
     }
@@ -3679,16 +3740,8 @@ ASTNode *optimize(ASTNode *program, OptLevel level) {
             for (size_t i = 0; i < program->children_count; i++) {
                 ASTNode *child = program->children[i];
                 if (child->type == AST_FUNCTION && child->data.function.body) {
-                    /* Don't inline a function into itself */
-                    int is_self = 0;
-                    for (int ci = 0; ci < g_agg_inline_cand_count; ci++) {
-                        if (strcmp(g_agg_inline_cands[ci].name, child->data.function.name) == 0) {
-                            is_self = 1;
-                            break;
-                        }
-                    }
-                    if (!is_self)
-                        o3_aggressive_inline_block(child->data.function.body);
+                    o3_aggressive_inline_block(child->data.function.body,
+                                              child->data.function.name);
                 }
             }
             /* Re-run O1 + O2 passes on the inlined code */
