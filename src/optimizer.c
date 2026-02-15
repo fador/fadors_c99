@@ -1752,6 +1752,28 @@ static int g_agg_inline_counter;   /* unique suffix counter for inlined variable
    - No nested function definitions
    - Must end with a return statement
    - Body must be a block with ≤ MAX_AGGRESSIVE_INLINE_STMTS statements */
+/* Recursively check if a statement subtree contains any AST_RETURN. */
+static int stmt_contains_return(ASTNode *s) {
+    if (!s) return 0;
+    if (s->type == AST_RETURN) return 1;
+    if (s->type == AST_BLOCK) {
+        for (size_t i = 0; i < s->children_count; i++)
+            if (stmt_contains_return(s->children[i])) return 1;
+        return 0;
+    }
+    if (s->type == AST_IF)
+        return stmt_contains_return(s->data.if_stmt.then_branch) ||
+               stmt_contains_return(s->data.if_stmt.else_branch);
+    if (s->type == AST_WHILE || s->type == AST_DO_WHILE)
+        return stmt_contains_return(s->data.while_stmt.body);
+    if (s->type == AST_FOR)
+        return stmt_contains_return(s->data.for_stmt.init) ||
+               stmt_contains_return(s->data.for_stmt.body);
+    if (s->type == AST_SWITCH)
+        return stmt_contains_return(s->data.switch_stmt.body);
+    return 0;
+}
+
 static int is_safe_for_aggressive_inline(ASTNode *body) {
     if (!body || body->type != AST_BLOCK) return 0;
     if (body->children_count == 0) return 0;
@@ -1768,9 +1790,11 @@ static int is_safe_for_aggressive_inline(ASTNode *body) {
         if (s->type == AST_GOTO || s->type == AST_LABEL) return 0;
         /* No break/continue at top level (would escape inline block) */
         if (s->type == AST_BREAK || s->type == AST_CONTINUE) return 0;
-        /* No nested returns except the last statement */
+        /* No nested returns except the last statement — including returns
+           buried inside if/while/for/switch branches, which would become
+           returns from the caller function after inlining. */
         if (s->type == AST_RETURN && i != body->children_count - 1) return 0;
-        /* No switch/if containing returns (multiple return paths) */
+        if (s->type != AST_RETURN && stmt_contains_return(s)) return 0;
     }
     return 1;
 }
@@ -3143,6 +3167,10 @@ static void ipa_propagate_constants(ASTNode *program) {
         /* Skip main — its parameters are argc/argv */
         if (strcmp(fn->data.function.name, "main") == 0) continue;
 
+        /* Only specialize static functions — non-static ones may be called
+           from other translation units with different argument values. */
+        if (!fn->data.function.is_static) continue;
+
         /* Substitute constant parameters in the function body */
         if ((int)fn->children_count != info->param_count) continue;
 
@@ -3376,6 +3404,9 @@ static void ipa_dead_arg_elimination(ASTNode *program) {
         ASTNode *fn = program->children[fi];
         if (fn->type != AST_FUNCTION || !fn->data.function.body) continue;
         if (strcmp(fn->data.function.name, "main") == 0) continue;
+        /* Only modify static functions — non-static ones may be called from
+           other translation units expecting the original parameter list. */
+        if (!fn->data.function.is_static) continue;
         if (fn->children_count == 0) continue;
 
         /* Check each parameter from right to left (to avoid index shifting issues) */
@@ -3502,6 +3533,10 @@ static void ipa_dead_function_elimination(ASTNode *program) {
 
         /* Never remove main */
         if (strcmp(fn->data.function.name, "main") == 0) continue;
+
+        /* Only remove static (local-linkage) functions. Non-static functions
+           may be called from other translation units, so we must keep them. */
+        if (!fn->data.function.is_static) continue;
 
         /* Check if any other function calls this one */
         int is_called = 0;

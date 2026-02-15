@@ -1246,6 +1246,14 @@ static void gen_binary_expr(ASTNode *node) {
         
         gen_expression(node->data.binary_expr.left);
         
+        /* If 64-bit mode and immediate doesn't fit in signed 32-bit,
+         * load it into %r10 first, then use %r10 as the operand.
+         * x86-64 ALU instructions only accept sign-extended 32-bit immediates. */
+        int imm_needs_reg = (!use_32bit && (imm > 0x7FFFFFFFLL || imm < -0x80000000LL));
+        if (imm_needs_reg) {
+            emit_inst2("movabs", op_imm(imm), op_reg("r10"));
+        }
+        
         switch (node->data.binary_expr.op) {
             case TOKEN_PLUS:
                 if (left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY)) {
@@ -1257,6 +1265,7 @@ static void gen_binary_expr(ASTNode *node) {
                     node->resolved_type = left_type ? left_type : right_type;
                 }
                 if (use_32bit) emit_inst2("addl", op_imm(imm), op_reg("eax"));
+                else if (imm_needs_reg) emit_inst2("add", op_reg("r10"), op_reg("rax"));
                 else emit_inst2("add", op_imm(imm), op_reg("rax"));
                 return;
             case TOKEN_MINUS:
@@ -1269,25 +1278,30 @@ static void gen_binary_expr(ASTNode *node) {
                     node->resolved_type = left_type;
                 }
                 if (use_32bit) emit_inst2("subl", op_imm(imm), op_reg("eax"));
+                else if (imm_needs_reg) emit_inst2("sub", op_reg("r10"), op_reg("rax"));
                 else emit_inst2("sub", op_imm(imm), op_reg("rax"));
                 return;
             case TOKEN_STAR:
                 if (use_32bit) emit_inst2("imull", op_imm(imm), op_reg("eax"));
+                else if (imm_needs_reg) emit_inst2("imul", op_reg("r10"), op_reg("rax"));
                 else emit_inst2("imul", op_imm(imm), op_reg("rax"));
                 node->resolved_type = left_type;
                 return;
             case TOKEN_AMPERSAND:
                 if (use_32bit) emit_inst2("andl", op_imm(imm), op_reg("eax"));
+                else if (imm_needs_reg) emit_inst2("and", op_reg("r10"), op_reg("rax"));
                 else emit_inst2("and", op_imm(imm), op_reg("rax"));
                 node->resolved_type = left_type;
                 return;
             case TOKEN_PIPE:
                 if (use_32bit) emit_inst2("orl", op_imm(imm), op_reg("eax"));
+                else if (imm_needs_reg) emit_inst2("or", op_reg("r10"), op_reg("rax"));
                 else emit_inst2("or", op_imm(imm), op_reg("rax"));
                 node->resolved_type = left_type;
                 return;
             case TOKEN_CARET:
                 if (use_32bit) emit_inst2("xorl", op_imm(imm), op_reg("eax"));
+                else if (imm_needs_reg) emit_inst2("xor", op_reg("r10"), op_reg("rax"));
                 else emit_inst2("xor", op_imm(imm), op_reg("rax"));
                 node->resolved_type = left_type;
                 return;
@@ -1307,6 +1321,7 @@ static void gen_binary_expr(ASTNode *node) {
             case TOKEN_GREATER_EQUAL: {
                 Type *cmp_type = left_type ? left_type : right_type;
                 if (cmp_type && cmp_type->size == 4) emit_inst2("cmpl", op_imm(imm), op_reg("eax"));
+                else if (imm_needs_reg) emit_inst2("cmp", op_reg("r10"), op_reg("rax"));
                 else emit_inst2("cmp", op_imm(imm), op_reg("rax"));
                 
                 if (node->data.binary_expr.op == TOKEN_EQUAL_EQUAL) emit_inst1("sete", op_reg("al"));
