@@ -1025,22 +1025,10 @@ static ASTNode *prop_substitute(ASTNode *node, PropEnv *env) {
                     /* constant propagation: replace x with known const */
                     return make_int(b->value->data.integer.value, node->line);
                 }
-                if (b->value->type == AST_IDENTIFIER) {
-                    /* copy propagation: check that the source var hasn't been invalidated */
-                    VarBinding *src = prop_env_find(env, b->value->data.identifier.name);
-                    if (src && src->value == NULL) {
-                        /* Source was invalidated — the copy binding is stale. Can still use
-                         * the source variable name, just can't transitively propagate. */
-                    }
-                    /* Replace with source identifier */
-                    ASTNode *copy = (ASTNode *)calloc(1, sizeof(ASTNode));
-                    copy->type = AST_IDENTIFIER;
-                    copy->data.identifier.name = b->value->data.identifier.name;
-                    copy->resolved_type = node->resolved_type;
-                    copy->line = node->line;
-                    prop_env_mark_read(env, b->value->data.identifier.name);
-                    return copy;
-                }
+                /* Skip copy propagation (var→var): without a register allocator,
+                   replacing one stack-slot load with another doesn't help — it
+                   just expands code and hurts icache.  Constant propagation above
+                   is still beneficial because it turns loads into immediates. */
             }
             return node;
         }
@@ -1253,6 +1241,43 @@ static void o2_propagate_block(ASTNode *block) {
 
 #define MAX_INLINE_CANDIDATES 256
 #define MAX_INLINE_PARAMS 16
+/* Maximum AST node count in the return expression for auto-inlining.
+   Larger expressions generate too many instructions when inlined at
+   every call site, causing icache pressure without register-allocator
+   benefit.  always_inline / __forceinline bypass this limit. */
+#define MAX_INLINE_EXPR_NODES 4
+
+/* Count AST nodes in an expression tree (cheap recursive). */
+static int count_expr_nodes(ASTNode *n) {
+    if (!n) return 0;
+    switch (n->type) {
+    case AST_INTEGER: case AST_FLOAT:
+    case AST_IDENTIFIER: case AST_STRING:
+        return 1;
+    case AST_BINARY_EXPR:
+        return 1 + count_expr_nodes(n->data.binary_expr.left)
+                 + count_expr_nodes(n->data.binary_expr.right);
+    case AST_NEG: case AST_NOT: case AST_BITWISE_NOT:
+    case AST_PRE_INC: case AST_PRE_DEC:
+    case AST_POST_INC: case AST_POST_DEC:
+    case AST_DEREF: case AST_ADDR_OF:
+        return 1 + count_expr_nodes(n->data.unary.expression);
+    case AST_CAST:
+        return 1 + count_expr_nodes(n->data.cast.expression);
+    case AST_CALL: {
+        int c = 1;
+        for (size_t i = 0; i < n->children_count; i++)
+            c += count_expr_nodes(n->children[i]);
+        return c;
+    }
+    case AST_MEMBER_ACCESS:
+        return 1 + count_expr_nodes(n->data.member_access.struct_expr);
+    case AST_ARRAY_ACCESS:
+        return 1 + count_expr_nodes(n->data.array_access.array)
+                 + count_expr_nodes(n->data.array_access.index);
+    default: return 1;
+    }
+}
 
 typedef struct {
     const char *name;
@@ -1417,6 +1442,16 @@ static void find_inline_candidates(ASTNode *program) {
         if (stmt->type != AST_RETURN || !stmt->data.return_stmt.expression) continue;
 
         if ((int)fn->children_count > MAX_INLINE_PARAMS) continue;
+
+        /* Skip overly-complex return expressions unless explicitly inline.
+           Inlining e.g. "return self->buf[self->pos];" at 40+ call sites
+           replaces each 3-instruction call with 8+ instructions — net bloat
+           that harms icache without register-allocator to exploit it.
+           Functions marked inline/always_inline bypass this limit. */
+        if (fn->data.function.inline_hint < 1 &&
+            count_expr_nodes(stmt->data.return_stmt.expression) > MAX_INLINE_EXPR_NODES)
+            continue;
+
         if (g_inline_cand_count >= MAX_INLINE_CANDIDATES) break;
 
         InlineCandidate *c = &g_inline_cands[g_inline_cand_count++];
@@ -1731,7 +1766,7 @@ static void inline_substitute_stmt(ASTNode *stmt, int pcnt,
 /* then replacing the call with the return expression.                */
 /* ------------------------------------------------------------------ */
 
-#define MAX_AGGRESSIVE_INLINE_STMTS 20
+#define MAX_AGGRESSIVE_INLINE_STMTS 8
 #define MAX_AGGRESSIVE_INLINE_CANDIDATES 256
 
 typedef struct {
@@ -2370,8 +2405,9 @@ static ASTNode *try_full_unroll(ASTNode *for_node) {
     if (!analyze_for_loop(for_node, &var_name, &start_val, &end_val, &iterations))
         return NULL;
 
-    /* Full unroll threshold: N ≤ 8 */
-    if (iterations > 8 || iterations <= 0) return NULL;
+    /* Full unroll threshold: N ≤ 4  (larger thresholds inflate code
+       without register-allocator to reuse values across iterations) */
+    if (iterations > 4 || iterations <= 0) return NULL;
 
     ASTNode *body = for_node->data.for_stmt.body;
     if (!body) return NULL;
@@ -2417,7 +2453,10 @@ static ASTNode *try_partial_unroll(ASTNode *for_node) {
     if (!analyze_for_loop(for_node, &var_name, &start_val, &end_val, &iterations))
         return NULL;
 
-    /* Only partial-unroll for medium loops (9..256 iterations) */
+    /* Partial unrolling disabled: without register allocation the
+       duplicated loop bodies just increase code size and icache
+       pressure without meaningful speedup. */
+    return NULL;
     if (iterations <= 8 || iterations > 256) return NULL;
 
     ASTNode *body = for_node->data.for_stmt.body;

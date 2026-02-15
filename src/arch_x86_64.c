@@ -127,6 +127,12 @@ static char peep_pair_jcc_mn[16];    // jcc mnemonic in the pair
 static char peep_pair_jcc_tgt[64];   // jcc target (L1 — must match next label)
 static char peep_pair_jmp_tgt[64];   // jmp target (L2 — becomes inverted jcc target)
 
+// Peephole: setcc + movzbq + test + jcc → direct jcc
+// Eliminates 3 redundant instructions per boolean comparison branch.
+// State: 0=idle, 1=saw "setCC %al", 2=also saw "movzbq %al,%rax", 3=also saw "test %rax,%rax"
+static int peep_setcc_state = 0;
+static char peep_setcc_cond[16];     // condition suffix (e.g., "e", "ne", "l", "ge")
+
 static const char *peep_invert_jcc(const char *jcc) {
     if (strcmp(jcc, "je")  == 0) return "jne";
     if (strcmp(jcc, "jne") == 0) return "je";
@@ -220,6 +226,22 @@ static void peep_flush_push(void) {
     }
 }
 
+/* Flush a pending setcc chain without optimization */
+static void peep_flush_setcc(void) {
+    if (peep_setcc_state == 0) return;
+    int saved_state = peep_setcc_state;
+    peep_setcc_state = 0;
+    peep_in_flush = 1;
+    char mn[16];
+    snprintf(mn, sizeof(mn), "set%s", peep_setcc_cond);
+    emit_inst1(mn, op_reg("al"));
+    if (saved_state >= 2)
+        emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
+    if (saved_state >= 3)
+        emit_inst2("test", op_reg("rax"), op_reg("rax"));
+    peep_in_flush = 0;
+}
+
 typedef struct {
     char *label;
     char *value;
@@ -237,6 +259,7 @@ void arch_x86_64_set_writer(COFFWriter *writer) {
 static void emit_label_def(const char *name) {
     // Peephole: only apply to text section labels
     if (current_section == SECTION_TEXT) {
+        peep_flush_setcc();
         peep_flush_push();
         // Resolve pending jcc+jmp pair: jcc L1; jmp L2; L1: → j!cc L2
         if (peep_jcc_jmp_pair) {
@@ -745,6 +768,7 @@ static void print_operand_jmp(Operand *op) {
 static void emit_inst0(const char *mnemonic) {
     // Peephole: suppress dead code after unconditional jmp
     if (!peep_in_flush && current_section == SECTION_TEXT) {
+        peep_flush_setcc();
         peep_flush_push();
         peep_flush_jcc();
         peep_flush_pair();
@@ -766,10 +790,68 @@ static void emit_inst0(const char *mnemonic) {
 }
 
 static void emit_inst1(const char *mnemonic, Operand *op1) {
+    /* ---- Peephole: setcc + movzbq + test + jcc → direct jcc ----
+     * When state==3, a jcc completes the pattern. Compute the direct
+     * jump condition from the original setCC and the branch direction.
+     * setCC %al; movzbq %al,%rax; test %rax,%rax; je L  → j(inv CC) L
+     * setCC %al; movzbq %al,%rax; test %rax,%rax; jne L → jCC L       */
+    if (!peep_in_flush && current_section == SECTION_TEXT &&
+        g_compiler_options.opt_level >= OPT_O1 &&
+        peep_setcc_state == 3 &&
+        op1->type == OP_LABEL &&
+        mnemonic[0] == 'j' && strcmp(mnemonic, "jmp") != 0) {
+        /* Build the jcc that corresponds to the original setCC */
+        static char setcc_jcc[16];
+        snprintf(setcc_jcc, sizeof(setcc_jcc), "j%s", peep_setcc_cond);
+        if (strcmp(mnemonic, "je") == 0 || strcmp(mnemonic, "jz") == 0) {
+            /* test+je: branch when setCC result was 0 → condition false → invert */
+            const char *inv = peep_invert_jcc(setcc_jcc);
+            if (inv) {
+                peep_setcc_state = 0;
+                mnemonic = inv;
+                /* fall through to normal jcc handling with the new mnemonic */
+            } else {
+                peep_flush_setcc();
+                /* fall through with original mnemonic */
+            }
+        } else if (strcmp(mnemonic, "jne") == 0 || strcmp(mnemonic, "jnz") == 0) {
+            /* test+jne: branch when setCC result was 1 → condition true → keep */
+            peep_setcc_state = 0;
+            mnemonic = setcc_jcc;
+            /* fall through to normal jcc handling */
+        } else {
+            /* Other conditional jump — can't optimize, flush */
+            peep_flush_setcc();
+        }
+    }
+    /* If we have a pending setcc chain and this is NOT a matching jcc, flush */
+    else if (!peep_in_flush && peep_setcc_state > 0 &&
+             !(mnemonic[0] == 's' && mnemonic[1] == 'e' && mnemonic[2] == 't' &&
+               op1->type == OP_REG && strcmp(op1->data.reg, "al") == 0)) {
+        peep_flush_setcc();
+    }
+
+    /* ---- Peephole: buffer setCC %al ---- */
+    if (!peep_in_flush && current_section == SECTION_TEXT &&
+        g_compiler_options.opt_level >= OPT_O1 &&
+        mnemonic[0] == 's' && mnemonic[1] == 'e' && mnemonic[2] == 't' &&
+        op1->type == OP_REG && strcmp(op1->data.reg, "al") == 0) {
+        peep_flush_push();
+        peep_flush_jcc();
+        peep_flush_pair();
+        peep_flush_jmp();
+        if (peep_unreachable) return;
+        peep_setcc_state = 1;
+        strncpy(peep_setcc_cond, mnemonic + 3, 15);
+        peep_setcc_cond[15] = '\0';
+        return;
+    }
+
     // Peephole: intercept unconditional jmp for buffering/dead-code elimination
     if (!peep_in_flush && current_section == SECTION_TEXT &&
         strcmp(mnemonic, "jmp") == 0 && op1->type == OP_LABEL) {
         if (peep_unreachable) return;  // dead code after previous jmp
+        peep_flush_setcc();
         peep_flush_push();
         
         /* Branch optimization: jcc L1; jmp L2 → candidate pair
@@ -805,6 +887,7 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
         g_compiler_options.opt_level >= OPT_O1 &&
         op1->type == OP_LABEL &&
         mnemonic[0] == 'j' && strcmp(mnemonic, "jmp") != 0) {
+        peep_flush_setcc();
         peep_flush_push();
         peep_flush_jcc();  /* flush any previous buffered jcc first */
         peep_flush_pair();
@@ -823,6 +906,7 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
     if (!peep_in_flush && current_section == SECTION_TEXT &&
         g_compiler_options.opt_level >= OPT_O1 &&
         strcmp(mnemonic, "pushq") == 0 && op1->type == OP_REG) {
+        peep_flush_setcc();
         peep_flush_push();  /* flush any previous buffered pushq */
         peep_flush_jcc();
         peep_flush_pair();
@@ -853,6 +937,7 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
     
     // Peephole: suppress dead code after unconditional jmp
     if (!peep_in_flush && current_section == SECTION_TEXT) {
+        peep_flush_setcc();
         peep_flush_push();
         peep_flush_jcc();
         peep_flush_pair();
@@ -894,6 +979,29 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
 }
 
 static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
+    /* ---- Peephole: setcc state transitions for 2-operand instructions ---- */
+    if (!peep_in_flush && current_section == SECTION_TEXT &&
+        g_compiler_options.opt_level >= OPT_O1 && peep_setcc_state > 0) {
+        /* State 1 → 2: movzbq %al, %rax */
+        if (peep_setcc_state == 1 &&
+            strcmp(mnemonic, "movzbq") == 0 &&
+            op1->type == OP_REG && strcmp(op1->data.reg, "al") == 0 &&
+            op2->type == OP_REG && strcmp(op2->data.reg, "rax") == 0) {
+            peep_setcc_state = 2;
+            return;
+        }
+        /* State 2 → 3: test %rax, %rax */
+        if (peep_setcc_state == 2 &&
+            strcmp(mnemonic, "test") == 0 &&
+            op1->type == OP_REG && strcmp(op1->data.reg, "rax") == 0 &&
+            op2->type == OP_REG && strcmp(op2->data.reg, "rax") == 0) {
+            peep_setcc_state = 3;
+            return;
+        }
+        /* Unexpected instruction — flush and continue normally */
+        peep_flush_setcc();
+    }
+
     // Peephole: suppress dead code after unconditional jmp
     if (!peep_in_flush && current_section == SECTION_TEXT) {
         peep_flush_push();
@@ -966,6 +1074,7 @@ static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
 /* 3-operand AVX instruction: emit_inst3("vaddps", src1, src2, dest) */
 static void emit_inst3(const char *mnemonic, Operand *op1, Operand *op2, Operand *op3) {
     if (!peep_in_flush && current_section == SECTION_TEXT) {
+        peep_flush_setcc();
         peep_flush_push();
         peep_flush_jcc();
         peep_flush_pair();
@@ -3023,6 +3132,7 @@ static void gen_function(ASTNode *node) {
     peep_pending_push = 0;
     peep_pending_jcc = 0;
     peep_jcc_jmp_pair = 0;
+    peep_setcc_state = 0;
     if (current_syntax == SYNTAX_ATT) {
         if (out && !node->data.function.is_static) fprintf(out, ".globl %s\n", node->data.function.name);
         emit_label_def(node->data.function.name);
