@@ -124,10 +124,6 @@ echo "Compiled: $TOTAL_PASS passed, $TOTAL_FAIL failed"
 echo ""
 
 # Summary note
-echo "Note: -O1 through -O3 are not yet implemented — all levels currently"
-echo "      produce identical output. This baseline allows measuring future"
-echo "      optimization improvements."
-echo ""
 echo "To compare, also compile with GCC/Clang and time the output:"
 echo "  gcc -O0 -o bench_loop_gcc tests/bench_loop.c && time ./bench_loop_gcc"
 echo "  gcc -O2 -o bench_loop_gcc tests/bench_loop.c && time ./bench_loop_gcc"

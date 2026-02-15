@@ -642,6 +642,7 @@ typedef struct {
     int offset;
     char *label;
     Type *type;
+    const char *reg;   /* Non-NULL if variable lives in a register (e.g. "rbx") */
 } LocalVar;
 
 static LocalVar locals[8192];
@@ -677,6 +678,334 @@ static Type *get_local_type(const char *name) {
         }
     }
     return NULL;
+}
+
+/* --- Register Allocator (Phase 7a) ---
+ * Assigns frequently-used scalar integer locals to callee-saved registers
+ * (%rbx, %r12-%r15) to eliminate memory round-trips in tight loops.
+ * Activated at -O2 and above. */
+
+#define REGALLOC_MAX_REGS  5   /* %rbx, %r12, %r13, %r14, %r15 */
+#define REGALLOC_MAX_VARS  256
+
+static const char *regalloc_callee_regs[REGALLOC_MAX_REGS] = {
+    "rbx", "r12", "r13", "r14", "r15"
+};
+static const char *regalloc_callee_regs_32[REGALLOC_MAX_REGS] = {
+    "ebx", "r12d", "r13d", "r14d", "r15d"
+};
+static const char *regalloc_callee_regs_16[REGALLOC_MAX_REGS] = {
+    "bx", "r12w", "r13w", "r14w", "r15w"
+};
+static const char *regalloc_callee_regs_8[REGALLOC_MAX_REGS] = {
+    "bl", "r12b", "r13b", "r14b", "r15b"
+};
+
+/* Pre-scan data: collected from the AST before codegen */
+typedef struct {
+    const char *name;
+    Type *type;
+    int is_addr_taken;  /* 1 if &var appears in the function body */
+    int is_param;       /* 1 if this is a function parameter */
+    int use_count;      /* approximate number of uses for priority */
+} RegScanVar;
+
+static RegScanVar regalloc_scan_vars[REGALLOC_MAX_VARS];
+static int regalloc_scan_count = 0;
+
+/* Per-function register assignments */
+typedef struct {
+    const char *var_name;
+    const char *reg64;   /* 64-bit name: "rbx", "r12", ... */
+    const char *reg32;   /* 32-bit name: "ebx", "r12d", ... */
+    const char *reg16;   /* 16-bit name */
+    const char *reg8;    /* 8-bit name */
+    int save_offset;     /* rbp-relative offset where we saved the original value */
+} RegAssignment;
+
+static RegAssignment regalloc_assignments[REGALLOC_MAX_REGS];
+static int regalloc_assignment_count = 0;
+
+/* Look up the register assigned to a local variable (NULL if on stack) */
+static const char *get_local_reg(const char *name) {
+    if (!name || regalloc_assignment_count == 0) return NULL;
+    for (int i = locals_count - 1; i >= 0; i--) {
+        if (locals[i].name && strcmp(locals[i].name, name) == 0) {
+            return locals[i].reg;
+        }
+    }
+    return NULL;
+}
+
+/* Get the 32-bit version of a register-allocated variable's register */
+static const char *get_local_reg32(const char *name) {
+    if (!name || regalloc_assignment_count == 0) return NULL;
+    const char *reg64 = get_local_reg(name);
+    if (!reg64) return NULL;
+    for (int i = 0; i < regalloc_assignment_count; i++) {
+        if (strcmp(regalloc_assignments[i].reg64, reg64) == 0)
+            return regalloc_assignments[i].reg32;
+    }
+    return NULL;
+}
+
+/* Get the 8-bit version of a register-allocated variable's register */
+static const char *get_local_reg8(const char *name) {
+    if (!name || regalloc_assignment_count == 0) return NULL;
+    const char *reg64 = get_local_reg(name);
+    if (!reg64) return NULL;
+    for (int i = 0; i < regalloc_assignment_count; i++) {
+        if (strcmp(regalloc_assignments[i].reg64, reg64) == 0)
+            return regalloc_assignments[i].reg8;
+    }
+    return NULL;
+}
+
+/* Get the 16-bit version of a register-allocated variable's register */
+static const char *get_local_reg16(const char *name) {
+    if (!name || regalloc_assignment_count == 0) return NULL;
+    const char *reg64 = get_local_reg(name);
+    if (!reg64) return NULL;
+    for (int i = 0; i < regalloc_assignment_count; i++) {
+        if (strcmp(regalloc_assignments[i].reg64, reg64) == 0)
+            return regalloc_assignments[i].reg16;
+    }
+    return NULL;
+}
+
+/* Pre-scan: record a variable declaration */
+static void regalloc_scan_record_var(const char *name, Type *type, int is_param) {
+    if (!name || regalloc_scan_count >= REGALLOC_MAX_VARS) return;
+    /* Check for duplicate (variable shadowing — skip for safety) */
+    for (int i = 0; i < regalloc_scan_count; i++) {
+        if (strcmp(regalloc_scan_vars[i].name, name) == 0) {
+            /* Mark as address-taken to prevent register allocation */
+            regalloc_scan_vars[i].is_addr_taken = 1;
+            return;
+        }
+    }
+    regalloc_scan_vars[regalloc_scan_count].name = name;
+    regalloc_scan_vars[regalloc_scan_count].type = type;
+    regalloc_scan_vars[regalloc_scan_count].is_addr_taken = 0;
+    regalloc_scan_vars[regalloc_scan_count].is_param = is_param;
+    regalloc_scan_vars[regalloc_scan_count].use_count = 0;
+    regalloc_scan_count++;
+}
+
+/* Pre-scan: recursively walk AST to collect variable info */
+static void regalloc_scan_ast(ASTNode *node) {
+    if (!node) return;
+
+    /* Record variable declarations */
+    if (node->type == AST_VAR_DECL && node->data.var_decl.name) {
+        regalloc_scan_record_var(node->data.var_decl.name, node->resolved_type, 0);
+    }
+
+    /* Detect address-taken variables: &identifier */
+    if (node->type == AST_ADDR_OF && node->data.unary.expression &&
+        node->data.unary.expression->type == AST_IDENTIFIER) {
+        const char *taken_name = node->data.unary.expression->data.identifier.name;
+        if (taken_name) {
+            for (int i = 0; i < regalloc_scan_count; i++) {
+                if (strcmp(regalloc_scan_vars[i].name, taken_name) == 0) {
+                    regalloc_scan_vars[i].is_addr_taken = 1;
+                    break;
+                }
+            }
+        }
+    }
+
+    /* Count variable uses */
+    if (node->type == AST_IDENTIFIER && node->data.identifier.name) {
+        for (int i = 0; i < regalloc_scan_count; i++) {
+            if (strcmp(regalloc_scan_vars[i].name, node->data.identifier.name) == 0) {
+                regalloc_scan_vars[i].use_count++;
+                break;
+            }
+        }
+    }
+
+    /* Recurse into children */
+    if (node->children) {
+        for (size_t i = 0; i < node->children_count; i++) {
+            regalloc_scan_ast(node->children[i]);
+        }
+    }
+
+    /* Recurse into specific AST node fields */
+    switch (node->type) {
+        case AST_FUNCTION:
+            regalloc_scan_ast(node->data.function.body);
+            break;
+        case AST_VAR_DECL:
+            regalloc_scan_ast(node->data.var_decl.initializer);
+            break;
+        case AST_ASSIGN:
+            regalloc_scan_ast(node->data.assign.left);
+            regalloc_scan_ast(node->data.assign.value);
+            break;
+        case AST_BINARY_EXPR:
+            regalloc_scan_ast(node->data.binary_expr.left);
+            regalloc_scan_ast(node->data.binary_expr.right);
+            break;
+        case AST_IF:
+            regalloc_scan_ast(node->data.if_stmt.condition);
+            regalloc_scan_ast(node->data.if_stmt.then_branch);
+            regalloc_scan_ast(node->data.if_stmt.else_branch);
+            break;
+        case AST_WHILE:
+        case AST_DO_WHILE:
+            regalloc_scan_ast(node->data.while_stmt.condition);
+            regalloc_scan_ast(node->data.while_stmt.body);
+            break;
+        case AST_FOR:
+            regalloc_scan_ast(node->data.for_stmt.init);
+            regalloc_scan_ast(node->data.for_stmt.condition);
+            regalloc_scan_ast(node->data.for_stmt.increment);
+            regalloc_scan_ast(node->data.for_stmt.body);
+            break;
+        case AST_RETURN:
+            regalloc_scan_ast(node->data.return_stmt.expression);
+            break;
+        case AST_CALL:
+            /* arguments are in children[], already handled above */
+            break;
+        case AST_CAST:
+            regalloc_scan_ast(node->data.cast.expression);
+            break;
+        case AST_DEREF:
+        case AST_ADDR_OF:
+        case AST_NEG:
+        case AST_NOT:
+        case AST_BITWISE_NOT:
+        case AST_PRE_INC:
+        case AST_PRE_DEC:
+        case AST_POST_INC:
+        case AST_POST_DEC:
+            regalloc_scan_ast(node->data.unary.expression);
+            break;
+        case AST_MEMBER_ACCESS:
+            regalloc_scan_ast(node->data.member_access.struct_expr);
+            break;
+        case AST_ARRAY_ACCESS:
+            regalloc_scan_ast(node->data.array_access.array);
+            regalloc_scan_ast(node->data.array_access.index);
+            break;
+        case AST_SWITCH:
+            regalloc_scan_ast(node->data.switch_stmt.condition);
+            regalloc_scan_ast(node->data.switch_stmt.body);
+            break;
+        case AST_ASSERT:
+            regalloc_scan_ast(node->data.assert_stmt.condition);
+            break;
+        default:
+            break;
+    }
+}
+
+/* Determine if a variable is eligible for register allocation */
+static int regalloc_is_eligible(RegScanVar *sv) {
+    if (sv->is_addr_taken) return 0;
+    if (!sv->type) return 0;
+    /* Only scalar integer types (size 1-8) */
+    if (sv->type->kind == TYPE_ARRAY || sv->type->kind == TYPE_STRUCT ||
+        sv->type->kind == TYPE_UNION) return 0;
+    if (sv->type->kind == TYPE_FLOAT || sv->type->kind == TYPE_DOUBLE) return 0;
+    if (sv->type->size > 8) return 0;
+    return 1;
+}
+
+/* Assign registers to eligible variables.  Called before parameter handling.
+ * Phase 1 (regalloc_analyze): pre-scan AST and determine assignments.
+ * Phase 2 (regalloc_emit_saves): emit pushq for callee-saved registers.
+ * func_node is the AST_FUNCTION node. */
+static void regalloc_analyze(ASTNode *func_node) {
+    regalloc_scan_count = 0;
+    regalloc_assignment_count = 0;
+
+    if (g_compiler_options.opt_level < OPT_O2) return;
+
+    /* Pre-scan function parameters */
+    if (func_node->children) {
+        for (size_t i = 0; i < func_node->children_count; i++) {
+            ASTNode *param = func_node->children[i];
+            if (param && param->type == AST_VAR_DECL && param->data.var_decl.name) {
+                regalloc_scan_record_var(param->data.var_decl.name, param->resolved_type, 1);
+            }
+        }
+    }
+
+    /* Pre-scan the function body */
+    regalloc_scan_ast(func_node->data.function.body);
+
+    /* Sort eligible variables by use count (descending) — simple selection */
+    /* Collect eligible indices */
+    int eligible[REGALLOC_MAX_VARS];
+    int eligible_count = 0;
+    for (int i = 0; i < regalloc_scan_count && eligible_count < REGALLOC_MAX_VARS; i++) {
+        if (regalloc_is_eligible(&regalloc_scan_vars[i])) {
+            eligible[eligible_count++] = i;
+        }
+    }
+
+    /* Simple sort by use_count descending (selection sort is fine for small N) */
+    for (int i = 0; i < eligible_count - 1; i++) {
+        int max_idx = i;
+        for (int j = i + 1; j < eligible_count; j++) {
+            if (regalloc_scan_vars[eligible[j]].use_count >
+                regalloc_scan_vars[eligible[max_idx]].use_count) {
+                max_idx = j;
+            }
+        }
+        if (max_idx != i) {
+            int tmp = eligible[i];
+            eligible[i] = eligible[max_idx];
+            eligible[max_idx] = tmp;
+        }
+    }
+
+    /* Assign registers to the top N eligible variables (no codegen yet) */
+    int num_assign = eligible_count < REGALLOC_MAX_REGS ? eligible_count : REGALLOC_MAX_REGS;
+    for (int i = 0; i < num_assign; i++) {
+        RegScanVar *sv = &regalloc_scan_vars[eligible[i]];
+        regalloc_assignments[i].var_name = sv->name;
+        regalloc_assignments[i].reg64 = regalloc_callee_regs[i];
+        regalloc_assignments[i].reg32 = regalloc_callee_regs_32[i];
+        regalloc_assignments[i].reg16 = regalloc_callee_regs_16[i];
+        regalloc_assignments[i].reg8 = regalloc_callee_regs_8[i];
+        regalloc_assignments[i].save_offset = 0; /* set during emit_saves */
+    }
+    regalloc_assignment_count = num_assign;
+}
+
+/* Emit pushq instructions to save callee-saved registers that we'll use.
+ * Must be called after prologue but before parameter handling / body codegen. */
+static void regalloc_emit_saves(void) {
+    for (int i = 0; i < regalloc_assignment_count; i++) {
+        emit_inst1("pushq", op_reg(regalloc_assignments[i].reg64));
+        stack_offset -= 8;
+        regalloc_assignments[i].save_offset = stack_offset;
+    }
+}
+
+/* Restore callee-saved registers before function epilogue.
+ * Uses rbp-relative addressing so stack pointer position doesn't matter. */
+static void regalloc_restore_registers(void) {
+    for (int i = 0; i < regalloc_assignment_count; i++) {
+        emit_inst2("mov", op_mem("rbp", regalloc_assignments[i].save_offset),
+                    op_reg(regalloc_assignments[i].reg64));
+    }
+}
+
+/* Check if a variable name is assigned to a register and return the
+ * register assignment index, or -1 if not register-allocated. */
+static int regalloc_find_assignment(const char *name) {
+    if (!name) return -1;
+    for (int i = 0; i < regalloc_assignment_count; i++) {
+        if (strcmp(regalloc_assignments[i].var_name, name) == 0)
+            return i;
+    }
+    return -1;
 }
 
 typedef struct {
@@ -1755,7 +2084,7 @@ static void gen_binary_expr(ASTNode *node) {
      * instruction-level parallelism on modern out-of-order CPUs.
      *   Before: gen(R); pushq %rax; gen(L); popq %rcx
      *   After:  gen(R); mov %rax,%rcx; gen(L)                */
-    if (g_compiler_options.opt_level >= OPT_O3 &&
+    if (g_compiler_options.opt_level >= OPT_O2 &&
         gen_expr_is_rax_only(node->data.binary_expr.left)) {
         emit_inst2("mov", op_reg("rax"), op_reg("rcx"));
         gen_expression(node->data.binary_expr.left);
@@ -1943,6 +2272,26 @@ static void gen_expression(ASTNode *node) {
         }
     } else if (node->type == AST_IDENTIFIER) {
         if (!node->data.identifier.name) { fprintf(stderr, "      Ident: NULL NAME!\n"); return; }
+        /* Register allocator: check if variable lives in a register */
+        const char *ra_reg = get_local_reg(node->data.identifier.name);
+        if (ra_reg) {
+            Type *t = get_local_type(node->data.identifier.name);
+            /* Variable is in a register — just move to %rax */
+            if (t && t->size == 4) {
+                /* 32-bit: use movl for zero-extension */
+                const char *r32 = get_local_reg32(node->data.identifier.name);
+                if (r32) emit_inst2("movl", op_reg(r32), op_reg("eax"));
+                else emit_inst2("mov", op_reg(ra_reg), op_reg("rax"));
+            } else if (t && t->size == 1) {
+                const char *r8 = get_local_reg8(node->data.identifier.name);
+                if (r8) emit_inst2("movzbq", op_reg(r8), op_reg("rax"));
+                else emit_inst2("mov", op_reg(ra_reg), op_reg("rax"));
+            } else {
+                emit_inst2("mov", op_reg(ra_reg), op_reg("rax"));
+            }
+            node->resolved_type = t;
+            return;
+        }
         const char *label = get_local_label(node->data.identifier.name);
         if (label) {
             Type *t = get_local_type(node->data.identifier.name);
@@ -2019,6 +2368,34 @@ static void gen_expression(ASTNode *node) {
         int is_pre = (node->type == AST_PRE_INC || node->type == AST_PRE_DEC);
         
         Type *t = get_expr_type(node->data.unary.expression);
+
+        /* Register allocator fast path: if the operand is an identifier in a register,
+         * directly increment/decrement the register without going through memory. */
+        if (node->data.unary.expression && node->data.unary.expression->type == AST_IDENTIFIER) {
+            const char *ra_reg = get_local_reg(node->data.unary.expression->data.identifier.name);
+            if (ra_reg) {
+                int step = 1;
+                if (t && (t->kind == TYPE_PTR || t->kind == TYPE_ARRAY) && t->data.ptr_to) {
+                    step = t->data.ptr_to->size;
+                }
+                if (!is_pre) {
+                    /* POST: result is old value */
+                    emit_inst2("mov", op_reg(ra_reg), op_reg("rax"));
+                }
+                if (is_inc) {
+                    emit_inst2("add", op_imm(step), op_reg(ra_reg));
+                } else {
+                    emit_inst2("sub", op_imm(step), op_reg(ra_reg));
+                }
+                if (is_pre) {
+                    /* PRE: result is new value */
+                    emit_inst2("mov", op_reg(ra_reg), op_reg("rax"));
+                }
+                node->resolved_type = t;
+                return;
+            }
+        }
+        
         gen_addr(node->data.unary.expression);
         // Address is in RAX. 
         
@@ -2155,6 +2532,14 @@ static void gen_expression(ASTNode *node) {
         gen_expression(node->data.assign.value);
         if (left_node->type == AST_IDENTIFIER) {
             const char *ident_name = left_node->data.identifier.name;
+            /* Register allocator: check if variable lives in a register */
+            const char *ra_reg = get_local_reg(ident_name);
+            if (ra_reg) {
+                /* Store value from %rax to the register */
+                emit_inst2("mov", op_reg("rax"), op_reg(ra_reg));
+                node->resolved_type = t;
+                return;
+            }
             const char *label = get_local_label(ident_name);
             if (label) {
                 if (is_float_type(t)) {
@@ -2801,6 +3186,7 @@ static void gen_statement(ASTNode *node) {
              locals[locals_count].label = node->data.var_decl.name;
              locals[locals_count].offset = 0;
              locals[locals_count].type = node->resolved_type;
+             locals[locals_count].reg = NULL;
              locals_count++;
              return;
         }
@@ -2906,6 +3292,7 @@ static void gen_statement(ASTNode *node) {
             locals[locals_count].label = strdup(slabel);
             locals[locals_count].offset = 0;
             locals[locals_count].type = node->resolved_type;
+            locals[locals_count].reg = NULL;
             locals_count++;
             return;
         }
@@ -2925,6 +3312,7 @@ static void gen_statement(ASTNode *node) {
             locals[locals_count].offset = stack_offset;
             locals[locals_count].label = NULL;
             locals[locals_count].type = node->resolved_type;
+            locals[locals_count].reg = NULL;
             locals_count++;
             debug_record_var(node->data.var_decl.name, stack_offset, 0, node->resolved_type);
             
@@ -3000,35 +3388,52 @@ static void gen_statement(ASTNode *node) {
                 }
             }
             
-            stack_offset -= alloc_size;
-            
-            if (locals_count >= 8192) { fprintf(stderr, "Error: Too many locals\n"); exit(1); }
-            locals[locals_count].name = node->data.var_decl.name;
-            locals[locals_count].offset = stack_offset;
-            locals[locals_count].label = NULL;
-            locals[locals_count].type = node->resolved_type;
-            locals_count++;
-            debug_record_var(node->data.var_decl.name, stack_offset, 0, node->resolved_type);
-            
-            if (is_float_type(node->resolved_type)) {
-                // Don't use emit_push_xmm here - stack_offset already adjusted above
-                emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
-                emit_inst2("movsd", op_reg("xmm0"), op_mem("rsp", 0));
+            /* Check if this variable should be register-allocated */
+            int ra_idx = regalloc_find_assignment(node->data.var_decl.name);
+            if (ra_idx >= 0 && !is_float_type(node->resolved_type)) {
+                /* Register-allocated variable: store value in assigned register */
+                if (locals_count >= 8192) { fprintf(stderr, "Error: Too many locals\n"); exit(1); }
+                locals[locals_count].name = node->data.var_decl.name;
+                locals[locals_count].offset = 0;
+                locals[locals_count].label = NULL;
+                locals[locals_count].type = node->resolved_type;
+                locals[locals_count].reg = regalloc_assignments[ra_idx].reg64;
+                locals_count++;
+                /* Move value from %rax to the assigned register */
+                emit_inst2("mov", op_reg("rax"), op_reg(regalloc_assignments[ra_idx].reg64));
             } else {
-                emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
-                if (node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
-                    // Scalar store
-                    if (size == 1) emit_inst2("movb", op_reg("al"), op_mem("rsp", 0));
-                    else if (size == 2) emit_inst2("movw", op_reg("ax"), op_mem("rsp", 0));
-                    else if (size == 4) emit_inst2("movl", op_reg("eax"), op_mem("rsp", 0));
-                    else emit_inst2("mov", op_reg("rax"), op_mem("rsp", 0));
-                } else if (node->resolved_type && (node->resolved_type->kind == TYPE_STRUCT || node->resolved_type->kind == TYPE_ARRAY) && node->data.var_decl.initializer && node->data.var_decl.initializer->type != AST_INIT_LIST) {
-                    /* Struct/array copy via memcpy: rax has source address from gen_expression */
-                    emit_inst2("mov", op_reg("rsp"), op_reg("rdi"));
-                    emit_inst2("mov", op_reg("rax"), op_reg("rsi"));
-                    emit_inst2("mov", op_imm(alloc_size), op_reg("rdx"));
-                    emit_inst2("xor", op_reg("eax"), op_reg("eax"));
-                    emit_inst0("call memcpy");
+                /* Stack-allocated variable (original path) */
+                stack_offset -= alloc_size;
+            
+                if (locals_count >= 8192) { fprintf(stderr, "Error: Too many locals\n"); exit(1); }
+                locals[locals_count].name = node->data.var_decl.name;
+                locals[locals_count].offset = stack_offset;
+                locals[locals_count].label = NULL;
+                locals[locals_count].type = node->resolved_type;
+                locals[locals_count].reg = NULL;
+                locals_count++;
+                debug_record_var(node->data.var_decl.name, stack_offset, 0, node->resolved_type);
+            
+                if (is_float_type(node->resolved_type)) {
+                    // Don't use emit_push_xmm here - stack_offset already adjusted above
+                    emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
+                    emit_inst2("movsd", op_reg("xmm0"), op_mem("rsp", 0));
+                } else {
+                    emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
+                    if (node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
+                        // Scalar store
+                        if (size == 1) emit_inst2("movb", op_reg("al"), op_mem("rsp", 0));
+                        else if (size == 2) emit_inst2("movw", op_reg("ax"), op_mem("rsp", 0));
+                        else if (size == 4) emit_inst2("movl", op_reg("eax"), op_mem("rsp", 0));
+                        else emit_inst2("mov", op_reg("rax"), op_mem("rsp", 0));
+                    } else if (node->resolved_type && (node->resolved_type->kind == TYPE_STRUCT || node->resolved_type->kind == TYPE_ARRAY) && node->data.var_decl.initializer && node->data.var_decl.initializer->type != AST_INIT_LIST) {
+                        /* Struct/array copy via memcpy: rax has source address from gen_expression */
+                        emit_inst2("mov", op_reg("rsp"), op_reg("rdi"));
+                        emit_inst2("mov", op_reg("rax"), op_reg("rsi"));
+                        emit_inst2("mov", op_imm(alloc_size), op_reg("rdx"));
+                        emit_inst2("xor", op_reg("eax"), op_reg("eax"));
+                        emit_inst0("call memcpy");
+                    }
                 }
             }
         }
@@ -3433,6 +3838,14 @@ static void gen_function(ASTNode *node) {
         sret_reg_shift = 1;  /* param 0 comes from arg_regs[1], etc. */
     }
     
+    /* Register allocator Phase 1: analyze AST and determine register assignments.
+     * Must run before parameter handling so params can be placed in registers. */
+    regalloc_analyze(node);
+    
+    /* Register allocator Phase 2: save callee-saved registers we'll use.
+     * These pushq instructions go right after the prologue. */
+    regalloc_emit_saves();
+    
     // Handle parameters (platform ABI)
     const char **arg_regs = g_arg_regs;
     const char **xmm_arg_regs = g_xmm_arg_regs;
@@ -3453,23 +3866,36 @@ static void gen_function(ASTNode *node) {
             
             int reg_idx = (int)i + sret_reg_shift;
             if (reg_idx < max_reg) {
-                // Register params: allocate on local stack
-                stack_offset -= alloc_size;
-                locals[locals_count].offset = stack_offset;
-                locals_count++;
-                if (is_float_type(param->resolved_type)) {
-                    emit_push_xmm(xmm_arg_regs[i]);
+                /* Check if this parameter is register-allocated */
+                int ra_idx = regalloc_find_assignment(param->data.var_decl.name);
+                if (ra_idx >= 0 && !is_float_type(param->resolved_type)) {
+                    /* Parameter goes directly to callee-saved register */
+                    locals[locals_count].offset = 0;
+                    locals[locals_count].reg = regalloc_assignments[ra_idx].reg64;
+                    locals_count++;
+                    emit_inst2("mov", op_reg(arg_regs[reg_idx]),
+                               op_reg(regalloc_assignments[ra_idx].reg64));
                 } else {
-                    emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
-                    if (size == 1) emit_inst2("movb", op_reg(get_reg_8(arg_regs[reg_idx])), op_mem("rsp", 0));
-                    else if (size == 2) emit_inst2("movw", op_reg(get_reg_16(arg_regs[reg_idx])), op_mem("rsp", 0));
-                    else if (size == 4) emit_inst2("movl", op_reg(get_reg_32(arg_regs[reg_idx])), op_mem("rsp", 0));
-                    else emit_inst2("mov", op_reg(arg_regs[reg_idx]), op_mem("rsp", 0));
+                    /* Original path: spill to stack */
+                    locals[locals_count].reg = NULL;
+                    stack_offset -= alloc_size;
+                    locals[locals_count].offset = stack_offset;
+                    locals_count++;
+                    if (is_float_type(param->resolved_type)) {
+                        emit_push_xmm(xmm_arg_regs[i]);
+                    } else {
+                        emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
+                        if (size == 1) emit_inst2("movb", op_reg(get_reg_8(arg_regs[reg_idx])), op_mem("rsp", 0));
+                        else if (size == 2) emit_inst2("movw", op_reg(get_reg_16(arg_regs[reg_idx])), op_mem("rsp", 0));
+                        else if (size == 4) emit_inst2("movl", op_reg(get_reg_32(arg_regs[reg_idx])), op_mem("rsp", 0));
+                        else emit_inst2("mov", op_reg(arg_regs[reg_idx]), op_mem("rsp", 0));
+                    }
                 }
             } else {
                 // Stack params: already on caller's stack at positive rbp offset
                 // Win64: [rbp+16] = shadow[0], [rbp+48] = param5, ...
                 // SysV:  [rbp+16] = param7, [rbp+24] = param8, ...
+                locals[locals_count].reg = NULL;
                 int param_offset;
                 if (g_use_shadow_space) {
                     param_offset = 48 + ((int)i - max_reg) * 8; // Win64
@@ -3503,6 +3929,9 @@ static void gen_function(ASTNode *node) {
         emit_inst1("call", op_label("__pgo_dump"));
         emit_inst1("popq", op_reg("rax"));
     }
+    
+    /* Register allocator: restore callee-saved registers before epilogue */
+    regalloc_restore_registers();
     
     emit_inst0("leave");
     emit_inst0("ret");

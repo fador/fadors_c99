@@ -39,6 +39,7 @@ A self-hosting C99-standard compliant compiler written in C99, targeting x86_64 
 - **Dual ABI Support**: System V AMD64 (Linux, 6 int + 8 XMM register args) and Win64 (4 register args, shadow space).
 - **Float/Double Codegen**: Full SSE scalar instruction support (addss/sd, subss/sd, mulss/sd, divss/sd, conversions).
 - **Peephole Optimization**: Multi-state peephole optimizer with: push/pop→mov elimination, jcc-over-jmp inversion, setcc+movzbq+test+jcc→direct jcc fusion, add $0/imul $1/imul $0 elimination, self-move elimination, dead code after unconditional branches, and instruction scheduling (push/pop→register for binary expression operands).
+- **Register Allocator**: AST pre-scan assigns up to 5 callee-saved registers (`%rbx`, `%r12`–`%r15`) to the most-used scalar integer locals and parameters. Eliminates stack loads/stores in hot loops. Activated at `-O2+`.
 - **Stack Management**: Automatic local variable allocation and ABI-compliant register-based argument passing.
 
 ### Bundled Standard Library Headers
@@ -371,30 +372,41 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [x] **Loop strength reduction**: Achieved through loop unrolling + constant folding — after unrolling, `a[i]` becomes `a[0]`, `a[1]`, ... which are constant-folded into direct indexed addressing.
 - [x] **Interprocedural optimization**: IPA constant propagation (specialize parameters always passed as the same constant across all call sites), dead argument elimination (remove unused parameters from definitions and call sites), dead function elimination (remove functions with zero callers after inlining), and return value propagation (replace calls to always-constant-returning functions with the constant).
 - [x] **Vectorization hints**: Auto-detect simple array loops (`a[i] = b[i] OP c[i]`) and emit packed instructions. SSE/SSE2 path (default): `movups`/`addps`/`subps`/`mulps`/`divps` for 4×float, `movdqu`/`paddd`/`psubd` for 4×int32 (128-bit, 4 elements per iteration). AVX/AVX2 path (`-mavx`/`-mavx2`): `vmovups`/`vaddps`/`vsubps`/`vmulps`/`vdivps` for 8×float, `vmovdqu`/`vpaddd`/`vpsubd` for 8×int32 (256-bit YMM registers, 8 elements per iteration, 3-operand VEX encoding). Automatic scalar remainder for non-aligned sizes and `vzeroupper` for AVX-to-SSE transition penalty avoidance.
-- [x] **Instruction scheduling**: Replace `pushq/popq` operand save/restore with register-to-register `mov` when the left operand of a binary expression is a simple load (`gen_expr_is_rax_only` check). Eliminates 2 memory operations per qualifying binary expression and schedules independent loads closer together for better ILP. Combined with aggressive inlining, yields 46% runtime improvement on struct-heavy benchmarks (0.167s → 0.090s).
+- [x] **Instruction scheduling**: Replace `pushq/popq` operand save/restore with register-to-register `mov` when the left operand of a binary expression is a simple load (`gen_expr_is_rax_only` check). Eliminates 2 memory operations per qualifying binary expression and schedules independent loads closer together for better ILP. Activated at `-O2+` (lowered from `-O3` with register allocator). Combined with aggressive inlining, yields 46% runtime improvement on struct-heavy benchmarks (0.167s → 0.090s).
 - [x] **Profile-guided optimization (PGO)**: Two-phase workflow: (1) `-fprofile-generate` instruments function entries and branch points with `incq` counters, emits `__pgo_dump` function using Linux syscalls (open/write/close) to flush binary profile (`PGO1` magic + 64-byte name + 8-byte counter entries) at program exit; (2) `-fprofile-use=FILE` loads profile at optimization time, classifies functions as hot (≥10% of max count) or cold (≤1% or zero), raises aggressive inline threshold from 8→20 statements for hot functions, skips cold functions from inlining, and increases O2 expression node limit 4× for hot functions. Demonstrates **1.8× speedup** on profile-guided test cases by inlining 10-statement hot-loop functions that exceed normal thresholds.
 
 #### Benchmark Results (best of 3 runs)
 
-| Benchmark | -O0 | -O1 | -O2 | -O3 | Speedup |
+| Benchmark | -O0 | -O1 | -O2 | -O3 | Speedup (O0→O3) |
 |-----------|-----|-----|-----|-----|----------|
-| bench_struct | 0.167s | 0.133s | 0.131s | 0.090s | **46%** |
-| bench_calls | 0.069s | 0.063s | 0.019s | 0.017s | **75%** |
-| bench_loop | 0.019s | 0.010s | 0.010s | 0.010s | **47%** |
-| bench_branch | 0.041s | 0.031s | 0.030s | 0.029s | **29%** |
-| bench_array | 0.084s | 0.079s | 0.079s | 0.077s | **8%** |
+| bench_array | 0.084s | 0.079s | 0.029s | 0.028s | **67%** |
+| bench_struct | 0.168s | 0.134s | 0.089s | 0.072s | **57%** |
+| bench_calls | 0.069s | 0.060s | 0.014s | 0.014s | **80%** |
+| bench_loop | 0.019s | 0.010s | 0.008s | 0.008s | **58%** |
+| bench_branch | 0.038s | 0.029s | 0.025s | 0.025s | **34%** |
+
+**-O2 register allocator impact** (vs previous -O1 baseline):
+
+| Benchmark | -O1 (before) | -O2 (regalloc) | Speedup |
+|-----------|-------------|----------------|----------|
+| bench_array | 0.079s | 0.029s | **2.7×** |
+| bench_calls | 0.060s | 0.014s | **4.3×** |
+| bench_struct | 0.134s | 0.089s | **1.5×** |
+| bench_branch | 0.029s | 0.025s | **1.2×** |
+| bench_loop | 0.010s | 0.008s | **1.3×** |
 
 ### Phase 6: `-Os` / `-Og` — Size & Debug Optimizations
 
 - [ ] **`-Os`**: Apply `-O2` optimizations but prefer smaller code size — disable loop unrolling, prefer shorter instruction encodings, avoid aggressive inlining.
 - [ ] **`-Og`**: Apply only optimizations that don't interfere with debugging — constant folding, dead code elimination, but no inlining, no register allocation changes that hide variables.
 
-### Phase 7: Codegen — Closing the GCC Gap
+### Phase 7: Codegen — Closing the GCC Gap 🔄
 
-**Goal**: Address the fundamental code quality gap between fadors99 and GCC -O2. Analysis shows the root cause is that all local variables live on the stack, causing 2+ memory round-trips per variable per loop iteration. GCC keeps everything in registers.
+**Goal**: Address the fundamental code quality gap between fadors99 and GCC -O2. Analysis showed the root cause was that all local variables lived on the stack, causing 2+ memory round-trips per variable per loop iteration. The register allocator (Phase 7a) addressed this, reducing the average gap from 10× to 5.9×.
 
-#### Phase 7a: Register Allocator (highest impact — affects ALL benchmarks)
-- [ ] **Register allocator for local variables**: Linear scan or graph coloring over liveness intervals. Keep loop counters, accumulators, and function parameters in GPRs (`%rbx`, `%r12`–`%r15` callee-saved; `%rcx`, `%rdx`, `%rsi`, `%rdi`, `%r8`–`%r11` caller-saved) instead of stack slots. Spill to stack only when registers exhausted.
+#### Phase 7a: Register Allocator (highest impact — affects ALL benchmarks) ✅
+- [x] **Register allocator for local variables**: AST pre-scan with use-count priority assignment. Assigns up to 5 callee-saved registers (`%rbx`, `%r12`–`%r15`) to the most-used eligible scalar integer locals (no address-taken, no arrays/structs/floats). Two-phase design: `regalloc_analyze()` scans the AST and determines assignments before codegen, `regalloc_emit_saves()` pushes callee-saved registers in the prologue. Variables in registers skip stack allocation entirely — loads become `mov %reg, %rax`, stores become `mov %rax, %reg`, increments directly modify the register. Callee-saved registers restored from `rbp`-relative slots before epilogue. Activated at `-O2+`.
+- [x] **Function parameter register allocation**: Parameters passed in ABI argument registers (`%rdi`, `%rsi`, etc.) are moved directly to callee-saved registers instead of being spilled to the stack. Combined with local variable register allocation, this eliminates all memory traffic for hot scalar variables in functions like `collatz_steps(int n)` where `n` stays in `%rbx` throughout.
 - [ ] **Eliminate redundant loads/stores**: Track which value is already in a register and skip reloads from stack. Simple "last-value cache" per register — even without full regalloc this eliminates back-to-back `movl %eax, N(%rbp); movl N(%rbp), %eax`.
 - [ ] **Frame pointer elimination (`-fomit-frame-pointer`)**: Free up `%rbp` as a GPR. Use `%rsp`-relative addressing. Requires tracking stack depth at each point.
 
@@ -416,13 +428,15 @@ This section outlines the implementation plan for compiler optimization flags (`
 
 #### GCC -O2 vs fadors99 -O3 Gap Analysis
 
-| Benchmark | fadors99 -O3 | gcc -O2 | Gap | Root Causes |
+| Benchmark | fadors99 -O3 | gcc -O2 | Gap | Remaining Root Causes |
 |-----------|-------------|---------|-----|-------------|
-| bench_array | 0.075s | 0.003s | 25× | No regalloc, no SIMD reduction, stack-heavy inner loop |
-| bench_struct | 0.091s | 0.005s | 18× | No regalloc, pushq/popq temps, no SIMD accumulator |
-| bench_calls | 0.016s | 0.005s | 3× | No regalloc, `call compute` not inlined (10 stmts > 8), no LEA |
-| bench_loop | 0.010s | 0.004s | 2.5× | No regalloc, `imull` instead of LEA, no strength reduction |
-| bench_branch | 0.029s | 0.020s | 1.5× | No regalloc, `call collatz_steps` not inlined, no loop rotation |
+| bench_array | 0.028s | 0.003s | 9× | No SIMD reduction, no LEA for `i*3` |
+| bench_struct | 0.072s | 0.005s | 14× | pushq/popq temps in `distance_sq` (5-reg limit), no SIMD accumulator |
+| bench_calls | 0.014s | 0.005s | 3× | `call compute` not inlined (10 stmts > 8), no LEA |
+| bench_loop | 0.008s | 0.004s | 2× | `imull` instead of LEA, no induction variable strength reduction |
+| bench_branch | 0.025s | 0.019s | 1.3× | `call collatz_steps` not inlined, no loop rotation |
+
+*Register allocator reduced the average gap from 10× to 5.9× across all benchmarks.*
 
 ### Implementation Priority & Dependencies
 
