@@ -136,6 +136,10 @@ void encode_inst0(Buffer *buf, const char *mnemonic) {
         /* 0F 0B — undefined instruction (trap) */
         buffer_write_byte(buf, 0x0F);
         buffer_write_byte(buf, 0x0B);
+    } else if (strcmp(mnemonic, "syscall") == 0) {
+        /* 0F 05 — syscall */
+        buffer_write_byte(buf, 0x0F);
+        buffer_write_byte(buf, 0x05);
     }
 }
 
@@ -225,6 +229,20 @@ void encode_inst1(Buffer *buf, const char *mnemonic, Operand *op1) {
             emit_rex(buf, 1, 0, 0, reg >= 8);
             buffer_write_byte(buf, 0xF7);
             emit_modrm(buf, 3, 2, reg); // Mod=3, Opcode extension=2 for NOT
+        }
+    } else if (strcmp(mnemonic, "incq") == 0) {
+        if (op1->type == OP_LABEL) {
+            /* incq [rip+disp32]: REX.W 0xFF /0 mod=00 rm=101 disp32 */
+            emit_rex(buf, 1, 0, 0, 0);
+            buffer_write_byte(buf, 0xFF);
+            emit_modrm(buf, 0, 0, 5); /* mod=00, reg=0 (/0 for INC), rm=5 (RIP) */
+            emit_reloc(buf, op1->data.label, (uint32_t)buf->size);
+            buffer_write_dword(buf, 0);
+        } else if (op1->type == OP_REG) {
+            int reg = get_reg_id(op1->data.reg);
+            emit_rex(buf, 1, 0, 0, reg >= 8);
+            buffer_write_byte(buf, 0xFF);
+            emit_modrm(buf, 3, 0, reg);
         }
     }
 }

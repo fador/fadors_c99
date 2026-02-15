@@ -32,9 +32,13 @@
 #include "optimizer.h"
 #include "codegen.h"
 #include "lexer.h"
+#include "pgo.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+
+/* Global PGO profile (loaded when -fprofile-use is active) */
+static PGOProfile *g_pgo_profile = NULL;
 
 /* ------------------------------------------------------------------ */
 /* Helper: is a node a compile-time integer constant?                  */
@@ -1447,9 +1451,18 @@ static void find_inline_candidates(ASTNode *program) {
            Inlining e.g. "return self->buf[self->pos];" at 40+ call sites
            replaces each 3-instruction call with 8+ instructions — net bloat
            that harms icache without register-allocator to exploit it.
-           Functions marked inline/always_inline bypass this limit. */
+           Functions marked inline/always_inline bypass this limit.
+           PGO: hot functions get a higher expression node limit. */
+        int max_expr_nodes = MAX_INLINE_EXPR_NODES;
+        if (g_pgo_profile && fn->data.function.name &&
+            pgo_is_hot(g_pgo_profile, fn->data.function.name))
+            max_expr_nodes = MAX_INLINE_EXPR_NODES * 4;
         if (fn->data.function.inline_hint < 1 &&
-            count_expr_nodes(stmt->data.return_stmt.expression) > MAX_INLINE_EXPR_NODES)
+            count_expr_nodes(stmt->data.return_stmt.expression) > max_expr_nodes)
+            continue;
+        /* PGO: skip cold functions from O2 inlining */
+        if (g_pgo_profile && fn->data.function.name &&
+            pgo_is_cold(g_pgo_profile, fn->data.function.name))
             continue;
 
         if (g_inline_cand_count >= MAX_INLINE_CANDIDATES) break;
@@ -1767,6 +1780,7 @@ static void inline_substitute_stmt(ASTNode *stmt, int pcnt,
 /* ------------------------------------------------------------------ */
 
 #define MAX_AGGRESSIVE_INLINE_STMTS 8
+#define MAX_AGGRESSIVE_INLINE_STMTS_HOT 20  /* PGO: allow larger inlines for hot functions */
 #define MAX_AGGRESSIVE_INLINE_CANDIDATES 256
 
 typedef struct {
@@ -1809,10 +1823,20 @@ static int stmt_contains_return(ASTNode *s) {
     return 0;
 }
 
-static int is_safe_for_aggressive_inline(ASTNode *body) {
+static int is_safe_for_aggressive_inline(ASTNode *body, const char *func_name) {
     if (!body || body->type != AST_BLOCK) return 0;
     if (body->children_count == 0) return 0;
-    if (body->children_count > MAX_AGGRESSIVE_INLINE_STMTS) return 0;
+
+    /* PGO: skip cold functions entirely */
+    if (g_pgo_profile && func_name && pgo_is_cold(g_pgo_profile, func_name))
+        return 0;
+
+    /* PGO: use a larger threshold for hot functions */
+    int max_stmts = MAX_AGGRESSIVE_INLINE_STMTS;
+    if (g_pgo_profile && func_name && pgo_is_hot(g_pgo_profile, func_name))
+        max_stmts = MAX_AGGRESSIVE_INLINE_STMTS_HOT;
+
+    if ((int)body->children_count > max_stmts) return 0;
 
     /* Last statement must be a return with an expression */
     ASTNode *last = body->children[body->children_count - 1];
@@ -1859,7 +1883,7 @@ static void find_aggressive_inline_candidates(ASTNode *program) {
         /* Skip single-statement functions — already handled by O2 inliner */
         if (body->type == AST_BLOCK && body->children_count == 1) continue;
 
-        if (!is_safe_for_aggressive_inline(body)) continue;
+        if (!is_safe_for_aggressive_inline(body, fn->data.function.name)) continue;
         if ((int)fn->children_count > MAX_INLINE_PARAMS) continue;
         if (g_agg_inline_cand_count >= MAX_AGGRESSIVE_INLINE_CANDIDATES) break;
 
@@ -3666,6 +3690,16 @@ static void ipa_dead_function_elimination(ASTNode *program) {
 /* ------------------------------------------------------------------ */
 ASTNode *optimize(ASTNode *program, OptLevel level) {
     if (!program) return program;
+
+    /* Load PGO profile if -fprofile-use was specified */
+    if (g_compiler_options.pgo_use_file[0] != '\0' && !g_pgo_profile) {
+        g_pgo_profile = pgo_load_profile(g_compiler_options.pgo_use_file);
+        if (g_pgo_profile) {
+            fprintf(stderr, "[PGO] Loaded profile: %s (%d entries, max_count=%llu)\n",
+                    g_compiler_options.pgo_use_file, g_pgo_profile->entry_count,
+                    (unsigned long long)g_pgo_profile->max_func_count);
+        }
+    }
 
     /* __forceinline / __attribute__((always_inline)) must be processed even at -O0 */
     {

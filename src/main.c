@@ -99,7 +99,9 @@ static void print_usage(const char *progname) {
     printf("  -Os          Optimize for code size\n");
     printf("  -Og          Optimize for debugging experience\n");
     printf("  -mavx        Enable AVX instructions (256-bit float vectorization)\n");
-    printf("  -mavx2       Enable AVX2 instructions (256-bit float + integer vectorization)\n\n");
+    printf("  -mavx2       Enable AVX2 instructions (256-bit float + integer vectorization)\n");
+    printf("  -fprofile-generate   Instrument code for PGO profiling\n");
+    printf("  -fprofile-use=FILE   Use profile data to guide optimization\n\n");
     printf("Debug:\n");
     printf("  -g           Emit debug symbols (DWARF on Linux, CodeView on Windows)\n");
     printf("  --dump-ir    Dump IR / CFG to stderr (requires -O2+)\n\n");
@@ -607,6 +609,19 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "-mavx") == 0) {
             g_compiler_options.avx_level = 1; continue;
+        }
+        // PGO flags
+        if (strcmp(argv[i], "-fprofile-generate") == 0) {
+            g_compiler_options.pgo_generate = 1; continue;
+        }
+        if (strncmp(argv[i], "-fprofile-use=", 14) == 0) {
+            strncpy(g_compiler_options.pgo_use_file, argv[i] + 14, 255);
+            g_compiler_options.pgo_use_file[255] = '\0';
+            continue;
+        }
+        if (strcmp(argv[i], "-fprofile-use") == 0) {
+            strncpy(g_compiler_options.pgo_use_file, "default.profdata", 255);
+            continue;
         }
         // -l<name>  library
         if (strncmp(argv[i], "-l", 2) == 0 && argv[i][2] != '\0') {

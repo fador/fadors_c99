@@ -9,6 +9,28 @@
 
 #include "encoder.h"
 
+/* ---- PGO instrumentation tracking ---- */
+#define PGO_MAX_PROBES 4096
+#define PGO_NAME_LEN   64
+
+typedef struct {
+    char name[PGO_NAME_LEN]; /* function name or "func:BnT"/"func:BnN" */
+} PGOProbeInfo;
+
+static PGOProbeInfo pgo_probes[PGO_MAX_PROBES];
+static int pgo_probe_count = 0;
+static int pgo_func_branch_id = 0; /* per-function branch counter */
+
+/* Allocate a new PGO probe and return its index */
+static int pgo_alloc_probe(const char *name) {
+    if (pgo_probe_count >= PGO_MAX_PROBES) return -1;
+    int id = pgo_probe_count++;
+    strncpy(pgo_probes[id].name, name, PGO_NAME_LEN - 1);
+    pgo_probes[id].name[PGO_NAME_LEN - 1] = '\0';
+    return id;
+}
+/* ---- end PGO tracking ---- */
+
 typedef enum {
     SECTION_TEXT,
     SECTION_DATA
@@ -387,6 +409,7 @@ void arch_x86_64_set_target(TargetPlatform target) {
 
 void arch_x86_64_generate(ASTNode *program) {
     current_program = program;
+    pgo_probe_count = 0; /* reset PGO probes for this compilation unit */
     for (size_t i = 0; i < program->children_count; i++) {
         ASTNode *child = program->children[i];
         if (child->type == AST_FUNCTION) {
@@ -395,6 +418,173 @@ void arch_x86_64_generate(ASTNode *program) {
             gen_global_decl(child);
         }
     }
+
+    /* ---- PGO: Emit __pgo_dump function and data sections ---- */
+    if (g_compiler_options.pgo_generate && pgo_probe_count > 0) {
+        /* Reset peephole state for the synthetic function */
+        peep_unreachable = 0;
+        peep_pending_jmp = 0;
+        peep_pending_push = 0;
+        peep_pending_jcc = 0;
+        peep_jcc_jmp_pair = 0;
+        peep_setcc_state = 0;
+
+        /* Emit __pgo_dump function */
+        if (obj_writer) {
+            coff_writer_add_symbol(obj_writer, "__pgo_dump",
+                (uint32_t)obj_writer->text_section.size, 1, 0x20, IMAGE_SYM_CLASS_STATIC);
+        }
+        if (out && current_syntax == SYNTAX_ATT) {
+            fprintf(out, "\n__pgo_dump:\n");
+        }
+        emit_inst1("pushq", op_reg("rbp"));
+        emit_inst2("mov", op_reg("rsp"), op_reg("rbp"));
+        emit_inst1("pushq", op_reg("r12"));
+        emit_inst1("pushq", op_reg("r13"));
+        emit_inst1("pushq", op_reg("r14"));
+        emit_inst1("pushq", op_reg("r15"));
+
+        /* Open file: sys_open(filename, O_WRONLY|O_CREAT|O_TRUNC, 0644) */
+        emit_inst2("mov", op_imm(2), op_reg("rax"));
+        emit_inst2("lea", op_label("__pgo_filename"), op_reg("rdi"));
+        emit_inst2("mov", op_imm(577), op_reg("rsi"));  /* 0x241 */
+        emit_inst2("mov", op_imm(420), op_reg("rdx"));  /* 0644 */
+        emit_inst0("syscall");
+        emit_inst2("test", op_reg("rax"), op_reg("rax"));
+        int lbl_done = label_count++;
+        char l_done[32];
+        sprintf(l_done, ".L%d", lbl_done);
+        emit_inst1("jl", op_label(l_done));
+        emit_inst2("mov", op_reg("rax"), op_reg("r12")); /* save fd */
+
+        /* Write header: 8 bytes = "PGO1" + uint32 count */
+        emit_inst2("mov", op_imm(1), op_reg("rax"));
+        emit_inst2("mov", op_reg("r12"), op_reg("rdi"));
+        emit_inst2("lea", op_label("__pgo_header"), op_reg("rsi"));
+        emit_inst2("mov", op_imm(8), op_reg("rdx"));
+        emit_inst0("syscall");
+
+        /* Load pointers for the write loop */
+        emit_inst2("lea", op_label("__pgo_names"), op_reg("r14"));
+        emit_inst2("lea", op_label("__pgo_counters"), op_reg("r15"));
+        emit_inst2("mov", op_imm(pgo_probe_count), op_reg("r13"));
+
+        int lbl_loop = label_count++;
+        int lbl_close = label_count++;
+        char l_loop[32], l_close[32];
+        sprintf(l_loop, ".L%d", lbl_loop);
+        sprintf(l_close, ".L%d", lbl_close);
+
+        emit_label_def(l_loop);
+        emit_inst2("test", op_reg("r13"), op_reg("r13"));
+        emit_inst1("jz", op_label(l_close));
+
+        /* Write 64 bytes of name */
+        emit_inst2("mov", op_imm(1), op_reg("rax"));
+        emit_inst2("mov", op_reg("r12"), op_reg("rdi"));
+        emit_inst2("mov", op_reg("r14"), op_reg("rsi"));
+        emit_inst2("mov", op_imm(PGO_NAME_LEN), op_reg("rdx"));
+        emit_inst0("syscall");
+
+        /* Write 8 bytes of counter */
+        emit_inst2("mov", op_imm(1), op_reg("rax"));
+        emit_inst2("mov", op_reg("r12"), op_reg("rdi"));
+        emit_inst2("mov", op_reg("r15"), op_reg("rsi"));
+        emit_inst2("mov", op_imm(8), op_reg("rdx"));
+        emit_inst0("syscall");
+
+        /* Advance pointers and decrement counter */
+        emit_inst2("add", op_imm(PGO_NAME_LEN), op_reg("r14"));
+        emit_inst2("add", op_imm(8), op_reg("r15"));
+        emit_inst2("sub", op_imm(1), op_reg("r13"));
+        emit_inst1("jmp", op_label(l_loop));
+
+        emit_label_def(l_close);
+        /* Close file: sys_close(fd) */
+        emit_inst2("mov", op_imm(3), op_reg("rax"));
+        emit_inst2("mov", op_reg("r12"), op_reg("rdi"));
+        emit_inst0("syscall");
+
+        emit_label_def(l_done);
+        emit_inst1("popq", op_reg("r15"));
+        emit_inst1("popq", op_reg("r14"));
+        emit_inst1("popq", op_reg("r13"));
+        emit_inst1("popq", op_reg("r12"));
+        emit_inst0("leave");
+        emit_inst0("ret");
+
+        /* ---- PGO data sections ---- */
+        if (obj_writer) {
+            Section old_section = current_section;
+            current_section = SECTION_DATA;
+            uint32_t off;
+
+            /* __pgo_header: "PGO1" + uint32 num_entries */
+            off = (uint32_t)obj_writer->data_section.size;
+            coff_writer_add_symbol(obj_writer, "__pgo_header", off, 2, 0, IMAGE_SYM_CLASS_STATIC);
+            buffer_write_bytes(&obj_writer->data_section, "PGO1", 4);
+            buffer_write_dword(&obj_writer->data_section, (uint32_t)pgo_probe_count);
+
+            /* __pgo_filename: "default.profdata\0" */
+            off = (uint32_t)obj_writer->data_section.size;
+            coff_writer_add_symbol(obj_writer, "__pgo_filename", off, 2, 0, IMAGE_SYM_CLASS_STATIC);
+            buffer_write_bytes(&obj_writer->data_section, "default.profdata", 17);
+
+            /* __pgo_names: 64-byte padded name entries */
+            off = (uint32_t)obj_writer->data_section.size;
+            coff_writer_add_symbol(obj_writer, "__pgo_names", off, 2, 0, IMAGE_SYM_CLASS_STATIC);
+            for (int pi = 0; pi < pgo_probe_count; pi++) {
+                char padded[PGO_NAME_LEN];
+                memset(padded, 0, PGO_NAME_LEN);
+                strncpy(padded, pgo_probes[pi].name, PGO_NAME_LEN - 1);
+                buffer_write_bytes(&obj_writer->data_section, padded, PGO_NAME_LEN);
+            }
+
+            /* __pgo_counters + individual __pgo_cnt_N symbols: 8 bytes each */
+            off = (uint32_t)obj_writer->data_section.size;
+            coff_writer_add_symbol(obj_writer, "__pgo_counters", off, 2, 0, IMAGE_SYM_CLASS_STATIC);
+            for (int pi = 0; pi < pgo_probe_count; pi++) {
+                char cnt_sym[32];
+                sprintf(cnt_sym, "__pgo_cnt_%d", pi);
+                off = (uint32_t)obj_writer->data_section.size;
+                coff_writer_add_symbol(obj_writer, cnt_sym, off, 2, 0, IMAGE_SYM_CLASS_STATIC);
+                uint64_t zero = 0;
+                buffer_write_bytes(&obj_writer->data_section, &zero, 8);
+            }
+
+            current_section = old_section;
+        } else if (out && current_syntax == SYNTAX_ATT) {
+            /* Text assembly path */
+            fprintf(out, "\n.data\n");
+
+            fprintf(out, "__pgo_header:\n");
+            fprintf(out, "    .byte 0x50, 0x47, 0x4f, 0x31\n"); /* "PGO1" */
+            fprintf(out, "    .long %d\n", pgo_probe_count);
+
+            fprintf(out, "__pgo_filename:\n");
+            fprintf(out, "    .asciz \"default.profdata\"\n");
+
+            fprintf(out, "__pgo_names:\n");
+            for (int pi = 0; pi < pgo_probe_count; pi++) {
+                fprintf(out, "    .ascii \"");
+                int len = (int)strlen(pgo_probes[pi].name);
+                for (int ci = 0; ci < PGO_NAME_LEN; ci++) {
+                    if (ci < len) fprintf(out, "%c", pgo_probes[pi].name[ci]);
+                    else fprintf(out, "\\0");
+                }
+                fprintf(out, "\"\n");
+            }
+
+            fprintf(out, "\n.data\n");
+            fprintf(out, "__pgo_counters:\n");
+            for (int pi = 0; pi < pgo_probe_count; pi++) {
+                fprintf(out, "__pgo_cnt_%d:\n", pi);
+                fprintf(out, "    .quad 0\n");
+            }
+            fprintf(out, ".text\n");
+        }
+    }
+    /* ---- End PGO instrumentation ---- */
     if (obj_writer) {
          // Emit string literals for COFF
          Section old_section = current_section;
@@ -2852,6 +3042,20 @@ static void gen_statement(ASTNode *node) {
         gen_expression(node->data.if_stmt.condition);
         emit_inst2("test", op_reg("rax"), op_reg("rax"));
         emit_inst1("je", op_label(l_else));
+
+        /* PGO: increment branch-taken counter */
+        int pgo_branch_id_local = -1;
+        if (g_compiler_options.pgo_generate && current_func_name) {
+            pgo_branch_id_local = pgo_func_branch_id++;
+            char probe_name[PGO_NAME_LEN];
+            snprintf(probe_name, PGO_NAME_LEN, "%s:B%dT", current_func_name, pgo_branch_id_local);
+            int pid = pgo_alloc_probe(probe_name);
+            if (pid >= 0) {
+                char cl[80];
+                sprintf(cl, "__pgo_cnt_%d", pid);
+                emit_inst1("incq", op_label(cl));
+            }
+        }
         
         // Save stack state before then-branch
         int saved_stack_offset = stack_offset;
@@ -2872,6 +3076,19 @@ static void gen_statement(ASTNode *node) {
         emit_inst1("jmp", op_label(l_end));
         
         emit_label_def(l_else);
+
+        /* PGO: increment branch-not-taken counter */
+        if (g_compiler_options.pgo_generate && current_func_name && pgo_branch_id_local >= 0) {
+            char probe_name[PGO_NAME_LEN];
+            snprintf(probe_name, PGO_NAME_LEN, "%s:B%dN", current_func_name, pgo_branch_id_local);
+            int pid = pgo_alloc_probe(probe_name);
+            if (pid >= 0) {
+                char cl[80];
+                sprintf(cl, "__pgo_cnt_%d", pid);
+                emit_inst1("incq", op_label(cl));
+            }
+        }
+
         if (node->data.if_stmt.else_branch) {
             gen_statement(node->data.if_stmt.else_branch);
             // Restore RSP after else-branch too
@@ -3187,6 +3404,17 @@ static void gen_function(ASTNode *node) {
     // Prologue
     emit_inst1("pushq", op_reg("rbp"));
     emit_inst2("mov", op_reg("rsp"), op_reg("rbp"));
+
+    /* PGO instrumentation: increment function entry counter */
+    if (g_compiler_options.pgo_generate && node->data.function.name) {
+        int probe_id = pgo_alloc_probe(node->data.function.name);
+        if (probe_id >= 0) {
+            char counter_label[80];
+            sprintf(counter_label, "__pgo_cnt_%d", probe_id);
+            emit_inst1("incq", op_label(counter_label));
+        }
+        pgo_func_branch_id = 0; /* reset per-function branch counter */
+    }
     
     locals_count = 0;
     current_func_return_type = node->resolved_type;
@@ -3266,6 +3494,15 @@ static void gen_function(ASTNode *node) {
     char label_buffer[32];
     sprintf(label_buffer, ".Lend_%d", current_function_end_label);
     emit_label_def(label_buffer);
+
+    /* PGO: in main's epilogue, call __pgo_dump to write profiling data */
+    if (g_compiler_options.pgo_generate &&
+        node->data.function.name && strcmp(node->data.function.name, "main") == 0) {
+        /* Save return value (%eax) across the dump call */
+        emit_inst1("pushq", op_reg("rax"));
+        emit_inst1("call", op_label("__pgo_dump"));
+        emit_inst1("popq", op_reg("rax"));
+    }
     
     emit_inst0("leave");
     emit_inst0("ret");
