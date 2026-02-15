@@ -110,6 +110,10 @@ static int peep_pending_jmp = 0;     // 1 if there's a buffered jmp to emit
 static char peep_jmp_target[64];     // target label of the buffered jmp
 static int peep_in_flush = 0;        // prevent recursion during flush
 
+// Peephole: buffer pushq for push/pop → mov optimization
+static int peep_pending_push = 0;    // 1 if there's a buffered pushq to emit
+static char peep_push_reg[16];       // register name of the buffered pushq
+
 // Branch optimization: buffer jcc for jcc-over-jmp pattern
 // Detects: jcc L1; jmp L2; L1: → inverted-jcc L2
 // State machine: buffer jcc, then if jmp follows, store both as a candidate pair.
@@ -206,6 +210,16 @@ static Operand *op_label(const char *label) {
     return op;
 }
 
+/* Flush a pending pushq without optimization (no matching popq followed) */
+static void peep_flush_push(void) {
+    if (peep_pending_push) {
+        peep_pending_push = 0;
+        peep_in_flush = 1;
+        emit_inst1("pushq", op_reg(peep_push_reg));
+        peep_in_flush = 0;
+    }
+}
+
 typedef struct {
     char *label;
     char *value;
@@ -223,6 +237,7 @@ void arch_x86_64_set_writer(COFFWriter *writer) {
 static void emit_label_def(const char *name) {
     // Peephole: only apply to text section labels
     if (current_section == SECTION_TEXT) {
+        peep_flush_push();
         // Resolve pending jcc+jmp pair: jcc L1; jmp L2; L1: → j!cc L2
         if (peep_jcc_jmp_pair) {
             const char *cmp_name = name;
@@ -730,6 +745,7 @@ static void print_operand_jmp(Operand *op) {
 static void emit_inst0(const char *mnemonic) {
     // Peephole: suppress dead code after unconditional jmp
     if (!peep_in_flush && current_section == SECTION_TEXT) {
+        peep_flush_push();
         peep_flush_jcc();
         peep_flush_pair();
         peep_flush_jmp();
@@ -754,6 +770,7 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
     if (!peep_in_flush && current_section == SECTION_TEXT &&
         strcmp(mnemonic, "jmp") == 0 && op1->type == OP_LABEL) {
         if (peep_unreachable) return;  // dead code after previous jmp
+        peep_flush_push();
         
         /* Branch optimization: jcc L1; jmp L2 → candidate pair
          * Don't invert yet — defer to emit_label_def to confirm L1 is next. */
@@ -788,6 +805,7 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
         g_compiler_options.opt_level >= OPT_O1 &&
         op1->type == OP_LABEL &&
         mnemonic[0] == 'j' && strcmp(mnemonic, "jmp") != 0) {
+        peep_flush_push();
         peep_flush_jcc();  /* flush any previous buffered jcc first */
         peep_flush_pair();
         peep_flush_jmp();
@@ -799,9 +817,43 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
         peep_jcc_target[63] = '\0';
         return;
     }
+
+    /* Peephole: pushq %reg → buffer it; if next is popq %reg2, emit mov instead.
+     * pushq %rax; popq %rdi → mov %rax, %rdi (saves 2 memory ops) */
+    if (!peep_in_flush && current_section == SECTION_TEXT &&
+        g_compiler_options.opt_level >= OPT_O1 &&
+        strcmp(mnemonic, "pushq") == 0 && op1->type == OP_REG) {
+        peep_flush_push();  /* flush any previous buffered pushq */
+        peep_flush_jcc();
+        peep_flush_pair();
+        peep_flush_jmp();
+        if (peep_unreachable) return;
+        peep_pending_push = 1;
+        strncpy(peep_push_reg, op1->data.reg, 15);
+        peep_push_reg[15] = '\0';
+        return;
+    }
+
+    /* Peephole: popq %reg after buffered pushq %reg2 → mov %reg2, %reg */
+    if (!peep_in_flush && current_section == SECTION_TEXT &&
+        g_compiler_options.opt_level >= OPT_O1 &&
+        strcmp(mnemonic, "popq") == 0 && op1->type == OP_REG &&
+        peep_pending_push) {
+        peep_pending_push = 0;
+        /* pushq %X; popq %X → eliminate both (identity) */
+        if (strcmp(peep_push_reg, op1->data.reg) == 0) {
+            return;
+        }
+        /* pushq %X; popq %Y → mov %X, %Y */
+        peep_in_flush = 1;
+        emit_inst2("mov", op_reg(peep_push_reg), op_reg(op1->data.reg));
+        peep_in_flush = 0;
+        return;
+    }
     
     // Peephole: suppress dead code after unconditional jmp
     if (!peep_in_flush && current_section == SECTION_TEXT) {
+        peep_flush_push();
         peep_flush_jcc();
         peep_flush_pair();
         peep_flush_jmp();
@@ -844,10 +896,40 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
 static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
     // Peephole: suppress dead code after unconditional jmp
     if (!peep_in_flush && current_section == SECTION_TEXT) {
+        peep_flush_push();
         peep_flush_jcc();
         peep_flush_pair();
         peep_flush_jmp();
         if (peep_unreachable) return;
+
+        /* Peephole: eliminate no-op instructions at -O1+ */
+        if (g_compiler_options.opt_level >= OPT_O1) {
+            /* add $0, %reg → nop */
+            if ((strcmp(mnemonic, "add") == 0 || strcmp(mnemonic, "addl") == 0 ||
+                 strcmp(mnemonic, "sub") == 0 || strcmp(mnemonic, "subl") == 0) &&
+                op1->type == OP_IMM && op1->data.imm == 0 && op2->type == OP_REG) {
+                return;
+            }
+            /* imul $1, %reg → nop */
+            if ((strcmp(mnemonic, "imul") == 0 || strcmp(mnemonic, "imull") == 0) &&
+                op1->type == OP_IMM && op1->data.imm == 1 && op2->type == OP_REG) {
+                return;
+            }
+            /* imul $0, %reg → xor %reg32, %reg32 */
+            if ((strcmp(mnemonic, "imul") == 0 || strcmp(mnemonic, "imull") == 0) &&
+                op1->type == OP_IMM && op1->data.imm == 0 && op2->type == OP_REG) {
+                peep_in_flush = 1;
+                emit_inst2("xor", op_reg("eax"), op_reg("eax"));
+                peep_in_flush = 0;
+                return;
+            }
+            /* mov %reg, %reg → nop (self-move) */
+            if (strcmp(mnemonic, "mov") == 0 &&
+                op1->type == OP_REG && op2->type == OP_REG &&
+                strcmp(op1->data.reg, op2->data.reg) == 0) {
+                return;
+            }
+        }
     }
 
     if (obj_writer) {
@@ -884,6 +966,7 @@ static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
 /* 3-operand AVX instruction: emit_inst3("vaddps", src1, src2, dest) */
 static void emit_inst3(const char *mnemonic, Operand *op1, Operand *op2, Operand *op3) {
     if (!peep_in_flush && current_section == SECTION_TEXT) {
+        peep_flush_push();
         peep_flush_jcc();
         peep_flush_pair();
         peep_flush_jmp();
@@ -2937,6 +3020,9 @@ static void gen_function(ASTNode *node) {
     // Reset peephole state for new function
     peep_unreachable = 0;
     peep_pending_jmp = 0;
+    peep_pending_push = 0;
+    peep_pending_jcc = 0;
+    peep_jcc_jmp_pair = 0;
     if (current_syntax == SYNTAX_ATT) {
         if (out && !node->data.function.is_static) fprintf(out, ".globl %s\n", node->data.function.name);
         emit_label_def(node->data.function.name);
