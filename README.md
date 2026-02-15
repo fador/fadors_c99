@@ -389,6 +389,41 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [ ] **`-Os`**: Apply `-O2` optimizations but prefer smaller code size — disable loop unrolling, prefer shorter instruction encodings, avoid aggressive inlining.
 - [ ] **`-Og`**: Apply only optimizations that don't interfere with debugging — constant folding, dead code elimination, but no inlining, no register allocation changes that hide variables.
 
+### Phase 7: Codegen — Closing the GCC Gap
+
+**Goal**: Address the fundamental code quality gap between fadors99 and GCC -O2. Analysis shows the root cause is that all local variables live on the stack, causing 2+ memory round-trips per variable per loop iteration. GCC keeps everything in registers.
+
+#### Phase 7a: Register Allocator (highest impact — affects ALL benchmarks)
+- [ ] **Register allocator for local variables**: Linear scan or graph coloring over liveness intervals. Keep loop counters, accumulators, and function parameters in GPRs (`%rbx`, `%r12`–`%r15` callee-saved; `%rcx`, `%rdx`, `%rsi`, `%rdi`, `%r8`–`%r11` caller-saved) instead of stack slots. Spill to stack only when registers exhausted.
+- [ ] **Eliminate redundant loads/stores**: Track which value is already in a register and skip reloads from stack. Simple "last-value cache" per register — even without full regalloc this eliminates back-to-back `movl %eax, N(%rbp); movl N(%rbp), %eax`.
+- [ ] **Frame pointer elimination (`-fomit-frame-pointer`)**: Free up `%rbp` as a GPR. Use `%rsp`-relative addressing. Requires tracking stack depth at each point.
+
+#### Phase 7b: Instruction Selection (easy wins)
+- [ ] **LEA for multiply-add patterns**: `x*3` → `lea (%rax,%rax,2)`, `x*5` → `lea (%rax,%rax,4)`, `a+b*4` → `lea (%rax,%rcx,4)`. Peephole on `imull $const` sequences. 1-cycle latency vs 3-cycle `imull`.
+- [ ] **Strength reduction (imul→lea/add)**: Replace `imull $const, %reg` with LEA chains for constants 2–9. `x*7` → `lea (%rax,%rax,2), %rcx; lea (%rax,%rcx,2)`.
+- [ ] **Peephole: pushq/popq→mov reg**: Replace `pushq %rax; ...; popq %rcx` with `mov %rax, %r11; ...; mov %r11, %rcx` using scratch registers. Eliminates 2 memory ops per pair.
+- [ ] **`test` instead of `cmp $0`**: `cmpl $0, %eax` → `testl %eax, %eax` (shorter encoding, same semantics).
+- [ ] **Conditional move (cmov)**: Branch-free `if (cond) x = a; else x = b;` → `cmov`. Avoids branch misprediction on data-dependent branches.
+
+#### Phase 7c: Loop Optimizations
+- [ ] **Loop induction variable strength reduction**: Replace `i*3` inside loop with induction variable `j += 3` that tracks the product. Eliminates multiply per iteration.
+- [ ] **Loop rotation (while→do-while)**: Transform `while(cond) { body }` → `if(cond) do { body } while(cond)`. Backward branch is predicted taken, eliminating one branch per iteration.
+- [ ] **Deeper transitive inlining**: Inline chains: if `compute` calls already-inlined `add`/`mul`, re-check stmt count post-substitution. Functions that shrink after inlining their callees become eligible.
+
+#### Phase 7d: Vectorization
+- [ ] **Auto-vectorize reduction loops (SIMD)**: Detect `sum += a[i]` pattern → `paddd` accumulator with horizontal reduction at loop exit. Current vectorizer only handles `a[i] = b[i] OP c[i]`, not reductions.
+- [ ] **SIMD init loop vectorization**: Initialize arrays 4/8 elements at a time with packed integer ops (`pslld`/`paddd`).
+
+#### GCC -O2 vs fadors99 -O3 Gap Analysis
+
+| Benchmark | fadors99 -O3 | gcc -O2 | Gap | Root Causes |
+|-----------|-------------|---------|-----|-------------|
+| bench_array | 0.075s | 0.003s | 25× | No regalloc, no SIMD reduction, stack-heavy inner loop |
+| bench_struct | 0.091s | 0.005s | 18× | No regalloc, pushq/popq temps, no SIMD accumulator |
+| bench_calls | 0.016s | 0.005s | 3× | No regalloc, `call compute` not inlined (10 stmts > 8), no LEA |
+| bench_loop | 0.010s | 0.004s | 2.5× | No regalloc, `imull` instead of LEA, no strength reduction |
+| bench_branch | 0.029s | 0.020s | 1.5× | No regalloc, `call collatz_steps` not inlined, no loop rotation |
+
 ### Implementation Priority & Dependencies
 
 ```
@@ -406,7 +441,9 @@ Phase 1 (CLI flags)      ─── prerequisite for all others
                     │               │
                     │               └── Phase 5 (-O3)
                     │
-                    └── Phase 6 (-Os/-Og)
+                    ├── Phase 6 (-Os/-Og)
+                    │
+                    └── Phase 7 (Codegen quality)
 ```
 
-**Suggested order**: Phase 1 → Phase 2a (DWARF) → Phase 3 (-O1) → Phase 4 (-O2) → Phase 2b (CodeView) → Phase 5 (-O3) → Phase 6.
+**Suggested order**: Phase 1 → Phase 2a (DWARF) → Phase 3 (-O1) → Phase 4 (-O2) → Phase 2b (CodeView) → Phase 5 (-O3) → Phase 7a (regalloc) → Phase 7b (insn select) → Phase 7c (loops) → Phase 7d (vectorize) → Phase 6.
