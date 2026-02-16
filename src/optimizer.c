@@ -3492,17 +3492,337 @@ static int try_vectorize_loop(ASTNode *for_node) {
     vi->dst = dst;
     vi->src1 = src1;
     vi->src2 = src2;
+    vi->vec_mode = 0;  /* element-wise */
     for_node->vec_info = vi;
     return 1;
 }
 
-/* Walk a statement tree and try to vectorize eligible for-loops */
+/* ------------------------------------------------------------------ */
+/* While-loop vectorization: analyze while loops in block context      */
+/* ------------------------------------------------------------------ */
+
+/* Analyze a while loop in the context of its enclosing block.
+   Extracts: loop variable, start value (from preceding stmt),
+   end value (from condition), iteration count, step (from body).
+   Returns 1 on success. */
+static int analyze_while_loop(ASTNode *block, int loop_idx,
+                               const char **out_var,
+                               long long *out_start,
+                               long long *out_end,
+                               long long *out_iterations) {
+    if (!block || block->type != AST_BLOCK) return 0;
+    ASTNode *loop = block->children[loop_idx];
+    if (!loop || loop->type != AST_WHILE) return 0;
+
+    ASTNode *cond = loop->data.while_stmt.condition;
+    ASTNode *body = loop->data.while_stmt.body;
+    if (!cond || !body || body->type != AST_BLOCK) return 0;
+    if (body->children_count < 2) return 0;  /* need at least: stmt + i=i+1 */
+
+    /* Condition must be: var < CONST or var <= CONST or var != CONST */
+    if (cond->type != AST_BINARY_EXPR) return 0;
+    TokenType cond_op = cond->data.binary_expr.op;
+    if (cond_op != TOKEN_LESS && cond_op != TOKEN_LESS_EQUAL &&
+        cond_op != TOKEN_BANG_EQUAL) return 0;
+    ASTNode *cond_left = cond->data.binary_expr.left;
+    ASTNode *cond_right = cond->data.binary_expr.right;
+    if (!cond_left || cond_left->type != AST_IDENTIFIER) return 0;
+    if (!cond_right || !is_const_int(cond_right)) return 0;
+    const char *var_name = cond_left->data.identifier.name;
+    long long end_val = cond_right->data.integer.value;
+
+    /* Find the increment statement: last stmt in body must be var = var + 1 */
+    ASTNode *last = body->children[body->children_count - 1];
+    int has_increment = 0;
+    if (last->type == AST_POST_INC || last->type == AST_PRE_INC) {
+        if (last->data.unary.expression &&
+            last->data.unary.expression->type == AST_IDENTIFIER &&
+            strcmp(last->data.unary.expression->data.identifier.name, var_name) == 0)
+            has_increment = 1;
+    } else if (last->type == AST_ASSIGN &&
+               last->data.assign.left &&
+               last->data.assign.left->type == AST_IDENTIFIER &&
+               strcmp(last->data.assign.left->data.identifier.name, var_name) == 0) {
+        ASTNode *rhs = last->data.assign.value;
+        if (rhs && rhs->type == AST_BINARY_EXPR &&
+            rhs->data.binary_expr.op == TOKEN_PLUS) {
+            ASTNode *rl = rhs->data.binary_expr.left;
+            ASTNode *rr = rhs->data.binary_expr.right;
+            if (rl && rl->type == AST_IDENTIFIER &&
+                strcmp(rl->data.identifier.name, var_name) == 0 &&
+                rr && is_const_int(rr) && rr->data.integer.value == 1)
+                has_increment = 1;
+            if (rr && rr->type == AST_IDENTIFIER &&
+                strcmp(rr->data.identifier.name, var_name) == 0 &&
+                rl && is_const_int(rl) && rl->data.integer.value == 1)
+                has_increment = 1;
+        }
+    }
+    if (!has_increment) return 0;
+
+    /* Find starting value from the statement before the loop */
+    long long start_val = 0;
+    int found_start = 0;
+    if (loop_idx > 0) {
+        ASTNode *prev = block->children[loop_idx - 1];
+        if (prev->type == AST_VAR_DECL &&
+            prev->data.var_decl.initializer &&
+            is_const_int(prev->data.var_decl.initializer) &&
+            strcmp(prev->data.var_decl.name, var_name) == 0) {
+            start_val = prev->data.var_decl.initializer->data.integer.value;
+            found_start = 1;
+        } else if (prev->type == AST_ASSIGN &&
+                   prev->data.assign.left &&
+                   prev->data.assign.left->type == AST_IDENTIFIER &&
+                   strcmp(prev->data.assign.left->data.identifier.name, var_name) == 0 &&
+                   prev->data.assign.value &&
+                   is_const_int(prev->data.assign.value)) {
+            start_val = prev->data.assign.value->data.integer.value;
+            found_start = 1;
+        }
+    }
+    if (!found_start) return 0;
+
+    /* Compute iteration count */
+    long long iterations;
+    if (cond_op == TOKEN_LESS)           iterations = end_val - start_val;
+    else if (cond_op == TOKEN_LESS_EQUAL) iterations = end_val - start_val + 1;
+    else if (cond_op == TOKEN_BANG_EQUAL) iterations = end_val - start_val;
+    else return 0;
+    if (iterations <= 0) return 0;
+
+    *out_var = var_name;
+    *out_start = start_val;
+    *out_end = end_val;
+    *out_iterations = iterations;
+    return 1;
+}
+
+/* Try to vectorize a while-loop as a reduction: sum = sum + arr[i] */
+static int try_vectorize_while_reduction(ASTNode *block, int loop_idx) {
+    const char *var_name;
+    long long start_val, end_val, iterations;
+    if (!analyze_while_loop(block, loop_idx, &var_name,
+                            &start_val, &end_val, &iterations))
+        return 0;
+    if (start_val != 0) return 0;
+    if (iterations < 4) return 0;
+
+    ASTNode *loop = block->children[loop_idx];
+    ASTNode *body = loop->data.while_stmt.body;
+    /* Body should have exactly 2 statements: accumulator update + increment */
+    if (body->children_count != 2) return 0;
+
+    ASTNode *stmt = body->children[0];
+    /* Must be: accum = accum + arr[i]  or  accum = arr[i] + accum */
+    if (stmt->type != AST_ASSIGN) return 0;
+    ASTNode *lhs = stmt->data.assign.left;
+    ASTNode *rhs = stmt->data.assign.value;
+    if (!lhs || !rhs) return 0;
+    if (lhs->type != AST_IDENTIFIER) return 0;
+    const char *accum_name = lhs->data.identifier.name;
+
+    if (rhs->type != AST_BINARY_EXPR) return 0;
+    if (rhs->data.binary_expr.op != TOKEN_PLUS) return 0;
+
+    ASTNode *rl = rhs->data.binary_expr.left;
+    ASTNode *rr = rhs->data.binary_expr.right;
+
+    /* Pattern 1: accum = accum + arr[i] */
+    const char *arr_name = NULL;
+    if (rl && rl->type == AST_IDENTIFIER &&
+        strcmp(rl->data.identifier.name, accum_name) == 0) {
+        arr_name = vec_match_array_access(rr, var_name);
+    }
+    /* Pattern 2: accum = arr[i] + accum */
+    if (!arr_name && rr && rr->type == AST_IDENTIFIER &&
+        strcmp(rr->data.identifier.name, accum_name) == 0) {
+        arr_name = vec_match_array_access(rl, var_name);
+    }
+    if (!arr_name) return 0;
+
+    /* Check element type: must be int (4 bytes) or float (4 bytes) */
+    ASTNode *arr_access = (rl->type == AST_ARRAY_ACCESS) ? rl : rr;
+    int elem_kind = 0, elem_size = 0;
+    if (!vec_get_elem_type(arr_access->data.array_access.array,
+                           &elem_kind, &elem_size))
+        return 0;
+
+    int is_float;
+    if (elem_kind == TYPE_FLOAT && elem_size == 4) is_float = 1;
+    else if (elem_kind == TYPE_INT && elem_size == 4) is_float = 0;
+    else return 0;
+
+    /* Determine vector width */
+    int avx = g_compiler_options.avx_level;
+    int vec_width = 4;
+    if (is_float && avx >= 1) vec_width = 8;
+    if (!is_float && avx >= 2) vec_width = 8;
+    if (iterations < vec_width) vec_width = 4;
+    if (iterations < 4) return 0;
+
+    /* All checks passed — annotate the while loop */
+    VecInfo *vi = (VecInfo *)calloc(1, sizeof(VecInfo));
+    vi->width = vec_width;
+    vi->elem_size = 4;
+    vi->is_float = is_float;
+    vi->op = TOKEN_PLUS;
+    vi->iterations = (int)iterations;
+    vi->loop_var = var_name;
+    vi->src1 = arr_name;
+    vi->accum_var = accum_name;
+    vi->vec_mode = 1;  /* reduction */
+    loop->vec_info = vi;
+    return 1;
+}
+
+/* Try to vectorize a while-loop as array init: arr[i] = i*K + C */
+static int try_vectorize_while_init(ASTNode *block, int loop_idx) {
+    const char *var_name;
+    long long start_val, end_val, iterations;
+    if (!analyze_while_loop(block, loop_idx, &var_name,
+                            &start_val, &end_val, &iterations))
+        return 0;
+    if (start_val != 0) return 0;
+    if (iterations < 4) return 0;
+
+    ASTNode *loop = block->children[loop_idx];
+    ASTNode *body = loop->data.while_stmt.body;
+    /* Body should have exactly 2 statements: init assignment + increment */
+    if (body->children_count != 2) return 0;
+
+    ASTNode *stmt = body->children[0];
+    /* Must be: arr[i] = expr */
+    if (stmt->type != AST_ASSIGN) return 0;
+    ASTNode *lhs = stmt->data.assign.left;
+    ASTNode *rhs = stmt->data.assign.value;
+    if (!lhs || !rhs) return 0;
+
+    const char *dst_arr = vec_match_array_access(lhs, var_name);
+    if (!dst_arr) return 0;
+
+    /* Check element type */
+    int elem_kind = 0, elem_size = 0;
+    if (!vec_get_elem_type(lhs->data.array_access.array, &elem_kind, &elem_size))
+        return 0;
+    if (elem_kind != TYPE_INT || elem_size != 4) return 0;
+
+    /* Parse RHS: constant, loop_var, i*K, i*K+C, i+C, K*i+C */
+    long long scale = 0, offset = 0;
+
+    if (is_const_int(rhs)) {
+        /* arr[i] = CONST */
+        offset = rhs->data.integer.value;
+        scale = 0;
+    } else if (rhs->type == AST_IDENTIFIER &&
+               strcmp(rhs->data.identifier.name, var_name) == 0) {
+        /* arr[i] = i */
+        scale = 1;
+        offset = 0;
+    } else if (rhs->type == AST_BINARY_EXPR) {
+        TokenType rop = rhs->data.binary_expr.op;
+        ASTNode *a = rhs->data.binary_expr.left;
+        ASTNode *b = rhs->data.binary_expr.right;
+
+        if (rop == TOKEN_STAR) {
+            /* i * K  or  K * i */
+            if (a->type == AST_IDENTIFIER &&
+                strcmp(a->data.identifier.name, var_name) == 0 &&
+                is_const_int(b)) {
+                scale = b->data.integer.value;
+                offset = 0;
+            } else if (b->type == AST_IDENTIFIER &&
+                       strcmp(b->data.identifier.name, var_name) == 0 &&
+                       is_const_int(a)) {
+                scale = a->data.integer.value;
+                offset = 0;
+            } else return 0;
+        } else if (rop == TOKEN_PLUS) {
+            /* Could be: i*K + C, C + i*K, i + C, C + i */
+            if (a->type == AST_BINARY_EXPR && a->data.binary_expr.op == TOKEN_STAR
+                && is_const_int(b)) {
+                ASTNode *ma = a->data.binary_expr.left;
+                ASTNode *mb = a->data.binary_expr.right;
+                if (ma->type == AST_IDENTIFIER &&
+                    strcmp(ma->data.identifier.name, var_name) == 0 &&
+                    is_const_int(mb)) {
+                    scale = mb->data.integer.value;
+                    offset = b->data.integer.value;
+                } else if (mb->type == AST_IDENTIFIER &&
+                           strcmp(mb->data.identifier.name, var_name) == 0 &&
+                           is_const_int(ma)) {
+                    scale = ma->data.integer.value;
+                    offset = b->data.integer.value;
+                } else return 0;
+            } else if (b->type == AST_BINARY_EXPR && b->data.binary_expr.op == TOKEN_STAR
+                       && is_const_int(a)) {
+                ASTNode *ma = b->data.binary_expr.left;
+                ASTNode *mb = b->data.binary_expr.right;
+                if (ma->type == AST_IDENTIFIER &&
+                    strcmp(ma->data.identifier.name, var_name) == 0 &&
+                    is_const_int(mb)) {
+                    scale = mb->data.integer.value;
+                    offset = a->data.integer.value;
+                } else if (mb->type == AST_IDENTIFIER &&
+                           strcmp(mb->data.identifier.name, var_name) == 0 &&
+                           is_const_int(ma)) {
+                    scale = ma->data.integer.value;
+                    offset = a->data.integer.value;
+                } else return 0;
+            } else if (a->type == AST_IDENTIFIER &&
+                       strcmp(a->data.identifier.name, var_name) == 0 &&
+                       is_const_int(b)) {
+                scale = 1;
+                offset = b->data.integer.value;
+            } else if (b->type == AST_IDENTIFIER &&
+                       strcmp(b->data.identifier.name, var_name) == 0 &&
+                       is_const_int(a)) {
+                scale = 1;
+                offset = a->data.integer.value;
+            } else return 0;
+        } else return 0;
+    } else return 0;
+
+    /* Determine vector width */
+    int avx = g_compiler_options.avx_level;
+    int vec_width = 4;
+    if (avx >= 2) vec_width = 8;
+    if (iterations < vec_width) vec_width = 4;
+    if (iterations < 4) return 0;
+
+    /* All checks passed — annotate */
+    VecInfo *vi = (VecInfo *)calloc(1, sizeof(VecInfo));
+    vi->width = vec_width;
+    vi->elem_size = 4;
+    vi->is_float = 0;
+    vi->op = 0;
+    vi->iterations = (int)iterations;
+    vi->loop_var = var_name;
+    vi->dst = dst_arr;
+    vi->vec_mode = 2;  /* init */
+    vi->init_scale = scale;
+    vi->init_offset = offset;
+    loop->vec_info = vi;
+    return 1;
+}
+
+/* Walk a statement tree and try to vectorize eligible loops */
 static void o3_vectorize_loops(ASTNode *node) {
     if (!node) return;
     switch (node->type) {
     case AST_BLOCK:
-        for (size_t i = 0; i < node->children_count; i++)
-            o3_vectorize_loops(node->children[i]);
+        for (size_t i = 0; i < node->children_count; i++) {
+            ASTNode *child = node->children[i];
+            if (child && child->type == AST_WHILE) {
+                /* Try while-loop vectorization patterns (need block context) */
+                if (!try_vectorize_while_reduction(node, (int)i))
+                    try_vectorize_while_init(node, (int)i);
+                if (!child->vec_info)
+                    o3_vectorize_loops(child->data.while_stmt.body);
+            } else {
+                o3_vectorize_loops(child);
+            }
+        }
         break;
     case AST_FOR:
         try_vectorize_loop(node);
@@ -3517,6 +3837,9 @@ static void o3_vectorize_loops(ASTNode *node) {
             o3_vectorize_loops(node->data.if_stmt.else_branch);
         break;
     case AST_WHILE:
+        /* Reached without block context — just recurse into body */
+        o3_vectorize_loops(node->data.while_stmt.body);
+        break;
     case AST_DO_WHILE:
         o3_vectorize_loops(node->data.while_stmt.body);
         break;

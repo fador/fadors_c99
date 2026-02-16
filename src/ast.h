@@ -59,6 +59,10 @@ typedef struct VecInfo {
     const char *dst;      /* Destination array variable name */
     const char *src1;     /* Source array 1 variable name */
     const char *src2;     /* Source array 2 variable name */
+    int vec_mode;         /* 0=element-wise, 1=reduction, 2=init */
+    const char *accum_var;/* Accumulator variable name (reduction mode) */
+    long long init_scale; /* Scale factor for init: arr[i] = i*scale + init_offset */
+    long long init_offset;/* Offset for init pattern */
 } VecInfo;
 
 typedef struct ASTNode {

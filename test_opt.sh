@@ -944,6 +944,169 @@ int main() {
 EOF
 check_exit "transitive_2level" "$TMPDIR/trans2.c" 50 "-O3"
 
+# ===========================================================================
+# 19. SIMD Reduction Vectorization (-O3)
+# ===========================================================================
+echo "--- SIMD Reduction Vectorization ---"
+
+# Basic reduction: sum of array elements
+cat > "$TMPDIR/simd_red1.c" << 'EOF'
+int main(void) {
+    int arr[16];
+    int i = 0;
+    while (i < 16) {
+        arr[i] = i + 1;
+        i = i + 1;
+    }
+    int sum = 0;
+    i = 0;
+    while (i < 16) {
+        sum = sum + arr[i];
+        i = i + 1;
+    }
+    return sum;
+}
+EOF
+check_exit "simd_reduction_basic" "$TMPDIR/simd_red1.c" 136 "-O3"
+
+# Reduction with non-zero initial accumulator
+cat > "$TMPDIR/simd_red2.c" << 'EOF'
+int main(void) {
+    int arr[8];
+    arr[0] = 10; arr[1] = 20; arr[2] = 30; arr[3] = 40;
+    arr[4] = 50; arr[5] = 60; arr[6] = 70; arr[7] = 80;
+    int sum = 5;
+    int i = 0;
+    while (i < 8) {
+        sum = sum + arr[i];
+        i = i + 1;
+    }
+    return sum & 0xFF;
+}
+EOF
+check_exit "simd_reduction_nonzero_acc" "$TMPDIR/simd_red2.c" 109 "-O3"
+
+# Reduction with non-power-of-4 count (scalar remainder)
+cat > "$TMPDIR/simd_red3.c" << 'EOF'
+int main(void) {
+    int arr[7];
+    arr[0] = 1; arr[1] = 2; arr[2] = 3; arr[3] = 4;
+    arr[4] = 5; arr[5] = 6; arr[6] = 7;
+    int sum = 0;
+    int i = 0;
+    while (i < 7) {
+        sum = sum + arr[i];
+        i = i + 1;
+    }
+    return sum;
+}
+EOF
+check_exit "simd_reduction_remainder" "$TMPDIR/simd_red3.c" 28 "-O3"
+
+# Verify paddd appears in generated assembly for reduction
+"$CC" -O3 -S -o "$TMPDIR/simd_red1.s" "$TMPDIR/simd_red1.c" 2>/dev/null
+if grep -q 'paddd' "$TMPDIR/simd_red1.s"; then
+    pass "simd_reduction_asm: paddd present in reduction loop"
+else
+    fail "simd_reduction_asm: paddd NOT found in generated assembly"
+fi
+
+# Verify pshufd for horizontal sum
+if grep -q 'pshufd' "$TMPDIR/simd_red1.s"; then
+    pass "simd_reduction_horiz: pshufd present for horizontal reduction"
+else
+    fail "simd_reduction_horiz: pshufd NOT found in generated assembly"
+fi
+
+# ===========================================================================
+# 20. SIMD Init Loop Vectorization (-O3)
+# ===========================================================================
+echo "--- SIMD Init Loop Vectorization ---"
+
+# Constant init: arr[i] = 42
+cat > "$TMPDIR/simd_init1.c" << 'EOF'
+int main(void) {
+    int arr[12];
+    int i = 0;
+    while (i < 12) {
+        arr[i] = 42;
+        i = i + 1;
+    }
+    return arr[0] + arr[5] + arr[11];
+}
+EOF
+check_exit "simd_init_constant" "$TMPDIR/simd_init1.c" 126 "-O3"
+
+# Strided init: arr[i] = i * 3 + 2
+cat > "$TMPDIR/simd_init2.c" << 'EOF'
+int main(void) {
+    int arr[12];
+    int i = 0;
+    while (i < 12) {
+        arr[i] = i * 3 + 2;
+        i = i + 1;
+    }
+    return arr[11];
+}
+EOF
+check_exit "simd_init_stride" "$TMPDIR/simd_init2.c" 35 "-O3"
+
+# Identity init: arr[i] = i
+cat > "$TMPDIR/simd_init3.c" << 'EOF'
+int main(void) {
+    int arr[16];
+    int i = 0;
+    while (i < 16) {
+        arr[i] = i;
+        i = i + 1;
+    }
+    return arr[15];
+}
+EOF
+check_exit "simd_init_identity" "$TMPDIR/simd_init3.c" 15 "-O3"
+
+# Init with offset: arr[i] = i + 10
+cat > "$TMPDIR/simd_init4.c" << 'EOF'
+int main(void) {
+    int arr[8];
+    int i = 0;
+    while (i < 8) {
+        arr[i] = i + 10;
+        i = i + 1;
+    }
+    return arr[7];
+}
+EOF
+check_exit "simd_init_offset" "$TMPDIR/simd_init4.c" 17 "-O3"
+
+# Verify movdqu appears in generated assembly for init
+"$CC" -O3 -S -o "$TMPDIR/simd_init1.s" "$TMPDIR/simd_init1.c" 2>/dev/null
+if grep -q 'movdqu' "$TMPDIR/simd_init1.s"; then
+    pass "simd_init_asm: movdqu present in init loop"
+else
+    fail "simd_init_asm: movdqu NOT found in generated assembly"
+fi
+
+# Combined init + reduction (bench_array pattern)
+cat > "$TMPDIR/simd_combined.c" << 'EOF'
+int main(void) {
+    int arr[20];
+    int i = 0;
+    while (i < 20) {
+        arr[i] = i * 2 + 1;
+        i = i + 1;
+    }
+    int sum = 0;
+    i = 0;
+    while (i < 20) {
+        sum = sum + arr[i];
+        i = i + 1;
+    }
+    return sum & 0xFF;
+}
+EOF
+check_exit "simd_combined_init_reduce" "$TMPDIR/simd_combined.c" 144 "-O3"
+
 # ---- Summary ----
 echo ""
 echo "=== Results ==="

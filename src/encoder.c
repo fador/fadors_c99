@@ -921,6 +921,49 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             buffer_write_byte(buf, opcode);
             emit_modrm(buf, 3, d, s);
         }
+    } else if (strcmp(mnemonic, "pxor") == 0) {
+        /* 66 0F EF /r — pxor xmm1, xmm2 */
+        if (src->type == OP_REG && dest->type == OP_REG) {
+            int s = get_reg_id(src->data.reg);
+            int d = get_reg_id(dest->data.reg);
+            buffer_write_byte(buf, 0x66);
+            emit_rex(buf, 0, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0xEF);
+            emit_modrm(buf, 3, d, s);
+        }
+    } else if (strcmp(mnemonic, "movd") == 0) {
+        /* 66 0F 6E /r — movd xmm, r/m32  (load)
+           66 0F 7E /r — movd r/m32, xmm  (store) */
+        if (src->type == OP_REG && dest->type == OP_REG) {
+            int s = get_reg_id(src->data.reg);
+            int d = get_reg_id(dest->data.reg);
+            if (strncmp(dest->data.reg, "xmm", 3) == 0) {
+                /* GPR → XMM: movd %eax, %xmm0 */
+                buffer_write_byte(buf, 0x66);
+                emit_rex(buf, 0, d >= 8, 0, s >= 8);
+                buffer_write_byte(buf, 0x0F);
+                buffer_write_byte(buf, 0x6E);
+                emit_modrm(buf, 3, d, s);
+            } else {
+                /* XMM → GPR: movd %xmm0, %eax */
+                buffer_write_byte(buf, 0x66);
+                emit_rex(buf, 0, s >= 8, 0, d >= 8);
+                buffer_write_byte(buf, 0x0F);
+                buffer_write_byte(buf, 0x7E);
+                emit_modrm(buf, 3, s, d);
+            }
+        }
+    } else if (strcmp(mnemonic, "movhlps") == 0) {
+        /* 0F 12 /r — movhlps xmm1, xmm2 (high->low) */
+        if (src->type == OP_REG && dest->type == OP_REG) {
+            int s = get_reg_id(src->data.reg);
+            int d = get_reg_id(dest->data.reg);
+            emit_rex(buf, 0, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x12);
+            emit_modrm(buf, 3, d, s);
+        }
     /* ---- AVX/AVX2 2-operand instructions (VEX-encoded) ---- */
     } else if (strcmp(mnemonic, "vmovups") == 0) {
         /* VEX.{128,256}.0F.WIG 10/11 — unaligned packed float move */
@@ -1039,6 +1082,62 @@ void encode_inst3(Buffer *buf, const char *mnemonic,
             emit_vex(buf, d, s1, s2, is_ymm, 1); /* pp=1(66) for packed integer */
             buffer_write_byte(buf, opcode);
             emit_modrm(buf, 3, d, s1);
+        }
+    } else if (strcmp(mnemonic, "pshufd") == 0) {
+        /* 66 0F 70 /r ib — pshufd xmm1, xmm2, imm8 */
+        /* AT&T 3-operand: pshufd $imm, %xmmsrc, %xmmdst */
+        if (src1->type == OP_IMM && src2->type == OP_REG && dest->type == OP_REG) {
+            int s = get_reg_id(src2->data.reg);
+            int d = get_reg_id(dest->data.reg);
+            buffer_write_byte(buf, 0x66);
+            emit_rex(buf, 0, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0x70);
+            emit_modrm(buf, 3, d, s);
+            buffer_write_byte(buf, (uint8_t)src1->data.imm);
+        }
+    } else if (strcmp(mnemonic, "vpxor") == 0) {
+        /* VEX.NDS.{128,256}.66.0F.WIG EF /r */
+        int is_ymm = 0;
+        if (dest->type == OP_REG && strncmp(dest->data.reg, "ymm", 3) == 0) is_ymm = 1;
+        if (src1->type == OP_REG && dest->type == OP_REG && src2->type == OP_REG) {
+            int s1 = get_reg_id(src1->data.reg);
+            int s2 = get_reg_id(src2->data.reg);
+            int d  = get_reg_id(dest->data.reg);
+            emit_vex(buf, d, s1, s2, is_ymm, 1); /* pp=1(66) */
+            buffer_write_byte(buf, 0xEF);
+            emit_modrm(buf, 3, d, s1);
+        }
+    } else if (strcmp(mnemonic, "vextracti128") == 0) {
+        /* VEX.256.66.0F3A.W0 39 /r ib — vextracti128 $imm, ymm, xmm */
+        if (src1->type == OP_IMM && src2->type == OP_REG && dest->type == OP_REG) {
+            int s = get_reg_id(src2->data.reg);
+            int d = get_reg_id(dest->data.reg);
+            uint8_t rxb = 0xE0;
+            if (d >= 8) rxb &= ~0x80;
+            if (s >= 8) rxb &= ~0x20;
+            buffer_write_byte(buf, 0xC4);
+            buffer_write_byte(buf, rxb | 0x03);
+            buffer_write_byte(buf, 0x7D);
+            buffer_write_byte(buf, 0x39);
+            emit_modrm(buf, 3, d & 7, s & 7);
+            buffer_write_byte(buf, (uint8_t)src1->data.imm);
+        }
+    } else if (strcmp(mnemonic, "vinserti128") == 0) {
+        /* VEX.NDS.256.66.0F3A.W0 38 /r ib */
+        if (src1->type == OP_IMM && src2->type == OP_REG && dest->type == OP_REG) {
+            int s = get_reg_id(src2->data.reg);
+            int d = get_reg_id(dest->data.reg);
+            uint8_t rxb = 0xE0;
+            if (d >= 8) rxb &= ~0x80;
+            if (s >= 8) rxb &= ~0x20;
+            buffer_write_byte(buf, 0xC4);
+            buffer_write_byte(buf, rxb | 0x03);
+            uint8_t vvvv = (~d & 0xF) << 3;
+            buffer_write_byte(buf, vvvv | 0x05);
+            buffer_write_byte(buf, 0x38);
+            emit_modrm(buf, 3, d & 7, s & 7);
+            buffer_write_byte(buf, (uint8_t)src1->data.imm);
         }
     }
 }

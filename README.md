@@ -423,20 +423,20 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [x] **Deeper transitive inlining**: Inline chains: if `compute` calls already-inlined `add`/`mul`, re-check stmt count post-substitution. Functions that shrink after inlining their callees become eligible.
 
 #### Phase 7d: Vectorization
-- [ ] **Auto-vectorize reduction loops (SIMD)**: Detect `sum += a[i]` pattern → `paddd` accumulator with horizontal reduction at loop exit. Current vectorizer only handles `a[i] = b[i] OP c[i]`, not reductions.
-- [ ] **SIMD init loop vectorization**: Initialize arrays 4/8 elements at a time with packed integer ops (`pslld`/`paddd`).
+- [x] **Auto-vectorize reduction loops (SIMD)**: Detect `sum += a[i]` pattern → `paddd` accumulator with horizontal reduction at loop exit. Current vectorizer only handles `a[i] = b[i] OP c[i]`, not reductions.
+- [x] **SIMD init loop vectorization**: Initialize arrays 4/8 elements at a time with packed integer ops (`pslld`/`paddd`).
 
 #### GCC -O2 vs fadors99 -O3 Gap Analysis
 
 | Benchmark | fadors99 -O3 | gcc -O2 | Gap | Remaining Root Causes |
 |-----------|-------------|---------|-----|-------------|
-| bench_array | 0.027s | 0.003s | 9× | No SIMD reduction; IV SR helps but array init is stride-limited |
+| bench_array | 0.005s | 0.003s | 1.7× | SIMD reduction + init active; remaining gap is alignment & unrolling |
 | bench_struct | 0.069s | 0.005s | 14× | pushq/popq temps in `distance_sq` (5-reg limit), no SIMD accumulator |
-| bench_calls | 0.008s | 0.005s | 1.6× | Transitive inlining eliminates all calls; LEA mul-add active |
+| bench_calls | 0.007s | 0.005s | 1.4× | Transitive inlining eliminates all calls; LEA mul-add active |
 | bench_loop | 0.010s | 0.004s | 2.5× | IV SR active; remaining gap is register pressure |
-| bench_branch | 0.025s | 0.020s | 1.3× | Loop rotation active; `call collatz_steps` not inlined |
+| bench_branch | 0.025s | 0.019s | 1.3× | Loop rotation active; `call collatz_steps` not inlined |
 
-*Phase 7c: transitive inlining cut bench_calls -O3 from 0.014s to 0.008s (43% faster). Loop rotation and IV strength reduction active at -O2+. Average gap is ~5.7× across all benchmarks.*
+*Phase 7d: SIMD vectorization cut bench_array -O3 from 0.026s to 0.005s (5.2× faster). Reduction uses paddd+pshufd horizontal sum; init uses movdqu stride stores. Average gap is ~4.2× across all benchmarks.*
 
 ### Implementation Priority & Dependencies
 

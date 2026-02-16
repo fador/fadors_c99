@@ -3324,6 +3324,318 @@ static void gen_vectorized_loop(ASTNode *node) {
     emit_inst1("popq", op_reg("rbx"));
 }
 
+/* ------------------------------------------------------------------ */
+/* Vectorized while-loop codegen (reduction + init patterns)           */
+/* ------------------------------------------------------------------ */
+static void gen_vectorized_while_loop(ASTNode *node) {
+    VecInfo *vi = node->vec_info;
+    if (!vi) return;
+
+    if (vi->vec_mode == 1) {
+        /* ============================================================
+         * Reduction: sum += arr[i]
+         * Strategy: accumulate in xmm0 (4 × int32), then horizontal sum.
+         *   xmm0 = [0,0,0,0]  (accumulator)
+         *   loop: xmm1 = load arr[i..i+3]; xmm0 = paddd xmm0, xmm1
+         *   horiz: pshufd + paddd to collapse 4 lanes → scalar
+         *   store back to accum variable
+         * ============================================================ */
+        int lbl_vec = label_count++;
+        int lbl_scalar = label_count++;
+        int lbl_scalar_loop = label_count++;
+        int lbl_done = label_count++;
+        char l_vec[32], l_scalar[32], l_scalar_loop[32], l_done[32];
+        sprintf(l_vec, ".L%d", lbl_vec);
+        sprintf(l_scalar, ".L%d", lbl_scalar);
+        sprintf(l_scalar_loop, ".L%d", lbl_scalar_loop);
+        sprintf(l_done, ".L%d", lbl_done);
+
+        int use_avx = (vi->width == 8);
+        int vec_elems = vi->width;
+        int vec_bytes = vec_elems * vi->elem_size;
+
+        const char *vreg0 = use_avx ? "ymm0" : "xmm0";
+        const char *vreg1 = use_avx ? "ymm1" : "xmm1";
+
+        /* Pick move/add mnemonics */
+        const char *vec_mov, *vec_add;
+        if (use_avx) {
+            vec_mov = vi->is_float ? "vmovups" : "vmovdqu";
+            vec_add = vi->is_float ? "vaddps" : "vpaddd";
+        } else {
+            vec_mov = vi->is_float ? "movups" : "movdqu";
+            vec_add = vi->is_float ? "addps" : "paddd";
+        }
+
+        /* Save callee-saved registers and load array base */
+        emit_inst1("pushq", op_reg("r14"));
+
+        const char *src_reg = get_local_reg(vi->src1);
+        if (src_reg) {
+            /* Array pointer is register-allocated */
+            emit_inst2("mov", op_reg(src_reg), op_reg("r14"));
+        } else {
+            int off_src = get_local_offset(vi->src1);
+            Type *t_src = get_local_type(vi->src1);
+            if (t_src && t_src->kind == TYPE_ARRAY)
+                emit_inst2("lea", op_mem("rbp", off_src), op_reg("r14"));
+            else
+                emit_inst2("mov", op_mem("rbp", off_src), op_reg("r14"));
+        }
+
+        /* Zero the accumulator vector register */
+        if (use_avx) {
+            /* vpxor ymm0, ymm0, ymm0 → zero YMM */
+            emit_inst3("vpxor", op_reg(vreg0), op_reg(vreg0), op_reg(vreg0));
+        } else {
+            emit_inst2("pxor", op_reg("xmm0"), op_reg("xmm0"));
+        }
+
+        /* Counter in ecx */
+        emit_inst2("xor", op_reg("ecx"), op_reg("ecx"));
+        int vec_limit = vi->iterations - (vec_elems - 1);
+
+        /* --- Vector loop --- */
+        emit_label_def(l_vec);
+        emit_inst2("cmp", op_imm(vec_limit), op_reg("ecx"));
+        emit_inst1("jg", op_label(l_scalar));
+
+        /* Load chunk from array */
+        emit_inst2(vec_mov, op_mem("r14", 0), op_reg(vreg1));
+
+        /* Accumulate: xmm0 += xmm1 */
+        if (use_avx)
+            emit_inst3(vec_add, op_reg(vreg1), op_reg(vreg0), op_reg(vreg0));
+        else
+            emit_inst2(vec_add, op_reg(vreg1), op_reg(vreg0));
+
+        /* Advance pointer and counter */
+        emit_inst2("add", op_imm(vec_bytes), op_reg("r14"));
+        emit_inst2("add", op_imm(vec_elems), op_reg("ecx"));
+        emit_inst1("jmp", op_label(l_vec));
+
+        /* --- Scalar remainder --- */
+        emit_label_def(l_scalar);
+
+        if (use_avx) {
+            /* Reduce YMM to XMM: extract high 128 bits and add to low */
+            emit_inst3("vextracti128", op_imm(1), op_reg("ymm0"), op_reg("xmm1"));
+            emit_inst2("paddd", op_reg("xmm1"), op_reg("xmm0"));
+            emit_inst0("vzeroupper");
+        }
+
+        /* Horizontal reduction: xmm0 = [a, b, c, d] →
+           pshufd xmm1, xmm0, 0x4E → xmm1 = [c, d, a, b]
+           paddd  xmm0, xmm1       → xmm0 = [a+c, b+d, ...]
+           pshufd xmm1, xmm0, 0xB1 → xmm1 = [b+d, a+c, ...]
+           paddd  xmm0, xmm1       → xmm0 = [a+b+c+d, ...] */
+        if (vi->is_float) {
+            /* Float: haddps twice or movhlps+addps */
+            emit_inst2("movhlps", op_reg("xmm0"), op_reg("xmm1"));
+            emit_inst2("addps", op_reg("xmm1"), op_reg("xmm0"));
+            emit_inst3("pshufd", op_imm(0x55), op_reg("xmm0"), op_reg("xmm1"));
+            emit_inst2("addss", op_reg("xmm1"), op_reg("xmm0"));
+        } else {
+            /* Integer: pshufd + paddd */
+            emit_inst3("pshufd", op_imm(0x4E), op_reg("xmm0"), op_reg("xmm1"));
+            emit_inst2("paddd", op_reg("xmm1"), op_reg("xmm0"));
+            emit_inst3("pshufd", op_imm(0xB1), op_reg("xmm0"), op_reg("xmm1"));
+            emit_inst2("paddd", op_reg("xmm1"), op_reg("xmm0"));
+        }
+
+        /* Move scalar result to eax, add existing accumulator value */
+        if (vi->is_float) {
+            /* movss to accumulator variable */
+            const char *acc_freg = get_local_reg(vi->accum_var);
+            if (acc_freg) {
+                /* accum is register-allocated — but floats in GPR need special handling:
+                   movd gpr→xmm1, addss xmm1,xmm0, movd xmm0→gpr */
+                const char *acc_freg32 = get_local_reg32(vi->accum_var);
+                emit_inst2("movd", op_reg(acc_freg32), op_reg("xmm1"));
+                emit_inst2("addss", op_reg("xmm1"), op_reg("xmm0"));
+                emit_inst2("movd", op_reg("xmm0"), op_reg(acc_freg32));
+            } else {
+                int off_acc = get_local_offset(vi->accum_var);
+                emit_inst2("addss", op_mem("rbp", off_acc), op_reg("xmm0"));
+                emit_inst2("movss", op_reg("xmm0"), op_mem("rbp", off_acc));
+            }
+        } else {
+            emit_inst2("movd", op_reg("xmm0"), op_reg("eax"));
+            /* Check if accumulator is register-allocated */
+            const char *acc_reg32 = get_local_reg32(vi->accum_var);
+            if (acc_reg32) {
+                emit_inst2("addl", op_reg(acc_reg32), op_reg("eax"));
+            } else {
+                int off_acc = get_local_offset(vi->accum_var);
+                emit_inst2("addl", op_mem("rbp", off_acc), op_reg("eax"));
+            }
+            /* Handle scalar remainder elements */
+            emit_inst2("cmp", op_imm(vi->iterations), op_reg("ecx"));
+            emit_inst1("jge", op_label(l_done));
+            emit_label_def(l_scalar_loop);
+            emit_inst2("addl", op_mem("r14", 0), op_reg("eax"));
+            emit_inst2("add", op_imm(4), op_reg("r14"));
+            emit_inst2("add", op_imm(1), op_reg("ecx"));
+            emit_inst2("cmp", op_imm(vi->iterations), op_reg("ecx"));
+            emit_inst1("jl", op_label(l_scalar_loop));
+            emit_label_def(l_done);
+            /* Store final sum back */
+            if (acc_reg32) {
+                emit_inst2("movl", op_reg("eax"), op_reg(acc_reg32));
+            } else {
+                int off_acc = get_local_offset(vi->accum_var);
+                emit_inst2("movl", op_reg("eax"), op_mem("rbp", off_acc));
+            }
+        }
+
+        emit_inst1("popq", op_reg("r14"));
+
+    } else if (vi->vec_mode == 2) {
+        /* ============================================================
+         * Init: arr[i] = i * scale + offset
+         * Strategy:
+         *   If scale == 0: broadcast offset, movdqu store
+         *   If scale != 0: init vector = [0*s+o, 1*s+o, 2*s+o, 3*s+o],
+         *     stride vector = [4*s, 4*s, 4*s, 4*s] (or 8*s for AVX2)
+         *     Each iteration: store init vector, init += stride
+         * ============================================================ */
+        int lbl_vec = label_count++;
+        int lbl_scalar = label_count++;
+        int lbl_scalar_loop = label_count++;
+        int lbl_done = label_count++;
+        char l_vec[32], l_scalar[32], l_scalar_loop[32], l_done[32];
+        sprintf(l_vec, ".L%d", lbl_vec);
+        sprintf(l_scalar, ".L%d", lbl_scalar);
+        sprintf(l_scalar_loop, ".L%d", lbl_scalar_loop);
+        sprintf(l_done, ".L%d", lbl_done);
+
+        int use_avx = (vi->width == 8);
+        int vec_elems = vi->width;
+        int vec_bytes = vec_elems * vi->elem_size;
+
+        /* Save callee-saved registers and load array base */
+        emit_inst1("pushq", op_reg("rbx"));
+
+        const char *dst_reg = get_local_reg(vi->dst);
+        if (dst_reg) {
+            /* Array pointer is register-allocated */
+            emit_inst2("mov", op_reg(dst_reg), op_reg("rbx"));
+        } else {
+            int off_dst = get_local_offset(vi->dst);
+            Type *t_dst = get_local_type(vi->dst);
+            if (t_dst && t_dst->kind == TYPE_ARRAY)
+                emit_inst2("lea", op_mem("rbp", off_dst), op_reg("rbx"));
+            else
+                emit_inst2("mov", op_mem("rbp", off_dst), op_reg("rbx"));
+        }
+
+        long long scale = vi->init_scale;
+        long long offset = vi->init_offset;
+
+        if (scale == 0) {
+            /* Constant init: broadcast offset into all lanes */
+            /* Use: mov $offset, %eax; movd %eax, %xmm0; pshufd $0, %xmm0, %xmm0 */
+            emit_inst2("mov", op_imm((int)offset), op_reg("eax"));
+            emit_inst2("movd", op_reg("eax"), op_reg("xmm0"));
+            emit_inst3("pshufd", op_imm(0), op_reg("xmm0"), op_reg("xmm0"));
+            if (use_avx) {
+                /* Broadcast xmm0 to ymm0: vinserti128 $1, %xmm0, %ymm0, %ymm0 */
+                emit_inst3("vinserti128", op_imm(1), op_reg("xmm0"), op_reg("ymm0"));
+            }
+        } else {
+            /* Strided init: build initial vector [0*s+o, 1*s+o, 2*s+o, 3*s+o]
+               and stride vector [vec_elems*s, vec_elems*s, ...] */
+            /* We need stack space for the initial values.
+               Use sub rsp to allocate temp space, store values, load vector. */
+            int tmp_size = vec_bytes * 2;  /* init_vec + stride_vec */
+            /* Align to 16/32 bytes */
+            int align = use_avx ? 32 : 16;
+            tmp_size = (tmp_size + align - 1) & ~(align - 1);
+            emit_inst2("sub", op_imm(tmp_size), op_reg("rsp"));
+
+            /* Store initial values for init vector */
+            for (int k = 0; k < vec_elems; k++) {
+                long long val = (long long)k * scale + offset;
+                emit_inst2("movl", op_imm((int)val), op_mem("rsp", k * 4));
+            }
+            /* Store stride values */
+            long long stride_val = (long long)vec_elems * scale;
+            for (int k = 0; k < vec_elems; k++) {
+                emit_inst2("movl", op_imm((int)stride_val), op_mem("rsp", vec_bytes + k * 4));
+            }
+
+            /* Load init vector and stride vector */
+            const char *vec_mov = use_avx ? "vmovdqu" : "movdqu";
+            const char *vreg0 = use_avx ? "ymm0" : "xmm0";
+            const char *vreg1 = use_avx ? "ymm1" : "xmm1";
+            emit_inst2(vec_mov, op_mem("rsp", 0), op_reg(vreg0));
+            emit_inst2(vec_mov, op_mem("rsp", vec_bytes), op_reg(vreg1));
+
+            /* Free temp space */
+            emit_inst2("add", op_imm(tmp_size), op_reg("rsp"));
+        }
+
+        /* Counter in ecx */
+        emit_inst2("xor", op_reg("ecx"), op_reg("ecx"));
+        int vec_limit = vi->iterations - (vec_elems - 1);
+
+        const char *vec_mov_store = use_avx ? "vmovdqu" : "movdqu";
+        const char *vreg0 = use_avx ? "ymm0" : "xmm0";
+
+        /* --- Vector loop --- */
+        emit_label_def(l_vec);
+        emit_inst2("cmp", op_imm(vec_limit), op_reg("ecx"));
+        emit_inst1("jg", op_label(l_scalar));
+
+        /* Store current vector to array */
+        emit_inst2(vec_mov_store, op_reg(vreg0), op_mem("rbx", 0));
+
+        if (scale != 0) {
+            /* Advance: xmm0 += stride */
+            const char *vreg1 = use_avx ? "ymm1" : "xmm1";
+            if (use_avx)
+                emit_inst3("vpaddd", op_reg(vreg1), op_reg(vreg0), op_reg(vreg0));
+            else
+                emit_inst2("paddd", op_reg(vreg1), op_reg(vreg0));
+        }
+
+        /* Advance pointer and counter */
+        emit_inst2("add", op_imm(vec_bytes), op_reg("rbx"));
+        emit_inst2("add", op_imm(vec_elems), op_reg("ecx"));
+        emit_inst1("jmp", op_label(l_vec));
+
+        /* --- Scalar remainder --- */
+        emit_label_def(l_scalar);
+        if (use_avx) emit_inst0("vzeroupper");
+
+        emit_inst2("cmp", op_imm(vi->iterations), op_reg("ecx"));
+        emit_inst1("jge", op_label(l_done));
+        emit_label_def(l_scalar_loop);
+
+        if (scale == 0) {
+            /* Store constant */
+            emit_inst2("movl", op_imm((int)offset), op_mem("rbx", 0));
+        } else {
+            /* Compute value: ecx * scale + offset */
+            emit_inst2("mov", op_reg("ecx"), op_reg("eax"));
+            if (scale != 1)
+                emit_inst2("imull", op_imm((int)scale), op_reg("eax"));
+            if (offset != 0)
+                emit_inst2("addl", op_imm((int)offset), op_reg("eax"));
+            emit_inst2("movl", op_reg("eax"), op_mem("rbx", 0));
+        }
+
+        emit_inst2("add", op_imm(4), op_reg("rbx"));
+        emit_inst2("add", op_imm(1), op_reg("ecx"));
+        emit_inst2("cmp", op_imm(vi->iterations), op_reg("ecx"));
+        emit_inst1("jl", op_label(l_scalar_loop));
+
+        /* --- Epilogue --- */
+        emit_label_def(l_done);
+        emit_inst1("popq", op_reg("rbx"));
+    }
+}
+
 static void gen_statement(ASTNode *node) {
     if (!node) return;
     debug_record_line(node);
@@ -3785,6 +4097,12 @@ static void gen_statement(ASTNode *node) {
         emit_label_def(l_end);
         last_value_clear();
     } else if (node->type == AST_WHILE) {
+        /* Vectorized while loop: emit SIMD packed instructions */
+        if (node->vec_info) {
+            gen_vectorized_while_loop(node);
+            last_value_clear();
+            return;
+        }
         int label_start = label_count++;
         int label_end = label_count++;
         char l_start[32], l_end[32];
