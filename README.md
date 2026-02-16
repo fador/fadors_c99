@@ -232,13 +232,13 @@ valgrind --leak-check=full --track-origins=yes ./build_linux/fadors99 tests/01_r
 
 The goal is to compile the compiler using itself. Based on an audit of `src/`, these are the remaining blockers, ordered by priority:
 
-#### Phase 1: Type System Foundation ✅
+#### Phase 1: Type System Foundation
 - [x] `const` qualifier: Parse and ignore. Used in every function signature.
 - [x] `size_t` / `uint8_t` / `uint16_t` / `uint32_t` / `uint64_t` / `int16_t` / `int32_t`: Typedef aliases via `<stdint.h>` and `<stddef.h>`.
 - [x] `static` functions: Internal linkage (used in 9/11 `.c` files).
 - [x] `unsigned` type modifier.
 
-#### Phase 2: Minimal Standard Library Headers ✅
+#### Phase 2: Minimal Standard Library Headers
 - [x] `<stddef.h>`: `size_t`, `NULL`, `ptrdiff_t`.
 - [x] `<stdint.h>`: Fixed-width integer typedefs.
 - [x] `<stdlib.h>`: `malloc`, `free`, `realloc`, `atoi`, `exit`.
@@ -247,7 +247,7 @@ The goal is to compile the compiler using itself. Based on an audit of `src/`, t
 - [x] `<ctype.h>`: `isalpha`, `isdigit`, `isalnum`, `isspace`.
 - [x] `#include <...>` angle-bracket support with `include/` search path.
 
-#### Phase 3: Language Feature Completion ✅
+#### Phase 3: Language Feature Completion
 - [x] Compound assignment operators: `+=`, `-=`, `*=`, `/=`, `%=`, `|=`, `&=`, `^=`, `<<=`, `>>=`.
 - [x] Ternary operator: `a ? b : c`.
 - [x] Variable declarations in `for` init: `for (int i = 0; ...)`.
@@ -278,7 +278,7 @@ Discovered by attempting to compile `types.c`, `buffer.c`, `lexer.c` with the co
 
 This section outlines the implementation plan for compiler optimization flags (`-O1`, `-O2`, `-O3`) and debug symbol generation (`-g`). These are standard compiler CLI options that control the trade-off between compilation speed, output binary performance, and debuggability.
 
-### Phase 1: Infrastructure — CLI Flags & Compiler State ✅
+### Phase 1: Infrastructure — CLI Flags & Compiler State
 
 **Goal**: Parse `-O0`/`-O1`/`-O2`/`-O3` and `-g` flags, propagate settings through the compilation pipeline.
 
@@ -286,11 +286,11 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [x] **Compiler options struct**: Add `opt_level` (0–3) and `debug_info` (bool) fields to a global `CompilerOptions` struct in `codegen.h`.
 - [x] **Pass options to codegen**: `g_compiler_options` is globally accessible from all pipeline stages via `codegen.h`.
 
-### Phase 2: `-g` — Debug Symbol Generation (DWARF / CodeView) 🔄
+### Phase 2: `-g` — Debug Symbol Generation (DWARF / CodeView)
 
 **Goal**: Emit debug information so `gdb`/`lldb` (Linux) or Visual Studio/WinDbg (Windows) can map machine code back to source lines, variables, and types.
 
-#### Phase 2a: ELF / DWARF (Linux) ✅
+#### Phase 2a: ELF / DWARF (Linux)
 - [x] **Line number tracking**: Record source file + line number for each AST node during parsing; propagate to codegen.
 - [x] **`.debug_line` section**: Emit DWARF 4 line number program (opcodes: `DW_LNS_advance_pc`, `DW_LNS_advance_line`, `DW_LNS_copy`, special opcodes) mapping instruction offsets → source lines.
 - [x] **`.debug_info` section**: Emit compilation unit DIE (`DW_TAG_compile_unit`) with producer, language, file reference, low_pc/high_pc, stmt_list.
@@ -351,13 +351,13 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [x] **Control Flow Graph (CFG)**: Build directed graph of basic blocks with predecessor/successor edges. Three-address code IR with 40+ opcodes; expression/statement lowering for all AST node types; `--dump-ir` flag for debug output. Activated at `-O2+`.
 - [x] **SSA construction**: Convert variables to Static Single Assignment form with φ-functions. Implements Cooper-Harvey-Kennedy iterative dominator algorithm, dominance frontier computation, φ-function insertion at iterated dominance frontiers, and DFS variable renaming on the dominator tree. Parameter SSA entry vregs, SSA validation (single-definition check), dominator/DF info in `--dump-ir` output.
 
-#### Phase 4c: Analysis Passes ✅
+#### Phase 4c: Analysis Passes
 - [x] **Liveness analysis**: Iterative backward dataflow on SSA-form IR. Computes def/use bitsets per block, propagates `live_in[B] = use[B] ∪ (live_out[B] − def[B])` and `live_out[B] = ∪ live_in[S]` to fixed point. PHI arguments modelled as uses in predecessor blocks. Parameter entry vregs implicitly defined. Live-in/live-out vreg sets shown in `--dump-ir` output.
 - [x] **Reaching definitions**: Forward dataflow analysis tracking which `(block, vreg, instr_idx)` definitions reach each point. Per-vreg gen/kill sets with iterative convergence. Allocated on demand via `ir_compute_reaching_defs()` (caller frees).
 - [x] **Dominator tree**: Compute dominance relationships and dominance frontiers. Used for SSA φ-function placement and loop detection.
 - [x] **Loop detection**: Back-edge identification via dominator tree (`ir_dominates()` walk), natural loop body collection via backward DFS from back-edge source, loop depth and header annotations per block. Handles nested loops (sorted by body size so inner loops overwrite outer headers). Shown in `--dump-ir` output as `loop: depth=N hdr=bbM`.
 
-#### Phase 4d: Advanced Optimization Passes ✅
+#### Phase 4d: Advanced Optimization Passes
 - [x] **Global constant propagation (SCCP)**: Sparse Conditional Constant Propagation — lattice-based (TOP/CONST/BOTTOM) iterative propagation on SSA virtual registers. Evaluates binary/unary ops on constant operands at compile time. Phase 2 rewrites constant vreg uses to immediates. Phase 3 folds constant branches to unconditional jumps, eliminating dead CFG paths. Handles addition, subtraction, multiplication, division, modulo, comparisons, and negation.
 - [x] **Common subexpression elimination (CSE/GVN)**: Global Value Numbering with hash-based dominator-tree preorder walk. Value numbers assigned per SSA vreg with copy propagation (COPY instructions propagate VN from source). Pure computations with matching `(opcode, VN(src1), VN(src2))` replaced with copy from earlier result. Redundant `a + b` computed twice becomes `copy` of first result.
 - [x] **Loop-invariant code motion (LICM)**: Uses `IRLoopInfo` from loop detection. Iteratively marks instructions as invariant if all sources are constants, defined outside the loop, or already marked invariant. Function parameters (no def block) are treated as invariant. Creates preheader block when needed, redirects CFG edges, updates PHI predecessors, and migrates invariant instructions before loop entry.
@@ -400,14 +400,14 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [ ] **`-Os`**: Apply `-O2` optimizations but prefer smaller code size — disable loop unrolling, prefer shorter instruction encodings, avoid aggressive inlining.
 - [ ] **`-Og`**: Apply only optimizations that don't interfere with debugging — constant folding, dead code elimination, but no inlining, no register allocation changes that hide variables.
 
-### Phase 7: Codegen — Closing the GCC Gap 🔄
+### Phase 7: Codegen — Closing the GCC Gap
 
 **Goal**: Address the fundamental code quality gap between fadors99 and GCC -O2. Analysis showed the root cause was that all local variables lived on the stack, causing 2+ memory round-trips per variable per loop iteration. The register allocator (Phase 7a) addressed this, reducing the average gap from 10× to 5.9×.
 
-#### Phase 7a: Register Allocator (highest impact — affects ALL benchmarks) ✅
+#### Phase 7a: Register Allocator (highest impact — affects ALL benchmarks) 
 - [x] **Register allocator for local variables**: AST pre-scan with use-count priority assignment. Assigns up to 5 callee-saved registers (`%rbx`, `%r12`–`%r15`) to the most-used eligible scalar integer locals (no address-taken, no arrays/structs/floats). Two-phase design: `regalloc_analyze()` scans the AST and determines assignments before codegen, `regalloc_emit_saves()` pushes callee-saved registers in the prologue. Variables in registers skip stack allocation entirely — loads become `mov %reg, %rax`, stores become `mov %rax, %reg`, increments directly modify the register. Callee-saved registers restored from `rbp`-relative slots before epilogue. Activated at `-O2+`.
 - [x] **Function parameter register allocation**: Parameters passed in ABI argument registers (`%rdi`, `%rsi`, etc.) are moved directly to callee-saved registers instead of being spilled to the stack. Combined with local variable register allocation, this eliminates all memory traffic for hot scalar variables in functions like `collatz_steps(int n)` where `n` stays in `%rbx` throughout.
-- [ ] **Eliminate redundant loads/stores**: Track which value is already in a register and skip reloads from stack. Simple "last-value cache" per register — even without full regalloc this eliminates back-to-back `movl %eax, N(%rbp); movl N(%rbp), %eax`.
+- [x] **Eliminate redundant loads/stores**: Track which value is already in a register and skip reloads from stack. Simple "last-value cache" per register — even without full regalloc this eliminates back-to-back `movl %eax, N(%rbp); movl N(%rbp), %eax`.
 - [ ] **Frame pointer elimination (`-fomit-frame-pointer`)**: Free up `%rbp` as a GPR. Use `%rsp`-relative addressing. Requires tracking stack depth at each point.
 
 #### Phase 7b: Instruction Selection (easy wins)

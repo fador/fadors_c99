@@ -1070,6 +1070,52 @@ static ASTNode *prop_substitute(ASTNode *node, PropEnv *env) {
     }
 }
 
+/* Invalidate bindings for any variables modified as side effects of an expr
+ * (e.g. x++ inside an initializer modifies x). */
+static void prop_invalidate_side_effects(ASTNode *node, PropEnv *env) {
+    if (!node) return;
+    switch (node->type) {
+        case AST_PRE_INC: case AST_PRE_DEC:
+        case AST_POST_INC: case AST_POST_DEC:
+            if (node->data.unary.expression &&
+                node->data.unary.expression->type == AST_IDENTIFIER) {
+                prop_env_invalidate(env, node->data.unary.expression->data.identifier.name);
+            }
+            prop_invalidate_side_effects(node->data.unary.expression, env);
+            return;
+        case AST_ASSIGN:
+            if (node->data.assign.left &&
+                node->data.assign.left->type == AST_IDENTIFIER) {
+                prop_env_invalidate(env, node->data.assign.left->data.identifier.name);
+            }
+            prop_invalidate_side_effects(node->data.assign.value, env);
+            return;
+        case AST_CALL:
+            prop_env_invalidate_all(env);
+            return;
+        case AST_BINARY_EXPR:
+            prop_invalidate_side_effects(node->data.binary_expr.left, env);
+            prop_invalidate_side_effects(node->data.binary_expr.right, env);
+            return;
+        case AST_NEG: case AST_NOT: case AST_BITWISE_NOT:
+        case AST_DEREF: case AST_ADDR_OF:
+            prop_invalidate_side_effects(node->data.unary.expression, env);
+            return;
+        case AST_CAST:
+            prop_invalidate_side_effects(node->data.cast.expression, env);
+            return;
+        case AST_ARRAY_ACCESS:
+            prop_invalidate_side_effects(node->data.array_access.array, env);
+            prop_invalidate_side_effects(node->data.array_access.index, env);
+            return;
+        case AST_MEMBER_ACCESS:
+            prop_invalidate_side_effects(node->data.member_access.struct_expr, env);
+            return;
+        default:
+            return;
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* O2: Propagation + dead store elimination on a block                */
 /* ------------------------------------------------------------------ */
@@ -1097,6 +1143,12 @@ static void o2_propagate_block(ASTNode *block) {
             stmt->data.var_decl.initializer = opt_expr(stmt->data.var_decl.initializer);
             collect_reads(stmt->data.var_decl.initializer, &env);
 
+            /* Invalidate bindings for variables modified by side effects
+             * in the initializer (e.g., int old = x++ must invalidate x) */
+            if (has_side_effects(stmt->data.var_decl.initializer)) {
+                prop_invalidate_side_effects(stmt->data.var_decl.initializer, &env);
+            }
+
             /* Record the binding: name → value */
             ASTNode *val = stmt->data.var_decl.initializer;
             if (val->type == AST_INTEGER || val->type == AST_IDENTIFIER) {
@@ -1123,6 +1175,12 @@ static void o2_propagate_block(ASTNode *block) {
             stmt->data.assign.value = prop_substitute(stmt->data.assign.value, &env);
             stmt->data.assign.value = opt_expr(stmt->data.assign.value);
             collect_reads(stmt->data.assign.value, &env);
+
+            /* Invalidate bindings for variables modified by side effects
+             * in the RHS (e.g., y = x++ must invalidate x) */
+            if (has_side_effects(stmt->data.assign.value)) {
+                prop_invalidate_side_effects(stmt->data.assign.value, &env);
+            }
 
             /* Dead store: if previous write to this var was not read, mark it dead */
             VarBinding *prev = prop_env_find(&env, varname);
@@ -1864,6 +1922,11 @@ static int is_safe_for_aggressive_inline(ASTNode *body, const char *func_name) {
            returns from the caller function after inlining. */
         if (s->type == AST_RETURN && i != body->children_count - 1) return 0;
         if (s->type != AST_RETURN && stmt_contains_return(s)) return 0;
+        /* No static variables — each inline copy would get its own private
+           static storage instead of sharing the original function's static.
+           This would break programs that rely on static state persisting
+           across calls (e.g. static counters). */
+        if (s->type == AST_VAR_DECL && s->data.var_decl.is_static) return 0;
     }
     return 1;
 }

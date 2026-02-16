@@ -125,6 +125,7 @@ static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2);
 static void emit_inst3(const char *mnemonic, Operand *op1, Operand *op2, Operand *op3);
 static Type *get_expr_type(ASTNode *node);
 static int is_float_type(Type *t);
+static void last_value_clear(void);
 
 // Peephole optimization state: eliminates redundant jumps and dead code
 static int peep_unreachable = 0;     // 1 after unconditional jmp (suppress dead code)
@@ -335,6 +336,7 @@ static void emit_label_def(const char *name) {
             }
         }
         peep_unreachable = 0;  // label is a potential jump target, code is reachable again
+        last_value_clear();
     }
 
     if (obj_writer) {
@@ -648,6 +650,92 @@ typedef struct {
 static LocalVar locals[8192];
 static int locals_count = 0;
 static int stack_offset = 0;
+
+typedef enum {
+    LASTVAL_NONE,
+    LASTVAL_STACK,
+    LASTVAL_LABEL,
+    LASTVAL_REG
+} LastValueKind;
+
+typedef struct {
+    LastValueKind kind;
+    int offset;
+    const char *name;
+    const char *reg;
+    int size;
+} LastValueCache;
+
+static LastValueCache last_value = { LASTVAL_NONE, 0, NULL, NULL, 0 };
+
+static int last_value_can_track(Type *t) {
+    if (!t) return 0;
+    if (is_float_type(t)) return 0;
+    if (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION) return 0;
+    if (t->size <= 0 || t->size > 8) return 0;
+    return 1;
+}
+
+static void last_value_clear(void) {
+    last_value.kind = LASTVAL_NONE;
+    last_value.offset = 0;
+    last_value.name = NULL;
+    last_value.reg = NULL;
+    last_value.size = 0;
+}
+
+static void last_value_set_stack(int offset, Type *t) {
+    if (!last_value_can_track(t)) {
+        last_value_clear();
+        return;
+    }
+    last_value.kind = LASTVAL_STACK;
+    last_value.offset = offset;
+    last_value.name = NULL;
+    last_value.reg = NULL;
+    last_value.size = t ? t->size : 0;
+}
+
+static void last_value_set_label(const char *name, Type *t) {
+    if (!last_value_can_track(t)) {
+        last_value_clear();
+        return;
+    }
+    last_value.kind = LASTVAL_LABEL;
+    last_value.offset = 0;
+    last_value.name = name;
+    last_value.reg = NULL;
+    last_value.size = t ? t->size : 0;
+}
+
+static void last_value_set_reg(const char *reg, Type *t) {
+    if (!last_value_can_track(t)) {
+        last_value_clear();
+        return;
+    }
+    last_value.kind = LASTVAL_REG;
+    last_value.offset = 0;
+    last_value.name = NULL;
+    last_value.reg = reg;
+    last_value.size = t ? t->size : 0;
+}
+
+static int last_value_match_stack(int offset, Type *t) {
+    return last_value.kind == LASTVAL_STACK && last_value.offset == offset &&
+           last_value_can_track(t) && last_value.size == (t ? t->size : 0);
+}
+
+static int last_value_match_label(const char *name, Type *t) {
+    return last_value.kind == LASTVAL_LABEL && name && last_value.name &&
+           strcmp(last_value.name, name) == 0 && last_value_can_track(t) &&
+           last_value.size == (t ? t->size : 0);
+}
+
+static int last_value_match_reg(const char *reg, Type *t) {
+    return last_value.kind == LASTVAL_REG && reg && last_value.reg &&
+           strcmp(last_value.reg, reg) == 0 && last_value_can_track(t) &&
+           last_value.size == (t ? t->size : 0);
+}
 
 static int get_local_offset(const char *name) {
     if (!name) return 0;
@@ -2003,6 +2091,7 @@ static void gen_binary_expr(ASTNode *node) {
                 if (use_32bit) emit_inst2("addl", op_imm(imm), op_reg("eax"));
                 else if (imm_needs_reg) emit_inst2("add", op_reg("r10"), op_reg("rax"));
                 else emit_inst2("add", op_imm(imm), op_reg("rax"));
+                last_value_clear();
                 return;
             case TOKEN_MINUS:
                 if (left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY)) {
@@ -2016,38 +2105,45 @@ static void gen_binary_expr(ASTNode *node) {
                 if (use_32bit) emit_inst2("subl", op_imm(imm), op_reg("eax"));
                 else if (imm_needs_reg) emit_inst2("sub", op_reg("r10"), op_reg("rax"));
                 else emit_inst2("sub", op_imm(imm), op_reg("rax"));
+                last_value_clear();
                 return;
             case TOKEN_STAR:
                 if (use_32bit) emit_inst2("imull", op_imm(imm), op_reg("eax"));
                 else if (imm_needs_reg) emit_inst2("imul", op_reg("r10"), op_reg("rax"));
                 else emit_inst2("imul", op_imm(imm), op_reg("rax"));
                 node->resolved_type = left_type;
+                last_value_clear();
                 return;
             case TOKEN_AMPERSAND:
                 if (use_32bit) emit_inst2("andl", op_imm(imm), op_reg("eax"));
                 else if (imm_needs_reg) emit_inst2("and", op_reg("r10"), op_reg("rax"));
                 else emit_inst2("and", op_imm(imm), op_reg("rax"));
                 node->resolved_type = left_type;
+                last_value_clear();
                 return;
             case TOKEN_PIPE:
                 if (use_32bit) emit_inst2("orl", op_imm(imm), op_reg("eax"));
                 else if (imm_needs_reg) emit_inst2("or", op_reg("r10"), op_reg("rax"));
                 else emit_inst2("or", op_imm(imm), op_reg("rax"));
                 node->resolved_type = left_type;
+                last_value_clear();
                 return;
             case TOKEN_CARET:
                 if (use_32bit) emit_inst2("xorl", op_imm(imm), op_reg("eax"));
                 else if (imm_needs_reg) emit_inst2("xor", op_reg("r10"), op_reg("rax"));
                 else emit_inst2("xor", op_imm(imm), op_reg("rax"));
                 node->resolved_type = left_type;
+                last_value_clear();
                 return;
             case TOKEN_LESS_LESS:
                 emit_inst2("shl", op_imm(imm), op_reg("rax"));
                 node->resolved_type = left_type;
+                last_value_clear();
                 return;
             case TOKEN_GREATER_GREATER:
                 emit_inst2("sar", op_imm(imm), op_reg("rax"));
                 node->resolved_type = left_type;
+                last_value_clear();
                 return;
             case TOKEN_EQUAL_EQUAL:
             case TOKEN_BANG_EQUAL:
@@ -2069,6 +2165,7 @@ static void gen_binary_expr(ASTNode *node) {
                 
                 emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
                 node->resolved_type = type_int();
+                last_value_clear();
                 return;
             }
             default: break;  /* fall through to general path */
@@ -2213,6 +2310,7 @@ static void gen_binary_expr(ASTNode *node) {
         }
         default: break;
     }
+    last_value_clear();
 }
 
 static void gen_expression(ASTNode *node) {
@@ -2228,6 +2326,7 @@ static void gen_expression(ASTNode *node) {
             emit_inst2("mov", op_imm(node->data.integer.value), op_reg("rax"));
         }
         node->resolved_type = type_int();
+        last_value_clear();
     } else if (node->type == AST_FLOAT) {
         char label[32];
         sprintf(label, ".LF%d", label_count++);
@@ -2270,12 +2369,17 @@ static void gen_expression(ASTNode *node) {
         } else {
             emit_inst2("movsd", op_label(label), op_reg("xmm0"));
         }
+        last_value_clear();
     } else if (node->type == AST_IDENTIFIER) {
         if (!node->data.identifier.name) { fprintf(stderr, "      Ident: NULL NAME!\n"); return; }
         /* Register allocator: check if variable lives in a register */
         const char *ra_reg = get_local_reg(node->data.identifier.name);
         if (ra_reg) {
             Type *t = get_local_type(node->data.identifier.name);
+            if (last_value_match_reg(ra_reg, t)) {
+                node->resolved_type = t;
+                return;
+            }
             /* Variable is in a register — just move to %rax */
             if (t && t->size == 4) {
                 /* 32-bit: use movl for zero-extension */
@@ -2290,6 +2394,7 @@ static void gen_expression(ASTNode *node) {
                 emit_inst2("mov", op_reg(ra_reg), op_reg("rax"));
             }
             node->resolved_type = t;
+            last_value_set_reg(ra_reg, t);
             return;
         }
         const char *label = get_local_label(node->data.identifier.name);
@@ -2301,12 +2406,18 @@ static void gen_expression(ASTNode *node) {
                 if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_label(label), op_reg("xmm0"));
                 else emit_inst2("movsd", op_label(label), op_reg("xmm0"));
             } else {
+                if (last_value_match_label(label, t)) {
+                    node->resolved_type = t;
+                    return;
+                }
                 if (t && t->size == 1) emit_inst2("movzbq", op_label(label), op_reg("rax"));
                 else if (t && t->size == 2) emit_inst2("movzwq", op_label(label), op_reg("rax"));
                 else if (t && t->size == 4) emit_inst2("movl", op_label(label), op_reg("eax"));
                 else emit_inst2("mov", op_label(label), op_reg("rax"));
             }
             node->resolved_type = t;
+            if (last_value_can_track(t)) last_value_set_label(label, t);
+            else last_value_clear();
             return;
         }
         int offset = get_local_offset(node->data.identifier.name);
@@ -2319,12 +2430,18 @@ static void gen_expression(ASTNode *node) {
                 if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_mem("rbp", offset), op_reg("xmm0"));
                 else emit_inst2("movsd", op_mem("rbp", offset), op_reg("xmm0"));
             } else {
+                if (last_value_match_stack(offset, t)) {
+                    node->resolved_type = t;
+                    return;
+                }
                 if (t && t->size == 1) emit_inst2("movzbq", op_mem("rbp", offset), op_reg("rax"));
                 else if (t && t->size == 2) emit_inst2("movzwq", op_mem("rbp", offset), op_reg("rax"));
                 else if (t && t->size == 4) emit_inst2("movl", op_mem("rbp", offset), op_reg("eax"));
                 else emit_inst2("mov", op_mem("rbp", offset), op_reg("rax"));
             }
             node->resolved_type = t;
+            if (last_value_can_track(t)) last_value_set_stack(offset, t);
+            else last_value_clear();
         } else {
             // Global
             Type *t = get_global_type(node->data.identifier.name);
@@ -2334,12 +2451,18 @@ static void gen_expression(ASTNode *node) {
                 if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_label(node->data.identifier.name), op_reg("xmm0"));
                 else emit_inst2("movsd", op_label(node->data.identifier.name), op_reg("xmm0"));
             } else {
+                if (last_value_match_label(node->data.identifier.name, t)) {
+                    node->resolved_type = t;
+                    return;
+                }
                 if (t && t->size == 1) emit_inst2("movzbq", op_label(node->data.identifier.name), op_reg("rax"));
                 else if (t && t->size == 2) emit_inst2("movzwq", op_label(node->data.identifier.name), op_reg("rax"));
                 else if (t && t->size == 4) emit_inst2("movl", op_label(node->data.identifier.name), op_reg("eax"));
                 else emit_inst2("mov", op_label(node->data.identifier.name), op_reg("rax"));
             }
             node->resolved_type = t;
+            if (last_value_can_track(t)) last_value_set_label(node->data.identifier.name, t);
+            else last_value_clear();
         }
     } else if (node->type == AST_ARRAY_ACCESS) {
         gen_addr(node);
@@ -2360,6 +2483,7 @@ static void gen_expression(ASTNode *node) {
         } else {
             emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
         }
+        last_value_clear();
     } else if (node->type == AST_BINARY_EXPR) {
         gen_binary_expr(node);
     } else if (node->type == AST_PRE_INC || node->type == AST_PRE_DEC || 
@@ -2369,10 +2493,15 @@ static void gen_expression(ASTNode *node) {
         
         Type *t = get_expr_type(node->data.unary.expression);
 
+        const char *ident_name = NULL;
+        if (node->data.unary.expression && node->data.unary.expression->type == AST_IDENTIFIER) {
+            ident_name = node->data.unary.expression->data.identifier.name;
+        }
+
         /* Register allocator fast path: if the operand is an identifier in a register,
          * directly increment/decrement the register without going through memory. */
-        if (node->data.unary.expression && node->data.unary.expression->type == AST_IDENTIFIER) {
-            const char *ra_reg = get_local_reg(node->data.unary.expression->data.identifier.name);
+        if (ident_name) {
+            const char *ra_reg = get_local_reg(ident_name);
             if (ra_reg) {
                 int step = 1;
                 if (t && (t->kind == TYPE_PTR || t->kind == TYPE_ARRAY) && t->data.ptr_to) {
@@ -2392,6 +2521,12 @@ static void gen_expression(ASTNode *node) {
                     emit_inst2("mov", op_reg(ra_reg), op_reg("rax"));
                 }
                 node->resolved_type = t;
+                if (is_pre) {
+                    last_value_set_reg(ra_reg, t);
+                } else {
+                    /* POST: rax has old value, ra_reg has new — cache would be stale */
+                    last_value_clear();
+                }
                 return;
             }
         }
@@ -2442,6 +2577,20 @@ static void gen_expression(ASTNode *node) {
         }
         
         node->resolved_type = t;
+        if (is_pre && ident_name) {
+            /* PRE: rax holds the new value which matches memory — safe to cache */
+            const char *label = get_local_label(ident_name);
+            if (label) {
+                last_value_set_label(label, t);
+            } else {
+                int offset = get_local_offset(ident_name);
+                if (offset != 0) last_value_set_stack(offset, t);
+                else last_value_set_label(ident_name, t);
+            }
+        } else {
+            /* POST: rax holds the OLD pre-increment value — cache would be stale */
+            last_value_clear();
+        }
     } else if (node->type == AST_CAST) {
         gen_expression(node->data.cast.expression);
         Type *src = get_expr_type(node->data.cast.expression);
@@ -2479,6 +2628,7 @@ static void gen_expression(ASTNode *node) {
             // But if we cast int (32/64) to char, we explicitly truncated above.
         }
         node->resolved_type = dst;
+        last_value_clear();
     } else if (node->type == AST_ASSIGN) {
         if (!node->data.assign.left || !node->data.assign.value) { fprintf(stderr, "      Assign: NULL child!\n"); return; }
         ASTNode *left_node = node->data.assign.left;
@@ -2526,6 +2676,7 @@ static void gen_expression(ASTNode *node) {
             }
             stack_offset = pre_assign_stack_offset;
             node->resolved_type = t;
+            last_value_clear();
             return;
         }
 
@@ -2538,6 +2689,7 @@ static void gen_expression(ASTNode *node) {
                 /* Store value from %rax to the register */
                 emit_inst2("mov", op_reg("rax"), op_reg(ra_reg));
                 node->resolved_type = t;
+                last_value_set_reg(ra_reg, t);
                 return;
             }
             const char *label = get_local_label(ident_name);
@@ -2551,6 +2703,8 @@ static void gen_expression(ASTNode *node) {
                     else if (t && t->size == 4) emit_inst2("movl", op_reg("eax"), op_label(label));
                     else emit_inst2("mov", op_reg("rax"), op_label(label));
                 }
+                if (!is_float_type(t)) last_value_set_label(label, t);
+                else last_value_clear();
                 return;
             }
             int offset = get_local_offset(ident_name);
@@ -2564,6 +2718,8 @@ static void gen_expression(ASTNode *node) {
                     else if (t && t->size == 4) emit_inst2("movl", op_reg("eax"), op_mem("rbp", offset));
                     else emit_inst2("mov", op_reg("rax"), op_mem("rbp", offset));
                 }
+                if (!is_float_type(t)) last_value_set_stack(offset, t);
+                else last_value_clear();
             } else if (ident_name) {
                 // Global
                 if (is_float_type(t)) {
@@ -2575,6 +2731,8 @@ static void gen_expression(ASTNode *node) {
                     else if (t && t->size == 4) emit_inst2("movl", op_reg("eax"), op_label(ident_name));
                     else emit_inst2("mov", op_reg("rax"), op_label(ident_name));
                 }
+                if (!is_float_type(t)) last_value_set_label(ident_name, t);
+                else last_value_clear();
             }
         } else {
             if (is_float_type(t)) {
@@ -2585,6 +2743,7 @@ static void gen_expression(ASTNode *node) {
                 else emit_inst2("movsd", op_reg("xmm1"), op_mem("rax", 0));
                 if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm1"), op_reg("xmm0"));
                 else emit_inst2("movsd", op_reg("xmm1"), op_reg("xmm0"));
+                last_value_clear();
             } else {
                 emit_inst1("pushq", op_reg("rax"));
                 gen_addr(left_node);
@@ -2594,6 +2753,7 @@ static void gen_expression(ASTNode *node) {
                 else if (t && t->size == 4) emit_inst2("movl", op_reg("ecx"), op_mem("rax", 0));
                 else emit_inst2("mov", op_reg("rcx"), op_mem("rax", 0));
                 emit_inst2("mov", op_reg("rcx"), op_reg("rax"));
+                last_value_clear();
             }
         }
         node->resolved_type = t;
@@ -2610,8 +2770,10 @@ static void gen_expression(ASTNode *node) {
             emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
         }
         node->resolved_type = ptr_to;
+        last_value_clear();
     } else if (node->type == AST_ADDR_OF) {
         gen_addr(node->data.unary.expression);
+        last_value_clear();
     } else if (node->type == AST_NEG) {
         /* Constant-fold negation of integer literals to avoid double-negation
            when the literal overflows int32 in op_imm */
@@ -2639,6 +2801,7 @@ static void gen_expression(ASTNode *node) {
             emit_inst1("neg", op_reg("rax"));
         }
         node->resolved_type = t;
+        last_value_clear();
     } else if (node->type == AST_NOT) {
         gen_expression(node->data.unary.expression);
         Type *t = get_expr_type(node->data.unary.expression);
@@ -2659,10 +2822,12 @@ static void gen_expression(ASTNode *node) {
             emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
         }
         node->resolved_type = type_int();
+        last_value_clear();
     } else if (node->type == AST_BITWISE_NOT) {
         gen_expression(node->data.unary.expression);
         emit_inst1("not", op_reg("rax"));
         node->resolved_type = get_expr_type(node->data.unary.expression);
+        last_value_clear();
     } else if (node->type == AST_MEMBER_ACCESS) {
         gen_addr(node);
         Type *mt = get_expr_type(node);
@@ -2685,6 +2850,7 @@ static void gen_expression(ASTNode *node) {
         } else {
             emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
         }
+        last_value_clear();
     } else if (node->type == AST_CALL) {
         // Save initial stack offset to restore later
         int initial_stack_offset = stack_offset;
@@ -2779,6 +2945,7 @@ static void gen_expression(ASTNode *node) {
         
         // Restore stack offset (sret space remains allocated on stack, cleaned up by leave)
         stack_offset = initial_stack_offset - sret_alloc;
+        last_value_clear();
     } else if (node->type == AST_IF) {
         // Ternary expression: condition ? then_expr : else_expr
         int label_else = label_count++;
@@ -2798,6 +2965,7 @@ static void gen_expression(ASTNode *node) {
         gen_expression(node->data.if_stmt.else_branch);
         
         emit_label_def(l_end);
+        last_value_clear();
     } else if (node->type == AST_STRING) {
         char label[32];
         sprintf(label, ".LC%d", label_count++);
@@ -2821,6 +2989,7 @@ static void gen_expression(ASTNode *node) {
         
         // Load address of the string
         emit_inst2("lea", op_label(label), op_reg("rax"));
+        last_value_clear();
     }
 }
 
@@ -3379,6 +3548,7 @@ static void gen_statement(ASTNode *node) {
                     emit_inst2("xor", op_reg("rax"), op_reg("rax"));
                     if (node->resolved_type->kind == TYPE_FLOAT) emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm0"));
                     else emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm0"));
+                    last_value_clear();
                 } else {
                     if (g_compiler_options.opt_level >= OPT_O1) {
                         emit_inst2("xor", op_reg("eax"), op_reg("eax"));
@@ -3418,6 +3588,7 @@ static void gen_statement(ASTNode *node) {
                     // Don't use emit_push_xmm here - stack_offset already adjusted above
                     emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
                     emit_inst2("movsd", op_reg("xmm0"), op_mem("rsp", 0));
+                    last_value_clear();
                 } else {
                     emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
                     if (node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
@@ -3426,6 +3597,8 @@ static void gen_statement(ASTNode *node) {
                         else if (size == 2) emit_inst2("movw", op_reg("ax"), op_mem("rsp", 0));
                         else if (size == 4) emit_inst2("movl", op_reg("eax"), op_mem("rsp", 0));
                         else emit_inst2("mov", op_reg("rax"), op_mem("rsp", 0));
+                        /* Cache: rax holds the value just stored at stack_offset */
+                        last_value_set_stack(stack_offset, node->resolved_type);
                     } else if (node->resolved_type && (node->resolved_type->kind == TYPE_STRUCT || node->resolved_type->kind == TYPE_ARRAY) && node->data.var_decl.initializer && node->data.var_decl.initializer->type != AST_INIT_LIST) {
                         /* Struct/array copy via memcpy: rax has source address from gen_expression */
                         emit_inst2("mov", op_reg("rsp"), op_reg("rdi"));
@@ -3504,6 +3677,7 @@ static void gen_statement(ASTNode *node) {
             locals_count = saved_locals_count;
         }
         emit_label_def(l_end);
+        last_value_clear();
     } else if (node->type == AST_WHILE) {
         int label_start = label_count++;
         int label_end = label_count++;
@@ -3545,6 +3719,7 @@ static void gen_statement(ASTNode *node) {
         emit_inst1("jmp", op_label(l_start));
         
         emit_label_def(l_end);
+        last_value_clear();
     } else if (node->type == AST_DO_WHILE) {
         int label_start = label_count++;
         int label_continue = label_count++; // condition check
@@ -3580,10 +3755,12 @@ static void gen_statement(ASTNode *node) {
         emit_inst1("jne", op_label(l_start));
         
         emit_label_def(l_end);
+        last_value_clear();
     } else if (node->type == AST_FOR) {
         /* Vectorized loop: emit SSE packed instructions */
         if (node->vec_info) {
             gen_vectorized_loop(node);
+            last_value_clear();
             return;
         }
         int label_start = label_count++;
@@ -3630,6 +3807,7 @@ static void gen_statement(ASTNode *node) {
         emit_inst1("jmp", op_label(l_start));
         
         emit_label_def(l_end);
+        last_value_clear();
     } else if (node->type == AST_BREAK) {
         if (break_label_ptr > 0) {
             // Restore RSP to loop entry value before breaking
@@ -3645,6 +3823,7 @@ static void gen_statement(ASTNode *node) {
             char l_break[32];
             sprintf(l_break, ".L%d", break_label_stack[break_label_ptr - 1]);
             emit_inst1("jmp", op_label(l_break));
+            last_value_clear();
         } else {
             fprintf(stderr, "Error: 'break' outside of loop or switch\n");
         }
@@ -3663,11 +3842,13 @@ static void gen_statement(ASTNode *node) {
             char l_cont[32];
             sprintf(l_cont, ".L%d", continue_label_stack[continue_label_ptr - 1]);
             emit_inst1("jmp", op_label(l_cont));
+            last_value_clear();
         } else {
             fprintf(stderr, "Error: 'continue' outside of loop\n");
         }
     } else if (node->type == AST_GOTO) {
         emit_inst1("jmp", op_label(node->data.goto_stmt.label));
+        last_value_clear();
     } else if (node->type == AST_LABEL) {
         emit_label_def(node->data.label_stmt.name);
     } else if (node->type == AST_SWITCH) {
@@ -3718,6 +3899,7 @@ static void gen_statement(ASTNode *node) {
         loop_saved_stack_ptr--;
 
         emit_label_def(l_end);
+        last_value_clear();
     } else if (node->type == AST_CASE) {
         if (node->resolved_type) {
             /* Restore stack_offset to the switch entry value.
@@ -3758,6 +3940,7 @@ static void gen_statement(ASTNode *node) {
             emit_inst0("ud2");
             emit_label_def(l_ok);
         }
+        last_value_clear();
     } else {
         gen_expression(node);
     }
@@ -3826,6 +4009,7 @@ static void gen_function(ASTNode *node) {
     current_func_name = node->data.function.name;
     stack_offset = 0;
     sret_offset = 0;
+    last_value_clear();
     
     /* If this function returns a struct, %rdi holds the hidden return pointer.
      * Save it to a local slot and shift all parameter registers by 1. */
