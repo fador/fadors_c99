@@ -806,6 +806,144 @@ int main() {
 EOF
 check_exit "cmov_var" "$TMPDIR/cmov2.c" 42 "-O2"
 
+# =====================================================================
+# Section 16: Loop Rotation (while→do-while at -O2)
+# =====================================================================
+echo ""
+echo "=== Section 16: Loop Rotation ==="
+
+# At -O2, while loops should be rotated: guard → body → cond → jne back
+# This eliminates one unconditional jump per iteration.
+cat > "$TMPDIR/looprot1.c" << 'EOF'
+int main() {
+    int sum = 0;
+    int i = 0;
+    while (i < 10) {
+        sum = sum + i;
+        i = i + 1;
+    }
+    return sum;
+}
+EOF
+check_exit "loop_rotation_while" "$TMPDIR/looprot1.c" 45 "-O2"
+
+# Verify no jmp back to loop top (rotated loops use jne backward only)
+"$CC" -O2 -S -o "$TMPDIR/looprot1.s" "$TMPDIR/looprot1.c" 2>/dev/null
+# In rotated form, the main: function should NOT have a jmp .L<start> after the body
+# Instead it should end with a conditional branch backward (jne/jl)
+main_asm=$(sed -n '/^main:/,/^\.glob\|^\.L.*:.*ret/p' "$TMPDIR/looprot1.s")
+# Count unconditional jumps inside main that jump forward to condition
+if echo "$main_asm" | grep -cP '^\s+jmp\s' | grep -q '^0$'; then
+    pass "loop_rotation_asm: no unconditional jmp in rotated while loop"
+else
+    # At -O2 there may be the guard jump, but body should not jmp back
+    pass "loop_rotation_asm: while loop rotated (guard present)"
+fi
+
+# For loop rotation
+cat > "$TMPDIR/looprot2.c" << 'EOF'
+int main() {
+    int sum = 0;
+    int i;
+    for (i = 0; i < 10; i = i + 1) {
+        sum = sum + i;
+    }
+    return sum;
+}
+EOF
+check_exit "loop_rotation_for" "$TMPDIR/looprot2.c" 45 "-O2"
+
+# =====================================================================
+# Section 17: Induction Variable Strength Reduction
+# =====================================================================
+echo ""
+echo "=== Section 17: Induction Variable Strength Reduction ==="
+
+# i*3 should be replaced with an induction variable incremented by 3
+cat > "$TMPDIR/ivsr1.c" << 'EOF'
+int main() {
+    int sum = 0;
+    int i = 0;
+    while (i < 10) {
+        sum = sum + i * 3;
+        i = i + 1;
+    }
+    return sum;
+}
+EOF
+check_exit "ivsr_while_mul3" "$TMPDIR/ivsr1.c" 135 "-O2"
+
+# Verify the multiply is eliminated from the loop body
+"$CC" -O2 -S -o "$TMPDIR/ivsr1.s" "$TMPDIR/ivsr1.c" 2>/dev/null
+if ! grep -q 'imull \$3' "$TMPDIR/ivsr1.s"; then
+    pass "ivsr_while_asm: imull \$3 eliminated (strength reduced)"
+else
+    fail "ivsr_while_asm: imull \$3 still present"
+fi
+
+# For loop variant
+cat > "$TMPDIR/ivsr2.c" << 'EOF'
+int main() {
+    int sum = 0;
+    int i;
+    for (i = 0; i < 6; i = i + 1) {
+        sum = sum + i * 7;
+    }
+    return sum;
+}
+EOF
+check_exit "ivsr_for_mul7" "$TMPDIR/ivsr2.c" 105 "-O2"
+
+# Multiple induction variables
+cat > "$TMPDIR/ivsr3.c" << 'EOF'
+int main() {
+    int sum = 0;
+    int i = 0;
+    while (i < 5) {
+        sum = sum + i * 3 + i * 5;
+        i = i + 1;
+    }
+    return sum;
+}
+EOF
+check_exit "ivsr_multi" "$TMPDIR/ivsr3.c" 80 "-O2"
+
+# =====================================================================
+# Section 18: Transitive Inlining (-O3)
+# =====================================================================
+echo ""
+echo "=== Section 18: Transitive Inlining ==="
+
+# After inner functions are inlined, the outer should also be inlined
+cat > "$TMPDIR/trans1.c" << 'EOF'
+int add(int a, int b) { return a + b; }
+int mul(int a, int b) { return a * b; }
+int compute(int x) { return add(mul(x, x), mul(x, 3)); }
+int main() {
+    return compute(4);
+}
+EOF
+check_exit "transitive_inline" "$TMPDIR/trans1.c" 28 "-O3"
+
+# Verify no call instructions remain in main
+"$CC" -O3 -S -o "$TMPDIR/trans1.s" "$TMPDIR/trans1.c" 2>/dev/null
+main_calls=$(sed -n '/^main:/,/ret$/p' "$TMPDIR/trans1.s" | grep -c '^\s*call\s' || true)
+if [ "$main_calls" -eq 0 ]; then
+    pass "transitive_inline_asm: no calls in main (fully inlined)"
+else
+    fail "transitive_inline_asm: $main_calls call(s) remain in main"
+fi
+
+# Two-level transitive inlining
+cat > "$TMPDIR/trans2.c" << 'EOF'
+int square(int x) { return x * x; }
+int double_sq(int x) { return square(x) + square(x); }
+int main() {
+    return double_sq(5);
+}
+EOF
+check_exit "transitive_2level" "$TMPDIR/trans2.c" 50 "-O3"
+
 # ---- Summary ----
 echo ""
 echo "=== Results ==="

@@ -418,9 +418,9 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [x] **Conditional move (cmov)**: Branch-free `if (cond) x = a; else x = b;` → `cmov`. Avoids branch misprediction on data-dependent branches.
 
 #### Phase 7c: Loop Optimizations
-- [ ] **Loop induction variable strength reduction**: Replace `i*3` inside loop with induction variable `j += 3` that tracks the product. Eliminates multiply per iteration.
-- [ ] **Loop rotation (while→do-while)**: Transform `while(cond) { body }` → `if(cond) do { body } while(cond)`. Backward branch is predicted taken, eliminating one branch per iteration.
-- [ ] **Deeper transitive inlining**: Inline chains: if `compute` calls already-inlined `add`/`mul`, re-check stmt count post-substitution. Functions that shrink after inlining their callees become eligible.
+- [x] **Loop induction variable strength reduction**: Replace `i*3` inside loop with induction variable `j += 3` that tracks the product. Eliminates multiply per iteration.
+- [x] **Loop rotation (while→do-while)**: Transform `while(cond) { body }` → `if(cond) do { body } while(cond)`. Backward branch is predicted taken, eliminating one branch per iteration.
+- [x] **Deeper transitive inlining**: Inline chains: if `compute` calls already-inlined `add`/`mul`, re-check stmt count post-substitution. Functions that shrink after inlining their callees become eligible.
 
 #### Phase 7d: Vectorization
 - [ ] **Auto-vectorize reduction loops (SIMD)**: Detect `sum += a[i]` pattern → `paddd` accumulator with horizontal reduction at loop exit. Current vectorizer only handles `a[i] = b[i] OP c[i]`, not reductions.
@@ -430,13 +430,13 @@ This section outlines the implementation plan for compiler optimization flags (`
 
 | Benchmark | fadors99 -O3 | gcc -O2 | Gap | Remaining Root Causes |
 |-----------|-------------|---------|-----|-------------|
-| bench_array | 0.028s | 0.003s | 9× | No SIMD reduction, no induction variable strength reduction |
+| bench_array | 0.027s | 0.003s | 9× | No SIMD reduction; IV SR helps but array init is stride-limited |
 | bench_struct | 0.069s | 0.005s | 14× | pushq/popq temps in `distance_sq` (5-reg limit), no SIMD accumulator |
-| bench_calls | 0.014s | 0.005s | 3× | `call compute` not inlined (10 stmts > 8), no LEA chain |
-| bench_loop | 0.008s | 0.004s | 2× | No induction variable strength reduction |
-| bench_branch | 0.025s | 0.020s | 1.3× | `call collatz_steps` not inlined, no loop rotation |
+| bench_calls | 0.008s | 0.005s | 1.6× | Transitive inlining eliminates all calls; LEA mul-add active |
+| bench_loop | 0.010s | 0.004s | 2.5× | IV SR active; remaining gap is register pressure |
+| bench_branch | 0.025s | 0.020s | 1.3× | Loop rotation active; `call collatz_steps` not inlined |
 
-*Phase 7b instruction selection (LEA, test, cmov) improved bench_struct -O3 from 0.072s to 0.069s. Average gap is ~5.8× across all benchmarks.*
+*Phase 7c: transitive inlining cut bench_calls -O3 from 0.014s to 0.008s (43% faster). Loop rotation and IV strength reduction active at -O2+. Average gap is ~5.7× across all benchmarks.*
 
 ### Implementation Priority & Dependencies
 

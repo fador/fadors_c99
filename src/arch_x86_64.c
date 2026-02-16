@@ -3790,39 +3790,85 @@ static void gen_statement(ASTNode *node) {
         char l_start[32], l_end[32];
         sprintf(l_start, ".L%d", label_start);
         sprintf(l_end, ".L%d", label_end);
-        
-        emit_label_def(l_start);
-        gen_expression(node->data.while_stmt.condition);
-        emit_inst2("test", op_reg("rax"), op_reg("rax"));
-        emit_inst1("je", op_label(l_end));
-        
-        int saved_stack_offset = stack_offset;
-        int saved_locals_count = locals_count;
-        
-        int lsp_idx = loop_saved_stack_ptr;
-        loop_saved_stack_offset[lsp_idx] = saved_stack_offset;
-        loop_saved_locals_count[lsp_idx] = saved_locals_count;
-        loop_saved_stack_ptr = lsp_idx + 1;
-        int blp_idx = break_label_ptr;
-        break_label_stack[blp_idx] = label_end;
-        break_label_ptr = blp_idx + 1;
-        int clp_idx = continue_label_ptr;
-        continue_label_stack[clp_idx] = label_start;
-        continue_label_ptr = clp_idx + 1;
-        gen_statement(node->data.while_stmt.body);
-        break_label_ptr--;
-        continue_label_ptr--;
-        loop_saved_stack_ptr--;
-        
-        // Restore RSP to loop entry value using rbp-relative addressing
-        // This correctly handles all runtime paths (if/else branches with different var decls)
-        if (saved_stack_offset != stack_offset) {
-            emit_inst2("lea", op_mem("rbp", saved_stack_offset), op_reg("rsp"));
+
+        if (g_compiler_options.opt_level >= OPT_O2) {
+            /* Loop rotation: while(cond){body} → if(cond) do{body}while(cond)
+               Eliminates one unconditional jmp per iteration.
+               The backward branch (jne .Lstart) is predicted taken by the CPU. */
+            int label_continue = label_count++;
+            char l_cont[32];
+            sprintf(l_cont, ".L%d", label_continue);
+
+            /* Guard: skip loop entirely if condition is false */
+            gen_expression(node->data.while_stmt.condition);
+            emit_inst2("test", op_reg("rax"), op_reg("rax"));
+            emit_inst1("je", op_label(l_end));
+
+            /* Loop body */
+            emit_label_def(l_start);
+
+            int saved_stack_offset = stack_offset;
+            int saved_locals_count = locals_count;
+
+            int lsp_idx = loop_saved_stack_ptr;
+            loop_saved_stack_offset[lsp_idx] = saved_stack_offset;
+            loop_saved_locals_count[lsp_idx] = saved_locals_count;
+            loop_saved_stack_ptr = lsp_idx + 1;
+            int blp_idx = break_label_ptr;
+            break_label_stack[blp_idx] = label_end;
+            break_label_ptr = blp_idx + 1;
+            int clp_idx = continue_label_ptr;
+            continue_label_stack[clp_idx] = label_continue;
+            continue_label_ptr = clp_idx + 1;
+            gen_statement(node->data.while_stmt.body);
+            break_label_ptr--;
+            continue_label_ptr--;
+            loop_saved_stack_ptr--;
+
+            if (saved_stack_offset != stack_offset) {
+                emit_inst2("lea", op_mem("rbp", saved_stack_offset), op_reg("rsp"));
+            }
+            stack_offset = saved_stack_offset;
+            locals_count = saved_locals_count;
+
+            /* Continue label + backward condition check */
+            emit_label_def(l_cont);
+            gen_expression(node->data.while_stmt.condition);
+            emit_inst2("test", op_reg("rax"), op_reg("rax"));
+            emit_inst1("jne", op_label(l_start));
+        } else {
+            /* Original while pattern: condition at top, jmp back at bottom */
+            emit_label_def(l_start);
+            gen_expression(node->data.while_stmt.condition);
+            emit_inst2("test", op_reg("rax"), op_reg("rax"));
+            emit_inst1("je", op_label(l_end));
+
+            int saved_stack_offset = stack_offset;
+            int saved_locals_count = locals_count;
+
+            int lsp_idx = loop_saved_stack_ptr;
+            loop_saved_stack_offset[lsp_idx] = saved_stack_offset;
+            loop_saved_locals_count[lsp_idx] = saved_locals_count;
+            loop_saved_stack_ptr = lsp_idx + 1;
+            int blp_idx = break_label_ptr;
+            break_label_stack[blp_idx] = label_end;
+            break_label_ptr = blp_idx + 1;
+            int clp_idx = continue_label_ptr;
+            continue_label_stack[clp_idx] = label_start;
+            continue_label_ptr = clp_idx + 1;
+            gen_statement(node->data.while_stmt.body);
+            break_label_ptr--;
+            continue_label_ptr--;
+            loop_saved_stack_ptr--;
+
+            if (saved_stack_offset != stack_offset) {
+                emit_inst2("lea", op_mem("rbp", saved_stack_offset), op_reg("rsp"));
+            }
+            stack_offset = saved_stack_offset;
+            locals_count = saved_locals_count;
+
+            emit_inst1("jmp", op_label(l_start));
         }
-        stack_offset = saved_stack_offset;
-        locals_count = saved_locals_count;
-        
-        emit_inst1("jmp", op_label(l_start));
         
         emit_label_def(l_end);
         last_value_clear();
@@ -3880,37 +3926,77 @@ static void gen_statement(ASTNode *node) {
         if (node->data.for_stmt.init) {
             gen_statement(node->data.for_stmt.init);
         }
-        
-        emit_label_def(l_start);
-        if (node->data.for_stmt.condition) {
+
+        if (g_compiler_options.opt_level >= OPT_O2 && node->data.for_stmt.condition) {
+            /* Loop rotation: for(init;cond;incr){body}
+               → init; if(cond) do { body; incr; } while(cond);
+               Eliminates one unconditional jmp per iteration. */
+
+            /* Guard: skip loop if condition is initially false */
             gen_expression(node->data.for_stmt.condition);
             emit_inst2("test", op_reg("rax"), op_reg("rax"));
             emit_inst1("je", op_label(l_end));
+
+            /* Loop body */
+            emit_label_def(l_start);
+
+            int saved_stack_offset_for = stack_offset;
+            int saved_locals_count_for = locals_count;
+
+            { int i0 = loop_saved_stack_ptr; loop_saved_stack_offset[i0] = saved_stack_offset_for; loop_saved_locals_count[i0] = saved_locals_count_for; loop_saved_stack_ptr = i0 + 1; }
+            { int i1 = break_label_ptr; break_label_stack[i1] = label_end; break_label_ptr = i1 + 1; }
+            { int i2 = continue_label_ptr; continue_label_stack[i2] = label_continue; continue_label_ptr = i2 + 1; }
+            gen_statement(node->data.for_stmt.body);
+            continue_label_ptr--;
+            break_label_ptr--;
+            loop_saved_stack_ptr--;
+
+            if (saved_stack_offset_for != stack_offset) {
+                emit_inst2("lea", op_mem("rbp", saved_stack_offset_for), op_reg("rsp"));
+            }
+            stack_offset = saved_stack_offset_for;
+            locals_count = saved_locals_count_for;
+
+            /* Continue label = increment + backward condition check */
+            emit_label_def(l_cont);
+            if (node->data.for_stmt.increment) {
+                gen_expression(node->data.for_stmt.increment);
+            }
+            gen_expression(node->data.for_stmt.condition);
+            emit_inst2("test", op_reg("rax"), op_reg("rax"));
+            emit_inst1("jne", op_label(l_start));
+        } else {
+            /* Original for pattern: condition at top, jmp back */
+            emit_label_def(l_start);
+            if (node->data.for_stmt.condition) {
+                gen_expression(node->data.for_stmt.condition);
+                emit_inst2("test", op_reg("rax"), op_reg("rax"));
+                emit_inst1("je", op_label(l_end));
+            }
+
+            int saved_stack_offset_for = stack_offset;
+            int saved_locals_count_for = locals_count;
+
+            { int i0 = loop_saved_stack_ptr; loop_saved_stack_offset[i0] = saved_stack_offset_for; loop_saved_locals_count[i0] = saved_locals_count_for; loop_saved_stack_ptr = i0 + 1; }
+            { int i1 = break_label_ptr; break_label_stack[i1] = label_end; break_label_ptr = i1 + 1; }
+            { int i2 = continue_label_ptr; continue_label_stack[i2] = label_continue; continue_label_ptr = i2 + 1; }
+            gen_statement(node->data.for_stmt.body);
+            continue_label_ptr--;
+            break_label_ptr--;
+            loop_saved_stack_ptr--;
+
+            if (saved_stack_offset_for != stack_offset) {
+                emit_inst2("lea", op_mem("rbp", saved_stack_offset_for), op_reg("rsp"));
+            }
+            stack_offset = saved_stack_offset_for;
+            locals_count = saved_locals_count_for;
+
+            emit_label_def(l_cont);
+            if (node->data.for_stmt.increment) {
+                gen_expression(node->data.for_stmt.increment);
+            }
+            emit_inst1("jmp", op_label(l_start));
         }
-        
-        int saved_stack_offset_for = stack_offset;
-        int saved_locals_count_for = locals_count;
-        
-        { int i0 = loop_saved_stack_ptr; loop_saved_stack_offset[i0] = saved_stack_offset_for; loop_saved_locals_count[i0] = saved_locals_count_for; loop_saved_stack_ptr = i0 + 1; }
-        { int i1 = break_label_ptr; break_label_stack[i1] = label_end; break_label_ptr = i1 + 1; }
-        { int i2 = continue_label_ptr; continue_label_stack[i2] = label_continue; continue_label_ptr = i2 + 1; }
-        gen_statement(node->data.for_stmt.body);
-        continue_label_ptr--;
-        break_label_ptr--;
-        loop_saved_stack_ptr--;
-        
-        // Restore RSP to loop entry value
-        if (saved_stack_offset_for != stack_offset) {
-            emit_inst2("lea", op_mem("rbp", saved_stack_offset_for), op_reg("rsp"));
-        }
-        stack_offset = saved_stack_offset_for;
-        locals_count = saved_locals_count_for;
-        
-        emit_label_def(l_cont);
-        if (node->data.for_stmt.increment) {
-            gen_expression(node->data.for_stmt.increment);
-        }
-        emit_inst1("jmp", op_label(l_start));
         
         emit_label_def(l_end);
         last_value_clear();

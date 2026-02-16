@@ -51,7 +51,7 @@ All test scripts live in the project root. They default to `build_linux/fadors99
 | Script | Tests | What It Verifies |
 |--------|-------|-----------------|
 | `test_obj.sh` | ~73 | Object file mode (`-c`) correctness |
-| `test_opt.sh` | ~72 | Optimization passes (`-O1`, `-O2`) |
+| `test_opt.sh` | ~82 | Optimization passes (`-O1`, `-O2`, `-O3`) |
 | `test_stage1.sh` | ~76 | Stage-1 self-compiled compiler correctness |
 | `test_linker.sh` | ~72 | Built-in ELF linker mode |
 | `test_debug.sh` | ~35 | DWARF debug symbols + GDB/LLDB |
@@ -104,7 +104,7 @@ Tests that `-O1` and `-O2` optimizations produce correct results and improve cod
 ./test_opt.sh [compiler_path]
 ```
 
-**Sections tested** (15 total):
+**Sections tested** (18 total):
 1. Constant Folding — compile-time evaluation
 2. Strength Reduction — `*2^n` → `<<n`
 3. Dead Code Elimination — unreachable removal
@@ -120,6 +120,9 @@ Tests that `-O1` and `-O2` optimizations produce correct results and improve cod
 13. LEA Multiply-Add — `imul $3/5/9` → `lea` peephole
 14. `test` vs `cmp $0` — `cmpl $0` → `testl` shorter encoding
 15. Conditional Move — `cmov` for simple ternary expressions
+16. Loop Rotation — while/for `jmp` eliminated at -O2 via do-while transform
+17. Induction Variable Strength Reduction — `i*k` → additive induction variable
+18. Transitive Inlining — multi-level inline chains at -O3
 
 ### test_stage1.sh — Stage-1 Compiler Tests
 
@@ -257,11 +260,11 @@ REPS=5 ./bench.sh                  # More repetitions for stability
 
 | Benchmark | -O0 | -O1 | -O2 | -O3 | gcc -O2 |
 |-----------|-----|-----|-----|-----|---------|
-| bench_array | 0.083s | 0.077s | 0.028s | 0.028s | 0.003s |
-| bench_branch | 0.039s | 0.026s | 0.024s | 0.025s | 0.020s |
-| bench_calls | 0.067s | 0.060s | 0.014s | 0.014s | 0.005s |
-| bench_loop | 0.019s | 0.010s | 0.008s | 0.008s | 0.004s |
-| bench_struct | 0.139s | 0.109s | 0.078s | 0.069s | 0.005s |
+| bench_array | 0.083s | 0.078s | 0.026s | 0.027s | 0.003s |
+| bench_branch | 0.040s | 0.028s | 0.025s | 0.025s | 0.020s |
+| bench_calls | 0.066s | 0.060s | 0.013s | 0.008s | 0.005s |
+| bench_loop | 0.019s | 0.010s | 0.010s | 0.010s | 0.004s |
+| bench_struct | 0.139s | 0.110s | 0.072s | 0.069s | 0.005s |
 
 ## Test File Conventions
 

@@ -1308,6 +1308,11 @@ static void o2_propagate_block(ASTNode *block) {
    every call site, causing icache pressure without register-allocator
    benefit.  always_inline / __forceinline bypass this limit. */
 #define MAX_INLINE_EXPR_NODES 4
+/* Elevated limit for transitive inlining at -O3: after callees are inlined,
+   the callers' return expressions may grow but inlining is still worthwhile
+   as it eliminates call overhead and enables further constant folding. */
+#define MAX_INLINE_EXPR_NODES_TRANSITIVE 16
+static int g_inline_expr_limit = MAX_INLINE_EXPR_NODES;
 
 /* Count AST nodes in an expression tree (cheap recursive). */
 static int count_expr_nodes(ASTNode *n) {
@@ -1511,10 +1516,10 @@ static void find_inline_candidates(ASTNode *program) {
            that harms icache without register-allocator to exploit it.
            Functions marked inline/always_inline bypass this limit.
            PGO: hot functions get a higher expression node limit. */
-        int max_expr_nodes = MAX_INLINE_EXPR_NODES;
+        int max_expr_nodes = g_inline_expr_limit;
         if (g_pgo_profile && fn->data.function.name &&
             pgo_is_hot(g_pgo_profile, fn->data.function.name))
-            max_expr_nodes = MAX_INLINE_EXPR_NODES * 4;
+            max_expr_nodes = g_inline_expr_limit * 4;
         if (fn->data.function.inline_hint < 1 &&
             count_expr_nodes(stmt->data.return_stmt.expression) > max_expr_nodes)
             continue;
@@ -2781,6 +2786,575 @@ static void o3_unroll_loops(ASTNode *node) {
 /* strength reduction pass. No additional code needed here.)          */
 
 /* ================================================================== */
+/* -O2: Loop Induction Variable Strength Reduction                    */
+/*                                                                    */
+/* Detects patterns of the form:                                      */
+/*   i = START;                                                       */
+/*   while (i < N) {                                                  */
+/*       ... i * CONST ...                                            */
+/*       i = i + STEP;                                                */
+/*   }                                                                */
+/* and transforms them to:                                            */
+/*   i = START;                                                       */
+/*   int _iv0 = START * CONST;                                        */
+/*   while (i < N) {                                                  */
+/*       ... _iv0 ...                                                 */
+/*       i = i + STEP;                                                */
+/*       _iv0 = _iv0 + STEP * CONST;                                  */
+/*   }                                                                */
+/* Eliminates a multiply per loop iteration by replacing it with an   */
+/* additive induction variable.                                       */
+/* ================================================================== */
+
+static int iv_counter = 0;
+
+/* Check if expr is `varname * const` or `const * varname`.
+   Returns the constant multiplier, or 0 if no match. */
+static long long iv_match_mul(ASTNode *expr, const char *varname) {
+    if (!expr || expr->type != AST_BINARY_EXPR) return 0;
+    if (expr->data.binary_expr.op != TOKEN_STAR) return 0;
+    ASTNode *l = expr->data.binary_expr.left;
+    ASTNode *r = expr->data.binary_expr.right;
+    if (l && l->type == AST_IDENTIFIER && r && r->type == AST_INTEGER &&
+        strcmp(l->data.identifier.name, varname) == 0)
+        return r->data.integer.value;
+    if (r && r->type == AST_IDENTIFIER && l && l->type == AST_INTEGER &&
+        strcmp(r->data.identifier.name, varname) == 0)
+        return l->data.integer.value;
+    return 0;
+}
+
+/* Count occurrences of `varname * const` (with specific const) in expression tree. */
+static int iv_count_mul_uses(ASTNode *expr, const char *varname, long long mul_const) {
+    if (!expr) return 0;
+    long long m = iv_match_mul(expr, varname);
+    if (m == mul_const) return 1;
+    switch (expr->type) {
+    case AST_BINARY_EXPR:
+        return iv_count_mul_uses(expr->data.binary_expr.left, varname, mul_const) +
+               iv_count_mul_uses(expr->data.binary_expr.right, varname, mul_const);
+    case AST_NEG: case AST_NOT: case AST_BITWISE_NOT:
+    case AST_PRE_INC: case AST_PRE_DEC:
+    case AST_POST_INC: case AST_POST_DEC:
+    case AST_DEREF: case AST_ADDR_OF:
+        return iv_count_mul_uses(expr->data.unary.expression, varname, mul_const);
+    case AST_CAST:
+        return iv_count_mul_uses(expr->data.cast.expression, varname, mul_const);
+    case AST_CALL:
+        { int c = 0;
+          for (size_t i = 0; i < expr->children_count; i++)
+              c += iv_count_mul_uses(expr->children[i], varname, mul_const);
+          return c; }
+    case AST_ARRAY_ACCESS:
+        return iv_count_mul_uses(expr->data.array_access.array, varname, mul_const) +
+               iv_count_mul_uses(expr->data.array_access.index, varname, mul_const);
+    case AST_MEMBER_ACCESS:
+        return iv_count_mul_uses(expr->data.member_access.struct_expr, varname, mul_const);
+    case AST_IF:
+        return iv_count_mul_uses(expr->data.if_stmt.condition, varname, mul_const) +
+               iv_count_mul_uses(expr->data.if_stmt.then_branch, varname, mul_const) +
+               iv_count_mul_uses(expr->data.if_stmt.else_branch, varname, mul_const);
+    case AST_ASSIGN:
+        return iv_count_mul_uses(expr->data.assign.left, varname, mul_const) +
+               iv_count_mul_uses(expr->data.assign.value, varname, mul_const);
+    default: return 0;
+    }
+}
+
+/* Count occurrences of `varname * const` in a statement tree. */
+static int iv_count_mul_in_stmt(ASTNode *stmt, const char *varname, long long mul_const) {
+    if (!stmt) return 0;
+    switch (stmt->type) {
+    case AST_BLOCK:
+        { int c = 0;
+          for (size_t i = 0; i < stmt->children_count; i++)
+              c += iv_count_mul_in_stmt(stmt->children[i], varname, mul_const);
+          return c; }
+    case AST_RETURN:
+        return stmt->data.return_stmt.expression ?
+               iv_count_mul_uses(stmt->data.return_stmt.expression, varname, mul_const) : 0;
+    case AST_VAR_DECL:
+        return stmt->data.var_decl.initializer ?
+               iv_count_mul_uses(stmt->data.var_decl.initializer, varname, mul_const) : 0;
+    case AST_ASSIGN:
+        return iv_count_mul_uses(stmt->data.assign.value, varname, mul_const);
+    case AST_IF:
+        return iv_count_mul_uses(stmt->data.if_stmt.condition, varname, mul_const) +
+               iv_count_mul_in_stmt(stmt->data.if_stmt.then_branch, varname, mul_const) +
+               iv_count_mul_in_stmt(stmt->data.if_stmt.else_branch, varname, mul_const);
+    case AST_WHILE: case AST_DO_WHILE:
+        return iv_count_mul_uses(stmt->data.while_stmt.condition, varname, mul_const) +
+               iv_count_mul_in_stmt(stmt->data.while_stmt.body, varname, mul_const);
+    case AST_FOR:
+        return iv_count_mul_in_stmt(stmt->data.for_stmt.init, varname, mul_const) +
+               iv_count_mul_uses(stmt->data.for_stmt.condition, varname, mul_const) +
+               iv_count_mul_uses(stmt->data.for_stmt.increment, varname, mul_const) +
+               iv_count_mul_in_stmt(stmt->data.for_stmt.body, varname, mul_const);
+    default:
+        if (stmt->type == AST_CALL || stmt->type == AST_BINARY_EXPR ||
+            stmt->type == AST_NEG || stmt->type == AST_POST_INC ||
+            stmt->type == AST_PRE_INC || stmt->type == AST_POST_DEC ||
+            stmt->type == AST_PRE_DEC)
+            return iv_count_mul_uses(stmt, varname, mul_const);
+        return 0;
+    }
+}
+
+/* Replace all occurrences of `varname * const` with `iv_name` in an expression. */
+static ASTNode *iv_replace_mul(ASTNode *expr, const char *varname, long long mul_const,
+                                const char *iv_name) {
+    if (!expr) return NULL;
+    long long m = iv_match_mul(expr, varname);
+    if (m == mul_const) {
+        ASTNode *id = ast_create_node(AST_IDENTIFIER);
+        id->data.identifier.name = strdup(iv_name);
+        id->line = expr->line;
+        id->resolved_type = expr->resolved_type;
+        return id;
+    }
+    switch (expr->type) {
+    case AST_BINARY_EXPR:
+        expr->data.binary_expr.left = iv_replace_mul(expr->data.binary_expr.left, varname, mul_const, iv_name);
+        expr->data.binary_expr.right = iv_replace_mul(expr->data.binary_expr.right, varname, mul_const, iv_name);
+        return expr;
+    case AST_NEG: case AST_NOT: case AST_BITWISE_NOT:
+    case AST_PRE_INC: case AST_PRE_DEC:
+    case AST_POST_INC: case AST_POST_DEC:
+    case AST_DEREF: case AST_ADDR_OF:
+        expr->data.unary.expression = iv_replace_mul(expr->data.unary.expression, varname, mul_const, iv_name);
+        return expr;
+    case AST_CAST:
+        expr->data.cast.expression = iv_replace_mul(expr->data.cast.expression, varname, mul_const, iv_name);
+        return expr;
+    case AST_CALL:
+        for (size_t i = 0; i < expr->children_count; i++)
+            expr->children[i] = iv_replace_mul(expr->children[i], varname, mul_const, iv_name);
+        return expr;
+    case AST_ARRAY_ACCESS:
+        expr->data.array_access.array = iv_replace_mul(expr->data.array_access.array, varname, mul_const, iv_name);
+        expr->data.array_access.index = iv_replace_mul(expr->data.array_access.index, varname, mul_const, iv_name);
+        return expr;
+    case AST_MEMBER_ACCESS:
+        expr->data.member_access.struct_expr = iv_replace_mul(expr->data.member_access.struct_expr, varname, mul_const, iv_name);
+        return expr;
+    case AST_IF:
+        expr->data.if_stmt.condition = iv_replace_mul(expr->data.if_stmt.condition, varname, mul_const, iv_name);
+        expr->data.if_stmt.then_branch = iv_replace_mul(expr->data.if_stmt.then_branch, varname, mul_const, iv_name);
+        expr->data.if_stmt.else_branch = iv_replace_mul(expr->data.if_stmt.else_branch, varname, mul_const, iv_name);
+        return expr;
+    case AST_ASSIGN:
+        expr->data.assign.left = iv_replace_mul(expr->data.assign.left, varname, mul_const, iv_name);
+        expr->data.assign.value = iv_replace_mul(expr->data.assign.value, varname, mul_const, iv_name);
+        return expr;
+    default: return expr;
+    }
+}
+
+/* Replace `varname * const` with `iv_name` in a statement tree. */
+static void iv_replace_mul_in_stmt(ASTNode *stmt, const char *varname,
+                                    long long mul_const, const char *iv_name) {
+    if (!stmt) return;
+    switch (stmt->type) {
+    case AST_BLOCK:
+        for (size_t i = 0; i < stmt->children_count; i++)
+            iv_replace_mul_in_stmt(stmt->children[i], varname, mul_const, iv_name);
+        break;
+    case AST_RETURN:
+        if (stmt->data.return_stmt.expression)
+            stmt->data.return_stmt.expression = iv_replace_mul(stmt->data.return_stmt.expression, varname, mul_const, iv_name);
+        break;
+    case AST_VAR_DECL:
+        if (stmt->data.var_decl.initializer)
+            stmt->data.var_decl.initializer = iv_replace_mul(stmt->data.var_decl.initializer, varname, mul_const, iv_name);
+        break;
+    case AST_ASSIGN:
+        stmt->data.assign.value = iv_replace_mul(stmt->data.assign.value, varname, mul_const, iv_name);
+        break;
+    case AST_IF:
+        stmt->data.if_stmt.condition = iv_replace_mul(stmt->data.if_stmt.condition, varname, mul_const, iv_name);
+        iv_replace_mul_in_stmt(stmt->data.if_stmt.then_branch, varname, mul_const, iv_name);
+        iv_replace_mul_in_stmt(stmt->data.if_stmt.else_branch, varname, mul_const, iv_name);
+        break;
+    case AST_WHILE: case AST_DO_WHILE:
+        stmt->data.while_stmt.condition = iv_replace_mul(stmt->data.while_stmt.condition, varname, mul_const, iv_name);
+        iv_replace_mul_in_stmt(stmt->data.while_stmt.body, varname, mul_const, iv_name);
+        break;
+    case AST_FOR:
+        iv_replace_mul_in_stmt(stmt->data.for_stmt.init, varname, mul_const, iv_name);
+        stmt->data.for_stmt.condition = iv_replace_mul(stmt->data.for_stmt.condition, varname, mul_const, iv_name);
+        stmt->data.for_stmt.increment = iv_replace_mul(stmt->data.for_stmt.increment, varname, mul_const, iv_name);
+        iv_replace_mul_in_stmt(stmt->data.for_stmt.body, varname, mul_const, iv_name);
+        break;
+    default:
+        if (stmt->type == AST_CALL || stmt->type == AST_BINARY_EXPR ||
+            stmt->type == AST_POST_INC || stmt->type == AST_PRE_INC ||
+            stmt->type == AST_POST_DEC || stmt->type == AST_PRE_DEC) {
+            iv_replace_mul(stmt, varname, mul_const, iv_name);
+        }
+        break;
+    }
+}
+
+/* Detect the loop variable increment in a while loop body.
+   Looks for: varname = varname + STEP  (or STEP + varname)
+   Returns the step, or 0 if not found. */
+static long long iv_find_while_increment(ASTNode *body, const char *varname) {
+    if (!body || body->type != AST_BLOCK) return 0;
+    for (size_t i = 0; i < body->children_count; i++) {
+        ASTNode *s = body->children[i];
+        if (s->type != AST_ASSIGN) continue;
+        ASTNode *lhs = s->data.assign.left;
+        if (!lhs || lhs->type != AST_IDENTIFIER) continue;
+        if (strcmp(lhs->data.identifier.name, varname) != 0) continue;
+        ASTNode *rhs = s->data.assign.value;
+        if (!rhs || rhs->type != AST_BINARY_EXPR) continue;
+        if (rhs->data.binary_expr.op != TOKEN_PLUS) continue;
+        ASTNode *rl = rhs->data.binary_expr.left;
+        ASTNode *rr = rhs->data.binary_expr.right;
+        if (rl && rl->type == AST_IDENTIFIER &&
+            strcmp(rl->data.identifier.name, varname) == 0 &&
+            rr && rr->type == AST_INTEGER)
+            return rr->data.integer.value;
+        if (rr && rr->type == AST_IDENTIFIER &&
+            strcmp(rr->data.identifier.name, varname) == 0 &&
+            rl && rl->type == AST_INTEGER)
+            return rl->data.integer.value;
+    }
+    return 0;
+}
+
+/* Find the index of the loop variable increment statement. */
+static int iv_find_increment_idx(ASTNode *body, const char *varname) {
+    if (!body || body->type != AST_BLOCK) return -1;
+    for (size_t i = 0; i < body->children_count; i++) {
+        ASTNode *s = body->children[i];
+        if (s->type != AST_ASSIGN) continue;
+        ASTNode *lhs = s->data.assign.left;
+        if (!lhs || lhs->type != AST_IDENTIFIER) continue;
+        if (strcmp(lhs->data.identifier.name, varname) != 0) continue;
+        ASTNode *rhs = s->data.assign.value;
+        if (!rhs || rhs->type != AST_BINARY_EXPR) continue;
+        if (rhs->data.binary_expr.op != TOKEN_PLUS) continue;
+        ASTNode *rl = rhs->data.binary_expr.left;
+        ASTNode *rr = rhs->data.binary_expr.right;
+        if ((rl && rl->type == AST_IDENTIFIER &&
+             strcmp(rl->data.identifier.name, varname) == 0 && rr && rr->type == AST_INTEGER) ||
+            (rr && rr->type == AST_IDENTIFIER &&
+             strcmp(rr->data.identifier.name, varname) == 0 && rl && rl->type == AST_INTEGER))
+            return (int)i;
+    }
+    return -1;
+}
+
+/* Find distinct multiplication constants for varname in a while-loop body. */
+static int iv_find_mul_constants(ASTNode *body, const char *varname,
+                                  long long *out_consts, int out_max) {
+    int count = 0;
+    if (!body || body->type != AST_BLOCK) return 0;
+    for (size_t i = 0; i < body->children_count; i++) {
+        ASTNode *s = body->children[i];
+        /* Skip the increment statement (i = i + 1) */
+        if (s->type == AST_ASSIGN && s->data.assign.left &&
+            s->data.assign.left->type == AST_IDENTIFIER &&
+            strcmp(s->data.assign.left->data.identifier.name, varname) == 0) {
+            ASTNode *rhs = s->data.assign.value;
+            if (rhs && rhs->type == AST_BINARY_EXPR &&
+                rhs->data.binary_expr.op == TOKEN_PLUS) continue;
+        }
+        for (long long c = 2; c <= 100; c++) {
+            if (iv_count_mul_in_stmt(s, varname, c) > 0) {
+                int dup = 0;
+                for (int j = 0; j < count; j++) {
+                    if (out_consts[j] == c) { dup = 1; break; }
+                }
+                if (!dup && count < out_max)
+                    out_consts[count++] = c;
+            }
+        }
+    }
+    return count;
+}
+
+/* Apply induction variable strength reduction to a while loop. */
+static int iv_transform_while(ASTNode *block, int loop_idx) {
+    if (!block || block->type != AST_BLOCK) return 0;
+    ASTNode *loop = block->children[loop_idx];
+    if (!loop || loop->type != AST_WHILE) return 0;
+
+    ASTNode *cond = loop->data.while_stmt.condition;
+    ASTNode *body = loop->data.while_stmt.body;
+    if (!cond || !body || body->type != AST_BLOCK) return 0;
+
+    if (cond->type != AST_BINARY_EXPR) return 0;
+    TokenType cond_op = cond->data.binary_expr.op;
+    if (cond_op != TOKEN_LESS && cond_op != TOKEN_LESS_EQUAL &&
+        cond_op != TOKEN_BANG_EQUAL) return 0;
+    ASTNode *cond_left = cond->data.binary_expr.left;
+    if (!cond_left || cond_left->type != AST_IDENTIFIER) return 0;
+    const char *varname = cond_left->data.identifier.name;
+
+    long long step = iv_find_while_increment(body, varname);
+    if (step <= 0) return 0;
+
+    /* Find starting value from the statement before the loop */
+    long long start_val = 0;
+    int found_start = 0;
+    if (loop_idx > 0) {
+        ASTNode *prev = block->children[loop_idx - 1];
+        if (prev->type == AST_VAR_DECL &&
+            prev->data.var_decl.initializer &&
+            prev->data.var_decl.initializer->type == AST_INTEGER &&
+            strcmp(prev->data.var_decl.name, varname) == 0) {
+            start_val = prev->data.var_decl.initializer->data.integer.value;
+            found_start = 1;
+        } else if (prev->type == AST_ASSIGN &&
+                   prev->data.assign.left &&
+                   prev->data.assign.left->type == AST_IDENTIFIER &&
+                   strcmp(prev->data.assign.left->data.identifier.name, varname) == 0 &&
+                   prev->data.assign.value &&
+                   prev->data.assign.value->type == AST_INTEGER) {
+            start_val = prev->data.assign.value->data.integer.value;
+            found_start = 1;
+        }
+    }
+    if (!found_start) return 0;
+
+    long long mul_consts[8];
+    int n_consts = iv_find_mul_constants(body, varname, mul_consts, 8);
+    if (n_consts == 0) return 0;
+
+    int increment_idx = iv_find_increment_idx(body, varname);
+    int transformed = 0;
+
+    for (int ci = 0; ci < n_consts; ci++) {
+        long long mc = mul_consts[ci];
+        long long init_val = start_val * mc;
+        long long step_val = step * mc;
+        int line = loop->line;
+
+        char iv_name[64];
+        sprintf(iv_name, "_iv%d", iv_counter++);
+
+        /* Insert var decl before the loop */
+        ASTNode *iv_decl = ast_create_node(AST_VAR_DECL);
+        iv_decl->data.var_decl.name = strdup(iv_name);
+        iv_decl->data.var_decl.initializer = make_int(init_val, line);
+        iv_decl->data.var_decl.is_static = 0;
+        iv_decl->data.var_decl.is_extern = 0;
+        iv_decl->line = line;
+
+        block->children_count++;
+        block->children = (ASTNode **)realloc(block->children,
+                           sizeof(ASTNode *) * block->children_count);
+        for (size_t j = block->children_count - 1; j > (size_t)loop_idx; j--)
+            block->children[j] = block->children[j - 1];
+        block->children[loop_idx] = iv_decl;
+        loop_idx++;
+
+        /* Replace all varname * mc in body */
+        iv_replace_mul_in_stmt(body, varname, mc, iv_name);
+
+        /* Build: _ivN = _ivN + step_val */
+        ASTNode *iv_incr = ast_create_node(AST_ASSIGN);
+        ASTNode *iv_lhs = ast_create_node(AST_IDENTIFIER);
+        iv_lhs->data.identifier.name = strdup(iv_name);
+        iv_lhs->line = line;
+        ASTNode *iv_add = ast_create_node(AST_BINARY_EXPR);
+        iv_add->data.binary_expr.op = TOKEN_PLUS;
+        ASTNode *iv_ref = ast_create_node(AST_IDENTIFIER);
+        iv_ref->data.identifier.name = strdup(iv_name);
+        iv_ref->line = line;
+        iv_add->data.binary_expr.left = iv_ref;
+        iv_add->data.binary_expr.right = make_int(step_val, line);
+        iv_add->line = line;
+        iv_incr->data.assign.left = iv_lhs;
+        iv_incr->data.assign.value = iv_add;
+        iv_incr->line = line;
+
+        /* Insert after the increment statement */
+        if (increment_idx >= 0) {
+            int ins_pos = increment_idx + 1;
+            body->children_count++;
+            body->children = (ASTNode **)realloc(body->children,
+                              sizeof(ASTNode *) * body->children_count);
+            for (size_t j = body->children_count - 1; j > (size_t)ins_pos; j--)
+                body->children[j] = body->children[j - 1];
+            body->children[ins_pos] = iv_incr;
+            increment_idx++;
+        } else {
+            ast_add_child(body, iv_incr);
+        }
+        transformed = 1;
+    }
+    return transformed;
+}
+
+/* Apply induction variable strength reduction to a for loop. */
+static int iv_transform_for(ASTNode *block, int loop_idx) {
+    if (!block || block->type != AST_BLOCK) return 0;
+    ASTNode *loop = block->children[loop_idx];
+    if (!loop || loop->type != AST_FOR) return 0;
+
+    ASTNode *init = loop->data.for_stmt.init;
+    ASTNode *cond = loop->data.for_stmt.condition;
+    ASTNode *incr = loop->data.for_stmt.increment;
+    ASTNode *body = loop->data.for_stmt.body;
+    if (!init || !cond || !incr || !body) return 0;
+    if (body->type != AST_BLOCK) return 0;
+
+    const char *varname = NULL;
+    long long start_val = 0;
+    if (init->type == AST_VAR_DECL && init->data.var_decl.initializer &&
+        is_const_int(init->data.var_decl.initializer)) {
+        varname = init->data.var_decl.name;
+        start_val = init->data.var_decl.initializer->data.integer.value;
+    } else if (init->type == AST_ASSIGN &&
+               init->data.assign.left &&
+               init->data.assign.left->type == AST_IDENTIFIER &&
+               is_const_int(init->data.assign.value)) {
+        varname = init->data.assign.left->data.identifier.name;
+        start_val = init->data.assign.value->data.integer.value;
+    }
+    if (!varname) return 0;
+
+    long long step = 0;
+    if (incr->type == AST_POST_INC || incr->type == AST_PRE_INC) {
+        if (incr->data.unary.expression &&
+            incr->data.unary.expression->type == AST_IDENTIFIER &&
+            strcmp(incr->data.unary.expression->data.identifier.name, varname) == 0)
+            step = 1;
+    } else if (incr->type == AST_ASSIGN) {
+        if (incr->data.assign.left &&
+            incr->data.assign.left->type == AST_IDENTIFIER &&
+            strcmp(incr->data.assign.left->data.identifier.name, varname) == 0) {
+            ASTNode *rhs = incr->data.assign.value;
+            if (rhs && rhs->type == AST_BINARY_EXPR &&
+                rhs->data.binary_expr.op == TOKEN_PLUS) {
+                ASTNode *rl = rhs->data.binary_expr.left;
+                ASTNode *rr = rhs->data.binary_expr.right;
+                if (rl && rl->type == AST_IDENTIFIER &&
+                    strcmp(rl->data.identifier.name, varname) == 0 &&
+                    rr && rr->type == AST_INTEGER)
+                    step = rr->data.integer.value;
+                else if (rr && rr->type == AST_IDENTIFIER &&
+                         strcmp(rr->data.identifier.name, varname) == 0 &&
+                         rl && rl->type == AST_INTEGER)
+                    step = rl->data.integer.value;
+            }
+        }
+    }
+    if (step <= 0) return 0;
+
+    /* Scan body for varname * const patterns */
+    long long mul_consts[8];
+    int n_consts = 0;
+    for (size_t i = 0; i < body->children_count; i++) {
+        ASTNode *s = body->children[i];
+        for (long long c = 2; c <= 100; c++) {
+            if (iv_count_mul_in_stmt(s, varname, c) > 0) {
+                int dup = 0;
+                for (int j = 0; j < n_consts; j++) {
+                    if (mul_consts[j] == c) { dup = 1; break; }
+                }
+                if (!dup && n_consts < 8)
+                    mul_consts[n_consts++] = c;
+            }
+        }
+    }
+    if (n_consts == 0) return 0;
+
+    int transformed = 0;
+    for (int ci = 0; ci < n_consts; ci++) {
+        long long mc = mul_consts[ci];
+        long long init_val = start_val * mc;
+        long long step_val = step * mc;
+        int line = loop->line;
+
+        char iv_name[64];
+        sprintf(iv_name, "_iv%d", iv_counter++);
+
+        /* Insert var decl before the loop */
+        ASTNode *iv_decl = ast_create_node(AST_VAR_DECL);
+        iv_decl->data.var_decl.name = strdup(iv_name);
+        iv_decl->data.var_decl.initializer = make_int(init_val, line);
+        iv_decl->data.var_decl.is_static = 0;
+        iv_decl->data.var_decl.is_extern = 0;
+        iv_decl->line = line;
+
+        block->children_count++;
+        block->children = (ASTNode **)realloc(block->children,
+                           sizeof(ASTNode *) * block->children_count);
+        for (size_t j = block->children_count - 1; j > (size_t)loop_idx; j--)
+            block->children[j] = block->children[j - 1];
+        block->children[loop_idx] = iv_decl;
+        loop_idx++;
+
+        /* Replace varname * mc in for-loop body */
+        iv_replace_mul_in_stmt(body, varname, mc, iv_name);
+
+        /* Build: _ivN = _ivN + step_val */
+        ASTNode *iv_incr = ast_create_node(AST_ASSIGN);
+        ASTNode *iv_lhs = ast_create_node(AST_IDENTIFIER);
+        iv_lhs->data.identifier.name = strdup(iv_name);
+        iv_lhs->line = line;
+        ASTNode *iv_add = ast_create_node(AST_BINARY_EXPR);
+        iv_add->data.binary_expr.op = TOKEN_PLUS;
+        ASTNode *iv_ref = ast_create_node(AST_IDENTIFIER);
+        iv_ref->data.identifier.name = strdup(iv_name);
+        iv_ref->line = line;
+        iv_add->data.binary_expr.left = iv_ref;
+        iv_add->data.binary_expr.right = make_int(step_val, line);
+        iv_add->line = line;
+        iv_incr->data.assign.left = iv_lhs;
+        iv_incr->data.assign.value = iv_add;
+        iv_incr->line = line;
+
+        /* Append to for-loop body */
+        ast_add_child(body, iv_incr);
+        transformed = 1;
+    }
+    return transformed;
+}
+
+/* Walk an AST and apply induction variable SR to all loops. */
+static void iv_strengthen_block(ASTNode *block) {
+    if (!block) return;
+    if (block->type != AST_BLOCK) {
+        switch (block->type) {
+        case AST_IF:
+            iv_strengthen_block(block->data.if_stmt.then_branch);
+            iv_strengthen_block(block->data.if_stmt.else_branch);
+            break;
+        case AST_WHILE: case AST_DO_WHILE:
+            iv_strengthen_block(block->data.while_stmt.body);
+            break;
+        case AST_FOR:
+            iv_strengthen_block(block->data.for_stmt.body);
+            break;
+        case AST_SWITCH:
+            iv_strengthen_block(block->data.switch_stmt.body);
+            break;
+        default: break;
+        }
+        return;
+    }
+
+    for (size_t i = 0; i < block->children_count; i++) {
+        ASTNode *child = block->children[i];
+        if (!child) continue;
+        if (child->type == AST_WHILE) {
+            iv_transform_while(block, (int)i);
+            iv_strengthen_block(child->data.while_stmt.body);
+        } else if (child->type == AST_FOR) {
+            iv_transform_for(block, (int)i);
+            iv_strengthen_block(child->data.for_stmt.body);
+        } else {
+            iv_strengthen_block(child);
+        }
+    }
+}
+
+/* ================================================================== */
 /* -O3: Vectorization Hints (SSE Packed Operations)                   */
 /* ================================================================== */
 
@@ -3827,6 +4401,16 @@ ASTNode *optimize(ASTNode *program, OptLevel level) {
                 o2_propagate_block(child->data.function.body);
             }
         }
+
+        /* Loop induction variable strength reduction:
+           Replace i * CONST inside loops with additive induction variables. */
+        iv_counter = 0;
+        for (size_t i = 0; i < program->children_count; i++) {
+            ASTNode *child = program->children[i];
+            if (child->type == AST_FUNCTION && child->data.function.body) {
+                iv_strengthen_block(child->data.function.body);
+            }
+        }
     }
 
     /* -O3: Aggressive optimizations */
@@ -3850,6 +4434,66 @@ ASTNode *optimize(ASTNode *program, OptLevel level) {
                 }
             }
         }
+
+        /* Pass 1b: Transitive inlining — after aggressive inlining, some
+           functions that previously had too many statements (e.g. compute()
+           calling add()/mul()) now become single-return-expression functions.
+           Re-discover and re-apply simple inlining up to 3 iterations.
+           Use elevated expression-node limit so that grown expressions
+           (e.g. compute: 7 nodes after add/mul inlined) still qualify. */
+        g_inline_expr_limit = MAX_INLINE_EXPR_NODES_TRANSITIVE;
+        for (int ti = 0; ti < 3; ti++) {
+            int prev_simple = g_inline_cand_count;
+            int prev_agg = g_agg_inline_cand_count;
+
+            /* Re-discover simple inline candidates (functions that shrank) */
+            find_inline_candidates(program);
+            /* At -O3: all eligible candidates (hint >= 0) */
+            for (int ci = 0; ci < g_inline_cand_count; ci++) {
+                if (g_inline_cands[ci].inline_hint < 0) {
+                    for (int cj = ci; cj < g_inline_cand_count - 1; cj++)
+                        g_inline_cands[cj] = g_inline_cands[cj + 1];
+                    g_inline_cand_count--;
+                    ci--;
+                }
+            }
+            /* Re-discover aggressive inline candidates */
+            find_aggressive_inline_candidates(program);
+
+            /* If no new candidates found, stop iterating */
+            if (g_inline_cand_count <= prev_simple &&
+                g_agg_inline_cand_count <= prev_agg)
+                break;
+
+            /* Apply simple inlining */
+            if (g_inline_cand_count > 0) {
+                for (size_t i = 0; i < program->children_count; i++) {
+                    ASTNode *child = program->children[i];
+                    if (child->type == AST_FUNCTION && child->data.function.body) {
+                        inline_stmt(child->data.function.body);
+                    }
+                }
+            }
+            /* Apply aggressive inlining */
+            if (g_agg_inline_cand_count > 0) {
+                for (size_t i = 0; i < program->children_count; i++) {
+                    ASTNode *child = program->children[i];
+                    if (child->type == AST_FUNCTION && child->data.function.body) {
+                        o3_aggressive_inline_block(child->data.function.body,
+                                                  child->data.function.name);
+                    }
+                }
+            }
+            /* Clean up after this round */
+            for (size_t i = 0; i < program->children_count; i++) {
+                ASTNode *child = program->children[i];
+                if (child->type == AST_FUNCTION && child->data.function.body) {
+                    opt_stmt(child->data.function.body);
+                    o2_propagate_block(child->data.function.body);
+                }
+            }
+        }
+        g_inline_expr_limit = MAX_INLINE_EXPR_NODES;  /* restore default */
 
         /* Pass 2: Loop unrolling */
         for (size_t i = 0; i < program->children_count; i++) {
