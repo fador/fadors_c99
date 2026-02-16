@@ -738,7 +738,7 @@ else
     fail "lea_mul9_asm: expected LEA for x*9"
 fi
 
-# Test: x*7 still uses imul (not a single-LEA pattern)
+# Test: x*7 uses LEA chain at -O2 (lea (%r,%r,2) + lea (%r,%tmp,2))
 cat > "$TMPDIR/lea4.c" << 'EOF'
 int multiply7(int x) { return x * 7; }
 int main() {
@@ -749,9 +749,51 @@ check_exit "lea_mul7" "$TMPDIR/lea4.c" 42 "-O2"
 
 "$CC" -O2 -S -o "$TMPDIR/lea4.s" "$TMPDIR/lea4.c" 2>/dev/null
 if grep -q 'imull\s*\$7' "$TMPDIR/lea4.s"; then
-    pass "lea_mul7_asm: x*7 correctly uses imul (not single-LEA)"
+    fail "lea_mul7_asm: x*7 still uses imull (should use LEA chain)"
 else
-    fail "lea_mul7_asm: x*7 should use imul"
+    pass "lea_mul7_asm: x*7 uses LEA chain (no imull)"
+fi
+
+# Test: x*2 uses add (not imul) — add %r,%r is 1 byte shorter than imul
+cat > "$TMPDIR/lea_m2.c" << 'EOF'
+int multiply2(int x) { return x * 2; }
+int main() { return multiply2(21); }
+EOF
+check_exit "lea_mul2" "$TMPDIR/lea_m2.c" 42 "-O1"
+
+# Test: x*4 uses shl (not imul)
+cat > "$TMPDIR/lea_m4.c" << 'EOF'
+int multiply4(int x) { return x * 4; }
+int main() { return multiply4(16); }
+EOF
+check_exit "lea_mul4" "$TMPDIR/lea_m4.c" 64 "-O1"
+
+# Test: x*6 uses LEA chain at -O2 (not imul)
+cat > "$TMPDIR/lea_m6.c" << 'EOF'
+int multiply6(int x) { return x * 6; }
+int main() { return multiply6(7); }
+EOF
+check_exit "lea_mul6" "$TMPDIR/lea_m6.c" 42 "-O2"
+"$CC" -O2 -S -o "$TMPDIR/lea_m6.s" "$TMPDIR/lea_m6.c" 2>/dev/null
+if grep -q 'imull\s*\$6' "$TMPDIR/lea_m6.s"; then
+    fail "lea_mul6_asm: x*6 still uses imull (should use LEA chain)"
+else
+    pass "lea_mul6_asm: x*6 uses LEA chain (no imull)"
+fi
+
+# Test: x*8 uses shl (not imul)
+cat > "$TMPDIR/lea_m8.c" << 'EOF'
+int multiply8(int x) { return x * 8; }
+int main() { return multiply8(5); }
+EOF
+check_exit "lea_mul8" "$TMPDIR/lea_m8.c" 40 "-O1"
+
+# Test: x*6 and x*7 stay as imul under -Os (multi-LEA disabled for size)
+"$CC" -Os -S -o "$TMPDIR/lea_m6_os.s" "$TMPDIR/lea_m6.c" 2>/dev/null
+if grep -q 'imull\s*\$6' "$TMPDIR/lea_m6_os.s"; then
+    pass "lea_mul6_os: x*6 uses imull under -Os (no LEA chain)"
+else
+    fail "lea_mul6_os: x*6 should use imull under -Os"
 fi
 
 # ---- test instead of cmp $0 ----

@@ -1682,20 +1682,60 @@ static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
                 peep_in_flush = 0;
                 return;
             }
-            /* imul $3/5/9, %reg → lea (%reg64,%reg64,2/4/8), %reg (1-cycle LEA vs 3-cycle imul) */
+            /* imul $const, %reg → lea/shl chains (1-cycle LEA vs 3-cycle imul) */
             if ((strcmp(mnemonic, "imul") == 0 || strcmp(mnemonic, "imull") == 0) &&
                 op1->type == OP_IMM && op2->type == OP_REG) {
                 long long val = op1->data.imm;
+                int is_32 = (strcmp(mnemonic, "imull") == 0);
+                const char *reg64 = reg_to_64bit(op2->data.reg);
+                const char *lea_mn = is_32 ? "leal" : "lea";
+                /* Single-instruction: x*N where (N-1) is a valid SIB scale */
                 int scale = 0;
                 if (val == 3) scale = 2;
                 else if (val == 5) scale = 4;
                 else if (val == 9) scale = 8;
                 if (scale > 0) {
-                    int is_32 = (strcmp(mnemonic, "imull") == 0);
-                    const char *reg64 = reg_to_64bit(op2->data.reg);
-                    const char *lea_mn = is_32 ? "leal" : "lea";
                     peep_in_flush = 1;
                     emit_inst2(lea_mn, op_sib(reg64, reg64, scale, 0), op_reg(op2->data.reg));
+                    peep_in_flush = 0;
+                    return;
+                }
+                /* Single-instruction: x*2 → add %r, %r */
+                if (val == 2) {
+                    const char *add_mn = is_32 ? "addl" : "add";
+                    peep_in_flush = 1;
+                    emit_inst2(add_mn, op_reg(op2->data.reg), op_reg(op2->data.reg));
+                    peep_in_flush = 0;
+                    return;
+                }
+                /* Single-instruction: x*4 → shl $2 */
+                if (val == 4) {
+                    peep_in_flush = 1;
+                    emit_inst2(is_32 ? "shll" : "shl", op_imm(2), op_reg(op2->data.reg));
+                    peep_in_flush = 0;
+                    return;
+                }
+                /* Single-instruction: x*8 → shl $3 */
+                if (val == 8) {
+                    peep_in_flush = 1;
+                    emit_inst2(is_32 ? "shll" : "shl", op_imm(3), op_reg(op2->data.reg));
+                    peep_in_flush = 0;
+                    return;
+                }
+                /* Multi-instruction LEA chains at -O2+ (not -Os: trades size for speed) */
+                if (OPT_AT_LEAST(OPT_O2) && !OPT_SIZE_MODE && (val == 6 || val == 7)) {
+                    const char *s64 = (strcmp(reg64, "r11") == 0) ? "r10" : "r11";
+                    const char *sreg = is_32 ? (strcmp(s64, "r11") == 0 ? "r11d" : "r10d") : s64;
+                    peep_in_flush = 1;
+                    if (val == 6) {
+                        /* x*6: lea (%r,%r,2), %tmp → 3x; lea (%tmp,%tmp,1), %r → 6x */
+                        emit_inst2(lea_mn, op_sib(reg64, reg64, 2, 0), op_reg(sreg));
+                        emit_inst2(lea_mn, op_sib(s64, s64, 1, 0), op_reg(op2->data.reg));
+                    } else {
+                        /* x*7: lea (%r,%r,2), %tmp → 3x; lea (%r,%tmp,2), %r → x+6x=7x */
+                        emit_inst2(lea_mn, op_sib(reg64, reg64, 2, 0), op_reg(sreg));
+                        emit_inst2(lea_mn, op_sib(reg64, s64, 2, 0), op_reg(op2->data.reg));
+                    }
                     peep_in_flush = 0;
                     return;
                 }

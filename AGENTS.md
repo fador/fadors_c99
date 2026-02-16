@@ -51,7 +51,7 @@ All test scripts live in the project root. They default to `build_linux/fadors99
 | Script | Tests | What It Verifies |
 |--------|-------|-----------------|
 | `test_obj.sh` | ~73 | Object file mode (`-c`) correctness |
-| `test_opt.sh` | ~113 | Optimization passes (`-O1`, `-O2`, `-O3`, `-Os`, `-Og`) |
+| `test_opt.sh` | ~119 | Optimization passes (`-O1`, `-O2`, `-O3`, `-Os`, `-Og`) |
 | `test_stage1.sh` | ~76 | Stage-1 self-compiled compiler correctness |
 | `test_linker.sh` | ~72 | Built-in ELF linker mode |
 | `test_debug.sh` | ~35 | DWARF debug symbols + GDB/LLDB |
@@ -117,7 +117,7 @@ Tests that `-O1`, `-O2`, `-O3`, `-Os`, and `-Og` optimizations produce correct r
 10. Tail Call Optimization (`-O2`) — `call+ret` → `jmp`
 11. Function Inlining (`-O2`) — small function inlining
 12. Inline Hinting — `__forceinline`, `__attribute__((always_inline))`, `__attribute__((noinline))`, `__declspec(noinline)`
-13. LEA Multiply-Add — `imul $3/5/9` → `lea` peephole
+13. LEA Multiply-Add — `imul $3/5/9` → `lea` peephole; `imul $2/4/6/7/8` → add/shl/LEA chains
 14. `test` vs `cmp $0` — `cmpl $0` → `testl` shorter encoding
 15. Conditional Move — `cmov` for simple ternary expressions
 16. Loop Rotation — while/for `jmp` eliminated at -O2 via do-while transform

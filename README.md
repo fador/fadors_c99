@@ -412,7 +412,7 @@ This section outlines the implementation plan for compiler optimization flags (`
 
 #### Phase 7b: Instruction Selection (easy wins)
 - [x] **LEA for multiply-add patterns**: `x*3` → `lea (%rax,%rax,2)`, `x*5` → `lea (%rax,%rax,4)`, `a+b*4` → `lea (%rax,%rcx,4)`. Peephole on `imull $const` sequences. 1-cycle latency vs 3-cycle `imull`.
-- [ ] **Strength reduction (imul→lea/add)**: Replace `imull $const, %reg` with LEA chains for constants 2–9. `x*7` → `lea (%rax,%rax,2), %rcx; lea (%rax,%rcx,2)`.
+- [x] **Strength reduction (imul→lea/add)**: Replace `imull $const, %reg` with LEA chains for constants 2–9. Single-instruction: `x*2` → `add %r,%r`, `x*4` → `shl $2`, `x*8` → `shl $3` (at `-O1+`). Multi-instruction LEA chains: `x*6` → `lea 3x; lea 2×3x`, `x*7` → `lea 3x; lea x+2×3x` (at `-O2+`, disabled under `-Os`). Covers both user multiplication and pointer arithmetic element scaling.
 - [x] **Peephole: pushq/popq→mov reg**: Replace `pushq %rax; ...; popq %rcx` with `mov %rax, %r11; ...; mov %r11, %rcx` using scratch registers. Eliminates 2 memory ops per pair.
 - [x] **`test` instead of `cmp $0`**: `cmpl $0, %eax` → `testl %eax, %eax` (shorter encoding, same semantics).
 - [x] **Conditional move (cmov)**: Branch-free `if (cond) x = a; else x = b;` → `cmov`. Avoids branch misprediction on data-dependent branches.

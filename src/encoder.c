@@ -652,22 +652,22 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
                 }
             }
         }
-    } else if (strcmp(mnemonic, "shl") == 0 || strcmp(mnemonic, "sar") == 0 || strcmp(mnemonic, "shr") == 0) {
+    } else if (strcmp(mnemonic, "shl") == 0 || strcmp(mnemonic, "sar") == 0 || strcmp(mnemonic, "shr") == 0 ||
+               strcmp(mnemonic, "shll") == 0 || strcmp(mnemonic, "sarl") == 0 || strcmp(mnemonic, "shrl") == 0) {
+        /* Determine 32-bit vs 64-bit from mnemonic suffix */
+        int shift_64 = !(strcmp(mnemonic, "shll") == 0 || strcmp(mnemonic, "sarl") == 0 || strcmp(mnemonic, "shrl") == 0);
+        uint8_t extension = 4; // shl
+        if (strstr(mnemonic, "sar") != NULL) extension = 7;
+        else if (strstr(mnemonic, "shr") != NULL) extension = 5;
         if (src->type == OP_REG && dest->type == OP_REG && strcmp(src->data.reg, "cl") == 0) {
             int d = get_reg_id(dest->data.reg);
-            emit_rex(buf, 1, 0, 0, d >= 8);
+            emit_rex(buf, shift_64, 0, 0, d >= 8);
             buffer_write_byte(buf, 0xD3);
-            uint8_t extension = 4; // shl
-            if (strcmp(mnemonic, "sar") == 0) extension = 7;
-            else if (strcmp(mnemonic, "shr") == 0) extension = 5;
             emit_modrm(buf, 3, extension, d);
         } else if (src->type == OP_IMM && dest->type == OP_REG) {
             int d = get_reg_id(dest->data.reg);
-            emit_rex(buf, 1, 0, 0, d >= 8);
+            emit_rex(buf, shift_64, 0, 0, d >= 8);
             buffer_write_byte(buf, 0xC1);
-            uint8_t extension = 4; // shl
-            if (strcmp(mnemonic, "sar") == 0) extension = 7;
-            else if (strcmp(mnemonic, "shr") == 0) extension = 5;
             emit_modrm(buf, 3, extension, d);
             buffer_write_byte(buf, (uint8_t)src->data.imm);
         }
