@@ -45,7 +45,6 @@ static void add_macro(const char *name, const char *value, int is_func, char **p
         for (int i = 0; i < macros[idx].params_count; i++) free(macros[idx].params[i]);
         free(macros[idx].params);
     }
-    // printf("DEBUG: add_macro %s = %s\n", name, value ? value : "");
     macros[idx].name = strdup(name);
     macros[idx].value = value ? strdup(value) : strdup("");
     macros[idx].is_func = is_func;
@@ -545,12 +544,14 @@ skip_line:
                     }
                 } else {
                     // Recursive preprocess the simple macro value
+
                     int prev_top = top_level;
                     top_level = 0;
                     char *expanded = preprocess(m->value, "macro");
                     top_level = prev_top;
 
                     size_t exp_len = strlen(expanded);
+
                     if (out_pos + exp_len >= out_size) {
                         out_size = out_pos + exp_len + 1024;
                         output = realloc(output, out_size);

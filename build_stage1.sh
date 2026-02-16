@@ -45,6 +45,7 @@ SOURCES=(
     src/pe_linker.c
     src/optimizer.c
     src/ir.c
+    src/pgo.c
     src/main.c
 )
 

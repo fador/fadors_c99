@@ -1212,6 +1212,31 @@ static void gen_global_decl(ASTNode *node) {
                         double d = elem->data.float_val.value;
                         buffer_write_bytes(&obj_writer->data_section, &d, 8);
                     }
+                } else if (elem && elem->type == AST_STRING) {
+                    /* String literal in init list: store string data and add relocation */
+                    char slabel[32];
+                    sprintf(slabel, ".LC%d", label_count++);
+                    int slen = elem->data.string.length;
+                    /* Emit the string data in .data section */
+                    uint32_t str_offset = (uint32_t)obj_writer->data_section.size;
+                    /* We need to emit a placeholder and relocation, but since this
+                     * is a pointer within the same data section, we store the string
+                     * after all init list data, and record a self-relocation.
+                     * For now, emit the string into the string_literals table for 
+                     * deferred emission, and write a zero placeholder. */
+                    if (string_literals_count < 8192) {
+                        string_literals[string_literals_count].label = strdup(slabel);
+                        string_literals[string_literals_count].value = malloc(slen + 1);
+                        memcpy(string_literals[string_literals_count].value, elem->data.string.value, slen + 1);
+                        string_literals[string_literals_count].length = slen;
+                        string_literals_count++;
+                    }
+                    /* Write symbol and relocation for the string pointer */
+                    uint32_t sym_idx = coff_writer_add_symbol(obj_writer, slabel, 0, 0, 0, IMAGE_SYM_CLASS_EXTERNAL);
+                    uint32_t reloc_off = (uint32_t)obj_writer->data_section.size;
+                    coff_writer_add_reloc(obj_writer, reloc_off, sym_idx, 1, 2);
+                    uint64_t zero = 0;
+                    buffer_write_bytes(&obj_writer->data_section, &zero, 8);
                 } else {
                     /* Unknown element — zero fill */
                     int zi; for (zi = 0; zi < elem_size; zi++)
@@ -1283,6 +1308,18 @@ static void gen_global_decl(ASTNode *node) {
                         fprintf(out, "%s %d\n", edirective, elem->data.integer.value);
                     } else if (elem && elem->type == AST_FLOAT) {
                         fprintf(out, "%s %f\n", edirective, elem->data.float_val.value);
+                    } else if (elem && elem->type == AST_STRING) {
+                        char slabel[32];
+                        sprintf(slabel, ".LC%d", label_count++);
+                        int slen = elem->data.string.length;
+                        if (string_literals_count < 8192) {
+                            string_literals[string_literals_count].label = strdup(slabel);
+                            string_literals[string_literals_count].value = malloc(slen + 1);
+                            memcpy(string_literals[string_literals_count].value, elem->data.string.value, slen + 1);
+                            string_literals[string_literals_count].length = slen;
+                            string_literals_count++;
+                        }
+                        fprintf(out, "DQ OFFSET %s\n", slabel);
                     } else {
                         fprintf(out, "%s 0\n", edirective);
                     }
@@ -1331,6 +1368,19 @@ static void gen_global_decl(ASTNode *node) {
                      } else if (elem && elem->type == AST_FLOAT) {
                          if (elem_size == 4) fprintf(out, "    .float %f\n", elem->data.float_val.value);
                          else fprintf(out, "    .double %f\n", elem->data.float_val.value);
+                     } else if (elem && elem->type == AST_STRING) {
+                         /* String literal in init list: store pointer to string data */
+                         char slabel[32];
+                         sprintf(slabel, ".LC%d", label_count++);
+                         int slen = elem->data.string.length;
+                         if (string_literals_count < 8192) {
+                             string_literals[string_literals_count].label = strdup(slabel);
+                             string_literals[string_literals_count].value = malloc(slen + 1);
+                             memcpy(string_literals[string_literals_count].value, elem->data.string.value, slen + 1);
+                             string_literals[string_literals_count].length = slen;
+                             string_literals_count++;
+                         }
+                         fprintf(out, "    .quad %s\n", slabel);
                      } else {
                          int zi; for (zi = 0; zi < elem_size; zi++) fprintf(out, "    .byte 0\n");
                      }
@@ -2159,10 +2209,12 @@ static void gen_binary_expr(ASTNode *node) {
                 else if (node->data.binary_expr.op == TOKEN_GREATER_EQUAL) emit_inst1("setae", op_reg("al")); // above or equal
                 emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
                 node->resolved_type = type_int();
+                last_value_clear();
                 return;
             default: break;
         }
         node->resolved_type = is_double ? type_double() : type_float();
+        last_value_clear();
         return;
     }
 
@@ -2909,6 +2961,7 @@ static void gen_expression(ASTNode *node) {
             long long v = -(long long)node->data.unary.expression->data.integer.value;
             emit_inst2("mov", op_imm(v), op_reg("rax"));
             node->resolved_type = type_int();
+            last_value_clear();
             return;
         }
         gen_expression(node->data.unary.expression);
@@ -4029,6 +4082,7 @@ static void gen_statement(ASTNode *node) {
                 locals_count++;
                 /* Move value from %rax to the assigned register */
                 emit_inst2("mov", op_reg("rax"), op_reg(regalloc_assignments[ra_idx].reg64));
+                last_value_clear();
             } else {
                 /* Stack-allocated variable (original path) */
                 stack_offset -= alloc_size;
@@ -4064,6 +4118,11 @@ static void gen_statement(ASTNode *node) {
                         emit_inst2("mov", op_imm(alloc_size), op_reg("rdx"));
                         emit_inst2("xor", op_reg("eax"), op_reg("eax"));
                         emit_inst0("call memcpy");
+                        last_value_clear();
+                    } else {
+                        /* Array/struct without initializer or non-scalar:
+                           rax was clobbered by zero-init, invalidate cache */
+                        last_value_clear();
                     }
                 }
             }
