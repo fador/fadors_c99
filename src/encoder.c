@@ -456,6 +456,33 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             emit_modrm(buf, 0, d, 5); // RIP-relative
             emit_reloc(buf, src->data.label, (uint32_t)buf->size);
             buffer_write_dword(buf, 0); // COFF REL32 addend = 0
+        } else if (src->type == OP_MEM_SIB && dest->type == OP_REG) {
+            /* LEA with SIB addressing: lea disp(base, index, scale), dest */
+            int b = get_reg_id(src->data.sib.base);
+            int x = get_reg_id(src->data.sib.index);
+            int d = get_reg_id(dest->data.reg);
+            int scale_bits = 0;
+            if (src->data.sib.scale == 2) scale_bits = 1;
+            else if (src->data.sib.scale == 4) scale_bits = 2;
+            else if (src->data.sib.scale == 8) scale_bits = 3;
+            emit_rex(buf, is_64, d >= 8, x >= 8, b >= 8);
+            buffer_write_byte(buf, 0x8D);
+            /* Emit ModR/M + SIB manually (not via emit_modrm which auto-adds SIB for rm=4) */
+            if (src->data.sib.disp == 0 && (b & 7) != 5) {
+                /* Mod=00: no displacement (except rbp/r13 which needs mod=01+disp8=0) */
+                buffer_write_byte(buf, (uint8_t)(((d & 7) << 3) | 4)); /* mod=00, rm=100(SIB) */
+                buffer_write_byte(buf, (uint8_t)((scale_bits << 6) | ((x & 7) << 3) | (b & 7)));
+            } else if (src->data.sib.disp >= -128 && src->data.sib.disp <= 127) {
+                /* Mod=01: 8-bit displacement */
+                buffer_write_byte(buf, (uint8_t)((1 << 6) | ((d & 7) << 3) | 4)); /* mod=01, rm=100 */
+                buffer_write_byte(buf, (uint8_t)((scale_bits << 6) | ((x & 7) << 3) | (b & 7)));
+                buffer_write_byte(buf, (uint8_t)src->data.sib.disp);
+            } else {
+                /* Mod=10: 32-bit displacement */
+                buffer_write_byte(buf, (uint8_t)((2 << 6) | ((d & 7) << 3) | 4)); /* mod=10, rm=100 */
+                buffer_write_byte(buf, (uint8_t)((scale_bits << 6) | ((x & 7) << 3) | (b & 7)));
+                buffer_write_dword(buf, (uint32_t)src->data.sib.disp);
+            }
         }
     } else if (strcmp(mnemonic, "movzbq") == 0) {
         if (src->type == OP_MEM && dest->type == OP_REG) {
@@ -588,7 +615,8 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             emit_reloc(buf, src->data.label, (uint32_t)buf->size);
             buffer_write_dword(buf, 0);
         }
-    } else if (strcmp(mnemonic, "xor") == 0 || strcmp(mnemonic, "and") == 0 || strcmp(mnemonic, "or") == 0 || strcmp(mnemonic, "test") == 0 ||
+    } else if (strcmp(mnemonic, "xor") == 0 || strcmp(mnemonic, "and") == 0 || strcmp(mnemonic, "or") == 0 ||
+               strcmp(mnemonic, "test") == 0 || strcmp(mnemonic, "testl") == 0 ||
                strcmp(mnemonic, "xorl") == 0 || strcmp(mnemonic, "andl") == 0 || strcmp(mnemonic, "orl") == 0) {
         int w = (mnemonic[strlen(mnemonic)-1] != 'l'); // 64-bit unless suffix 'l'
         if (src->type == OP_REG && dest->type == OP_REG) {
@@ -598,7 +626,7 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             uint8_t opcode = 0x31; // xor
             if (strncmp(mnemonic, "and", 3) == 0) opcode = 0x21;
             else if (strncmp(mnemonic, "or", 2) == 0 && (mnemonic[2] == '\0' || mnemonic[2] == 'l')) opcode = 0x09;
-            else if (strcmp(mnemonic, "test") == 0) opcode = 0x85;
+            else if (strncmp(mnemonic, "test", 4) == 0) opcode = 0x85;
             buffer_write_byte(buf, opcode);
             emit_modrm(buf, 3, s, d);
         } else if (src->type == OP_IMM && dest->type == OP_REG) {
@@ -608,7 +636,7 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             if (strncmp(mnemonic, "or", 2) == 0 && (mnemonic[2] == '\0' || mnemonic[2] == 'l')) extension = 1;
             else if (strncmp(mnemonic, "xor", 3) == 0) extension = 6;
             
-            if (strcmp(mnemonic, "test") == 0) {
+            if (strncmp(mnemonic, "test", 4) == 0) {
                 buffer_write_byte(buf, 0xF7);
                 emit_modrm(buf, 3, 0, d);
                 buffer_write_dword(buf, src->data.imm);
@@ -650,6 +678,30 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             emit_rex(buf, 1, 0, 0, d >= 8);
             buffer_write_byte(buf, 0xF7);
             emit_modrm(buf, 3, 7, d); // /7 extension
+        }
+    } else if (strncmp(mnemonic, "cmov", 4) == 0) {
+        /* CMOVcc reg, reg: 0x0F 0x4x */
+        const char *cc = mnemonic + 4;
+        uint8_t cc_byte = 0;
+        if (strcmp(cc, "e") == 0 || strcmp(cc, "z") == 0) cc_byte = 0x44;
+        else if (strcmp(cc, "ne") == 0 || strcmp(cc, "nz") == 0) cc_byte = 0x45;
+        else if (strcmp(cc, "l") == 0) cc_byte = 0x4C;
+        else if (strcmp(cc, "ge") == 0) cc_byte = 0x4D;
+        else if (strcmp(cc, "le") == 0) cc_byte = 0x4E;
+        else if (strcmp(cc, "g") == 0) cc_byte = 0x4F;
+        else if (strcmp(cc, "b") == 0) cc_byte = 0x42;
+        else if (strcmp(cc, "ae") == 0) cc_byte = 0x43;
+        else if (strcmp(cc, "be") == 0) cc_byte = 0x46;
+        else if (strcmp(cc, "a") == 0) cc_byte = 0x47;
+        else if (strcmp(cc, "s") == 0) cc_byte = 0x48;
+        else if (strcmp(cc, "ns") == 0) cc_byte = 0x49;
+        if (cc_byte && src->type == OP_REG && dest->type == OP_REG) {
+            int s = get_reg_id(src->data.reg);
+            int d = get_reg_id(dest->data.reg);
+            emit_rex(buf, 1, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, cc_byte);
+            emit_modrm(buf, 3, d, s);
         }
     } else if (strcmp(mnemonic, "movss") == 0 || strcmp(mnemonic, "movsd") == 0) {
         int is_double = (strcmp(mnemonic, "movsd") == 0);

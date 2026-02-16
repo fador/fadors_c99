@@ -10,7 +10,8 @@ typedef enum {
     OP_REG,
     OP_IMM,
     OP_MEM,
-    OP_LABEL
+    OP_LABEL,
+    OP_MEM_SIB      /* SIB addressing: base + index*scale + disp */
 } OperandType;
 
 typedef struct {
@@ -23,6 +24,12 @@ typedef struct {
             int offset;
         } mem;
         const char *label;
+        struct {
+            const char *base;    /* base register (64-bit) */
+            const char *index;   /* index register (64-bit) */
+            int scale;           /* 1, 2, 4, or 8 */
+            int disp;            /* displacement */
+        } sib;
     } data;
 } Operand;
 

@@ -687,6 +687,125 @@ int main() {
 EOF
 check_exit "postattr_always_inline" "$TMPDIR/hint7.c" 64 "-O0"
 
+# ---- LEA for multiply-add patterns ----
+echo "--- LEA Multiply-Add ---"
+
+# Test: x*3 uses LEA instead of imul
+cat > "$TMPDIR/lea1.c" << 'EOF'
+int multiply3(int x) { return x * 3; }
+int main() {
+    return multiply3(14);
+}
+EOF
+check_exit "lea_mul3" "$TMPDIR/lea1.c" 42 "-O2"
+
+"$CC" -O2 -S -o "$TMPDIR/lea1.s" "$TMPDIR/lea1.c" 2>/dev/null
+if grep -q 'lea' "$TMPDIR/lea1.s" && ! grep -q 'imull\s*\$3' "$TMPDIR/lea1.s"; then
+    pass "lea_mul3_asm: uses LEA instead of imul $3"
+else
+    fail "lea_mul3_asm: expected LEA for x*3"
+fi
+
+# Test: x*5 uses LEA
+cat > "$TMPDIR/lea2.c" << 'EOF'
+int multiply5(int x) { return x * 5; }
+int main() {
+    return multiply5(9);
+}
+EOF
+check_exit "lea_mul5" "$TMPDIR/lea2.c" 45 "-O2"
+
+"$CC" -O2 -S -o "$TMPDIR/lea2.s" "$TMPDIR/lea2.c" 2>/dev/null
+if grep -q 'lea' "$TMPDIR/lea2.s" && ! grep -q 'imull\s*\$5' "$TMPDIR/lea2.s"; then
+    pass "lea_mul5_asm: uses LEA instead of imul $5"
+else
+    fail "lea_mul5_asm: expected LEA for x*5"
+fi
+
+# Test: x*9 uses LEA
+cat > "$TMPDIR/lea3.c" << 'EOF'
+int multiply9(int x) { return x * 9; }
+int main() {
+    return multiply9(5);
+}
+EOF
+check_exit "lea_mul9" "$TMPDIR/lea3.c" 45 "-O2"
+
+"$CC" -O2 -S -o "$TMPDIR/lea3.s" "$TMPDIR/lea3.c" 2>/dev/null
+if grep -q 'lea' "$TMPDIR/lea3.s" && ! grep -q 'imull\s*\$9' "$TMPDIR/lea3.s"; then
+    pass "lea_mul9_asm: uses LEA instead of imul $9"
+else
+    fail "lea_mul9_asm: expected LEA for x*9"
+fi
+
+# Test: x*7 still uses imul (not a single-LEA pattern)
+cat > "$TMPDIR/lea4.c" << 'EOF'
+int multiply7(int x) { return x * 7; }
+int main() {
+    return multiply7(6);
+}
+EOF
+check_exit "lea_mul7" "$TMPDIR/lea4.c" 42 "-O2"
+
+"$CC" -O2 -S -o "$TMPDIR/lea4.s" "$TMPDIR/lea4.c" 2>/dev/null
+if grep -q 'imull\s*\$7' "$TMPDIR/lea4.s"; then
+    pass "lea_mul7_asm: x*7 correctly uses imul (not single-LEA)"
+else
+    fail "lea_mul7_asm: x*7 should use imul"
+fi
+
+# ---- test instead of cmp $0 ----
+echo "--- test vs cmp \$0 ---"
+
+cat > "$TMPDIR/test1.c" << 'EOF'
+int check(int x) {
+    if (x == 0) return 1;
+    return 2;
+}
+int main() {
+    return check(0) + check(5) * 10;
+}
+EOF
+check_exit "test_cmp0" "$TMPDIR/test1.c" 21 "-O2"
+
+"$CC" -O2 -S -o "$TMPDIR/test1.s" "$TMPDIR/test1.c" 2>/dev/null
+if grep -q 'testl' "$TMPDIR/test1.s" && ! grep -q 'cmpl\s*\$0' "$TMPDIR/test1.s"; then
+    pass "test_cmp0_asm: uses testl instead of cmpl $0"
+else
+    fail "test_cmp0_asm: expected testl instead of cmpl $0"
+fi
+
+# ---- Conditional move (cmov) ----
+echo "--- Conditional Move ---"
+
+cat > "$TMPDIR/cmov1.c" << 'EOF'
+int main() {
+    int a = 10;
+    int b = 20;
+    int x = (a > 5) ? 42 : 99;
+    return x;
+}
+EOF
+check_exit "cmov_ternary" "$TMPDIR/cmov1.c" 42 "-O2"
+
+"$CC" -O2 -S -o "$TMPDIR/cmov1.s" "$TMPDIR/cmov1.c" 2>/dev/null
+if grep -q 'cmov' "$TMPDIR/cmov1.s"; then
+    pass "cmov_ternary_asm: uses cmov for simple ternary"
+else
+    fail "cmov_ternary_asm: expected cmov for simple ternary"
+fi
+
+# Test: cmov with variable condition
+cat > "$TMPDIR/cmov2.c" << 'EOF'
+int select(int cond, int a, int b) {
+    return cond ? a : b;
+}
+int main() {
+    return select(1, 42, 99);
+}
+EOF
+check_exit "cmov_var" "$TMPDIR/cmov2.c" 42 "-O2"
+
 # ---- Summary ----
 echo ""
 echo "=== Results ==="

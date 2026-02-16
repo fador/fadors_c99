@@ -411,11 +411,11 @@ This section outlines the implementation plan for compiler optimization flags (`
 - [ ] **Frame pointer elimination (`-fomit-frame-pointer`)**: Free up `%rbp` as a GPR. Use `%rsp`-relative addressing. Requires tracking stack depth at each point.
 
 #### Phase 7b: Instruction Selection (easy wins)
-- [ ] **LEA for multiply-add patterns**: `x*3` → `lea (%rax,%rax,2)`, `x*5` → `lea (%rax,%rax,4)`, `a+b*4` → `lea (%rax,%rcx,4)`. Peephole on `imull $const` sequences. 1-cycle latency vs 3-cycle `imull`.
+- [x] **LEA for multiply-add patterns**: `x*3` → `lea (%rax,%rax,2)`, `x*5` → `lea (%rax,%rax,4)`, `a+b*4` → `lea (%rax,%rcx,4)`. Peephole on `imull $const` sequences. 1-cycle latency vs 3-cycle `imull`.
 - [ ] **Strength reduction (imul→lea/add)**: Replace `imull $const, %reg` with LEA chains for constants 2–9. `x*7` → `lea (%rax,%rax,2), %rcx; lea (%rax,%rcx,2)`.
-- [ ] **Peephole: pushq/popq→mov reg**: Replace `pushq %rax; ...; popq %rcx` with `mov %rax, %r11; ...; mov %r11, %rcx` using scratch registers. Eliminates 2 memory ops per pair.
-- [ ] **`test` instead of `cmp $0`**: `cmpl $0, %eax` → `testl %eax, %eax` (shorter encoding, same semantics).
-- [ ] **Conditional move (cmov)**: Branch-free `if (cond) x = a; else x = b;` → `cmov`. Avoids branch misprediction on data-dependent branches.
+- [x] **Peephole: pushq/popq→mov reg**: Replace `pushq %rax; ...; popq %rcx` with `mov %rax, %r11; ...; mov %r11, %rcx` using scratch registers. Eliminates 2 memory ops per pair.
+- [x] **`test` instead of `cmp $0`**: `cmpl $0, %eax` → `testl %eax, %eax` (shorter encoding, same semantics).
+- [x] **Conditional move (cmov)**: Branch-free `if (cond) x = a; else x = b;` → `cmov`. Avoids branch misprediction on data-dependent branches.
 
 #### Phase 7c: Loop Optimizations
 - [ ] **Loop induction variable strength reduction**: Replace `i*3` inside loop with induction variable `j += 3` that tracks the product. Eliminates multiply per iteration.
@@ -430,13 +430,13 @@ This section outlines the implementation plan for compiler optimization flags (`
 
 | Benchmark | fadors99 -O3 | gcc -O2 | Gap | Remaining Root Causes |
 |-----------|-------------|---------|-----|-------------|
-| bench_array | 0.028s | 0.003s | 9× | No SIMD reduction, no LEA for `i*3` |
-| bench_struct | 0.072s | 0.005s | 14× | pushq/popq temps in `distance_sq` (5-reg limit), no SIMD accumulator |
-| bench_calls | 0.014s | 0.005s | 3× | `call compute` not inlined (10 stmts > 8), no LEA |
-| bench_loop | 0.008s | 0.004s | 2× | `imull` instead of LEA, no induction variable strength reduction |
-| bench_branch | 0.025s | 0.019s | 1.3× | `call collatz_steps` not inlined, no loop rotation |
+| bench_array | 0.028s | 0.003s | 9× | No SIMD reduction, no induction variable strength reduction |
+| bench_struct | 0.069s | 0.005s | 14× | pushq/popq temps in `distance_sq` (5-reg limit), no SIMD accumulator |
+| bench_calls | 0.014s | 0.005s | 3× | `call compute` not inlined (10 stmts > 8), no LEA chain |
+| bench_loop | 0.008s | 0.004s | 2× | No induction variable strength reduction |
+| bench_branch | 0.025s | 0.020s | 1.3× | `call collatz_steps` not inlined, no loop rotation |
 
-*Register allocator reduced the average gap from 10× to 5.9× across all benchmarks.*
+*Phase 7b instruction selection (LEA, test, cmov) improved bench_struct -O3 from 0.072s to 0.069s. Average gap is ~5.8× across all benchmarks.*
 
 ### Implementation Priority & Dependencies
 

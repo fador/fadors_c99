@@ -239,6 +239,39 @@ static Operand *op_label(const char *label) {
     return op;
 }
 
+static Operand *op_sib(const char *base, const char *index, int scale, int disp) {
+    Operand *op = &_op_pool[_op_idx++ & 15];
+    op->type = OP_MEM_SIB;
+    op->data.sib.base = base;
+    op->data.sib.index = index;
+    op->data.sib.scale = scale;
+    op->data.sib.disp = disp;
+    return op;
+}
+
+/* Map 32-bit register name to 64-bit equivalent for SIB addressing */
+static const char *reg_to_64bit(const char *reg) {
+    if (strcmp(reg, "eax") == 0) return "rax";
+    if (strcmp(reg, "ecx") == 0) return "rcx";
+    if (strcmp(reg, "edx") == 0) return "rdx";
+    if (strcmp(reg, "ebx") == 0) return "rbx";
+    if (strcmp(reg, "esi") == 0) return "rsi";
+    if (strcmp(reg, "edi") == 0) return "rdi";
+    if (strcmp(reg, "esp") == 0) return "rsp";
+    if (strcmp(reg, "ebp") == 0) return "rbp";
+    /* r8d-r15d → r8-r15 */
+    if (reg[0] == 'r' && reg[1] >= '0' && reg[1] <= '9') {
+        static char buf[8];
+        int i = 0;
+        while (reg[i] && reg[i] != 'd' && reg[i] != 'w' && reg[i] != 'b' && i < 6) {
+            buf[i] = reg[i]; i++;
+        }
+        buf[i] = '\0';
+        return buf;
+    }
+    return reg; /* already 64-bit */
+}
+
 /* Flush a pending pushq without optimization (no matching popq followed) */
 static void peep_flush_push(void) {
     if (peep_pending_push) {
@@ -1357,6 +1390,17 @@ static void print_operand(Operand *op) {
         const char *lbl = op->data.label ? op->data.label : "null_label";
         if (current_syntax == SYNTAX_ATT) fprintf(out, "%s(%%rip)", lbl);
         else fprintf(out, "[%s]", lbl);
+    } else if (op->type == OP_MEM_SIB) {
+        /* SIB addressing: disp(base, index, scale) in AT&T; [base + index*scale + disp] in Intel */
+        if (current_syntax == SYNTAX_ATT) {
+            if (op->data.sib.disp != 0) fprintf(out, "%d", op->data.sib.disp);
+            fprintf(out, "(%%%s,%%%s,%d)", op->data.sib.base, op->data.sib.index, op->data.sib.scale);
+        } else {
+            fprintf(out, "[%s+%s*%d", op->data.sib.base, op->data.sib.index, op->data.sib.scale);
+            if (op->data.sib.disp > 0) fprintf(out, "+%d", op->data.sib.disp);
+            else if (op->data.sib.disp < 0) fprintf(out, "%d", op->data.sib.disp);
+            fprintf(out, "]");
+        }
     }
 }
 
@@ -1638,6 +1682,34 @@ static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
                 peep_in_flush = 0;
                 return;
             }
+            /* imul $3/5/9, %reg → lea (%reg64,%reg64,2/4/8), %reg (1-cycle LEA vs 3-cycle imul) */
+            if ((strcmp(mnemonic, "imul") == 0 || strcmp(mnemonic, "imull") == 0) &&
+                op1->type == OP_IMM && op2->type == OP_REG) {
+                long long val = op1->data.imm;
+                int scale = 0;
+                if (val == 3) scale = 2;
+                else if (val == 5) scale = 4;
+                else if (val == 9) scale = 8;
+                if (scale > 0) {
+                    int is_32 = (strcmp(mnemonic, "imull") == 0);
+                    const char *reg64 = reg_to_64bit(op2->data.reg);
+                    const char *lea_mn = is_32 ? "leal" : "lea";
+                    peep_in_flush = 1;
+                    emit_inst2(lea_mn, op_sib(reg64, reg64, scale, 0), op_reg(op2->data.reg));
+                    peep_in_flush = 0;
+                    return;
+                }
+            }
+            /* cmp $0, %reg → test %reg, %reg (shorter encoding, same flags) */
+            if ((strcmp(mnemonic, "cmp") == 0 || strcmp(mnemonic, "cmpl") == 0) &&
+                op1->type == OP_IMM && op1->data.imm == 0 && op2->type == OP_REG) {
+                int is_32 = (strcmp(mnemonic, "cmpl") == 0);
+                peep_in_flush = 1;
+                emit_inst2(is_32 ? "testl" : "test",
+                           op_reg(op2->data.reg), op_reg(op2->data.reg));
+                peep_in_flush = 0;
+                return;
+            }
             /* mov %reg, %reg → nop (self-move) */
             if (strcmp(mnemonic, "mov") == 0 &&
                 op1->type == OP_REG && op2->type == OP_REG &&
@@ -1659,6 +1731,8 @@ static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
         else if (strcmp(mnemonic, "imulq") == 0) m = "imul";
         else if (strcmp(mnemonic, "cmpq") == 0) m = "cmp";
         else if (strcmp(mnemonic, "leaq") == 0) m = "lea";
+        else if (strcmp(mnemonic, "leal") == 0) m = "lea";
+        else if (strcmp(mnemonic, "testl") == 0) m = "test";
         else if (strcmp(mnemonic, "movzbq") == 0) m = "movzx";
     }
 
@@ -1752,6 +1826,20 @@ static const char *get_reg_8(const char *reg64) {
 
 static int is_float_type(Type *t) {
     return t && (t->kind == TYPE_FLOAT || t->kind == TYPE_DOUBLE);
+}
+
+/* Check if an expression is simple enough for cmov (no side effects, single instruction) */
+static int is_simple_scalar_expr(ASTNode *node) {
+    if (!node) return 0;
+    if (node->type == AST_INTEGER) return 1;
+    if (node->type == AST_IDENTIFIER) {
+        Type *t = get_expr_type(node);
+        if (!t) return 1; /* unknown type, assume scalar */
+        if (is_float_type(t)) return 0;
+        if (t->kind == TYPE_STRUCT || t->kind == TYPE_UNION || t->kind == TYPE_ARRAY) return 0;
+        return 1;
+    }
+    return 0;
 }
 
 static Type *get_expr_type(ASTNode *node) {
@@ -2948,24 +3036,42 @@ static void gen_expression(ASTNode *node) {
         last_value_clear();
     } else if (node->type == AST_IF) {
         // Ternary expression: condition ? then_expr : else_expr
-        int label_else = label_count++;
-        int label_end = label_count++;
-        char l_else[32], l_end[32];
-        sprintf(l_else, ".L%d", label_else);
-        sprintf(l_end, ".L%d", label_end);
-        
-        gen_expression(node->data.if_stmt.condition);
-        emit_inst2("test", op_reg("rax"), op_reg("rax"));
-        emit_inst1("je", op_label(l_else));
-        
-        gen_expression(node->data.if_stmt.then_branch);
-        emit_inst1("jmp", op_label(l_end));
-        
-        emit_label_def(l_else);
-        gen_expression(node->data.if_stmt.else_branch);
-        
-        emit_label_def(l_end);
-        last_value_clear();
+        ASTNode *cond = node->data.if_stmt.condition;
+        ASTNode *then_br = node->data.if_stmt.then_branch;
+        ASTNode *else_br = node->data.if_stmt.else_branch;
+
+        /* cmov optimization: if both branches are simple scalars, avoid branches */
+        if (g_compiler_options.opt_level >= OPT_O2 && else_br &&
+            is_simple_scalar_expr(then_br) && is_simple_scalar_expr(else_br)) {
+            /* Pattern: gen(cond) → save → gen(then) → save → gen(else) → test → cmovne */
+            gen_expression(cond);
+            emit_inst2("mov", op_reg("rax"), op_reg("r11"));  /* save condition */
+            gen_expression(then_br);
+            emit_inst2("mov", op_reg("rax"), op_reg("rcx"));  /* save then-value */
+            gen_expression(else_br);                           /* else-value in rax */
+            emit_inst2("test", op_reg("r11"), op_reg("r11")); /* test condition */
+            emit_inst2("cmovne", op_reg("rcx"), op_reg("rax")); /* if true, use then-value */
+            last_value_clear();
+        } else {
+            int label_else = label_count++;
+            int label_end = label_count++;
+            char l_else[32], l_end[32];
+            sprintf(l_else, ".L%d", label_else);
+            sprintf(l_end, ".L%d", label_end);
+
+            gen_expression(cond);
+            emit_inst2("test", op_reg("rax"), op_reg("rax"));
+            emit_inst1("je", op_label(l_else));
+
+            gen_expression(then_br);
+            emit_inst1("jmp", op_label(l_end));
+
+            emit_label_def(l_else);
+            gen_expression(else_br);
+
+            emit_label_def(l_end);
+            last_value_clear();
+        }
     } else if (node->type == AST_STRING) {
         char label[32];
         sprintf(label, ".LC%d", label_count++);
