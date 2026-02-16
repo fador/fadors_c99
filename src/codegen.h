@@ -26,6 +26,25 @@ typedef enum {
     OPT_Og = 5    // Optimize for debugging
 } OptLevel;
 
+/* Map -Os/-Og to their effective numeric optimization tier.
+ * -Os behaves like -O2 (with size-preferring overrides applied elsewhere).
+ * -Og behaves like -O1 (with debug-preserving overrides applied elsewhere).
+ * Use this for all >= comparisons instead of raw enum values. */
+static inline int opt_effective_level(OptLevel o) {
+    if (o == OPT_Os) return OPT_O2;
+    if (o == OPT_Og) return OPT_O1;
+    return (int)o;
+}
+
+/* Convenience: does the current optimization level enable at least tier N? */
+#define OPT_AT_LEAST(n) (opt_effective_level(g_compiler_options.opt_level) >= (n))
+
+/* Convenience: is -Os (optimize-for-size) mode active? */
+#define OPT_SIZE_MODE (g_compiler_options.opt_level == OPT_Os)
+
+/* Convenience: is -Og (optimize-for-debug) mode active? */
+#define OPT_DEBUG_MODE (g_compiler_options.opt_level == OPT_Og)
+
 // Compiler options passed through the pipeline
 typedef struct {
     OptLevel opt_level;     // Optimization level (default: OPT_O0)

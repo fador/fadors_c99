@@ -51,7 +51,7 @@ All test scripts live in the project root. They default to `build_linux/fadors99
 | Script | Tests | What It Verifies |
 |--------|-------|-----------------|
 | `test_obj.sh` | ~73 | Object file mode (`-c`) correctness |
-| `test_opt.sh` | ~93 | Optimization passes (`-O1`, `-O2`, `-O3`) |
+| `test_opt.sh` | ~113 | Optimization passes (`-O1`, `-O2`, `-O3`, `-Os`, `-Og`) |
 | `test_stage1.sh` | ~76 | Stage-1 self-compiled compiler correctness |
 | `test_linker.sh` | ~72 | Built-in ELF linker mode |
 | `test_debug.sh` | ~35 | DWARF debug symbols + GDB/LLDB |
@@ -98,13 +98,13 @@ Compiles each `tests/*.c` to `.o` with the compiler (`-c` flag), links with `gcc
 
 ### test_opt.sh — Optimization Verification
 
-Tests that `-O1` and `-O2` optimizations produce correct results and improve code quality. Creates inline test programs, compiles at various optimization levels, and inspects both exit codes and generated assembly for expected patterns.
+Tests that `-O1`, `-O2`, `-O3`, `-Os`, and `-Og` optimizations produce correct results and improve code quality. Creates inline test programs, compiles at various optimization levels, and inspects both exit codes and generated assembly for expected patterns.
 
 ```bash
 ./test_opt.sh [compiler_path]
 ```
 
-**Sections tested** (20 total):
+**Sections tested** (22 total):
 1. Constant Folding — compile-time evaluation
 2. Strength Reduction — `*2^n` → `<<n`
 3. Dead Code Elimination — unreachable removal
@@ -125,6 +125,8 @@ Tests that `-O1` and `-O2` optimizations produce correct results and improve cod
 18. Transitive Inlining — multi-level inline chains at -O3
 19. SIMD Reduction Vectorization — `sum += a[i]` → `paddd` + `pshufd` horizontal reduction
 20. SIMD Init Loop Vectorization — `arr[i] = i*K+C` → `movdqu` stride stores
+21. `-Os` Size Optimization — correctness, no SIMD, code size ≤ O2, basic opts active, no aggressive inlining
+22. `-Og` Debug Optimization — correctness, no inlining (except `always_inline`), no cmov, no tail call, no SIMD, constant folding active
 
 ### test_stage1.sh — Stage-1 Compiler Tests
 

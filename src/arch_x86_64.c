@@ -1044,7 +1044,7 @@ static void regalloc_analyze(ASTNode *func_node) {
     regalloc_scan_count = 0;
     regalloc_assignment_count = 0;
 
-    if (g_compiler_options.opt_level < OPT_O2) return;
+    if (!OPT_AT_LEAST(OPT_O2)) return;
 
     /* Pre-scan function parameters */
     if (func_node->children) {
@@ -1447,7 +1447,7 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
      * setCC %al; movzbq %al,%rax; test %rax,%rax; je L  → j(inv CC) L
      * setCC %al; movzbq %al,%rax; test %rax,%rax; jne L → jCC L       */
     if (!peep_in_flush && current_section == SECTION_TEXT &&
-        g_compiler_options.opt_level >= OPT_O1 &&
+        OPT_AT_LEAST(OPT_O1) &&
         peep_setcc_state == 3 &&
         op1->type == OP_LABEL &&
         mnemonic[0] == 'j' && strcmp(mnemonic, "jmp") != 0) {
@@ -1484,7 +1484,7 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
 
     /* ---- Peephole: buffer setCC %al ---- */
     if (!peep_in_flush && current_section == SECTION_TEXT &&
-        g_compiler_options.opt_level >= OPT_O1 &&
+        OPT_AT_LEAST(OPT_O1) &&
         mnemonic[0] == 's' && mnemonic[1] == 'e' && mnemonic[2] == 't' &&
         op1->type == OP_REG && strcmp(op1->data.reg, "al") == 0) {
         peep_flush_push();
@@ -1507,7 +1507,7 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
         
         /* Branch optimization: jcc L1; jmp L2 → candidate pair
          * Don't invert yet — defer to emit_label_def to confirm L1 is next. */
-        if (g_compiler_options.opt_level >= OPT_O1 && peep_pending_jcc) {
+        if (OPT_AT_LEAST(OPT_O1) && peep_pending_jcc) {
             const char *inv = peep_invert_jcc(peep_jcc_mnemonic);
             if (inv) {
                 /* Store as a candidate pair; emit_label_def will resolve */
@@ -1535,7 +1535,7 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
     
     /* Peephole: buffer conditional jumps at -O1 for jcc-over-jmp detection */
     if (!peep_in_flush && current_section == SECTION_TEXT &&
-        g_compiler_options.opt_level >= OPT_O1 &&
+        OPT_AT_LEAST(OPT_O1) &&
         op1->type == OP_LABEL &&
         mnemonic[0] == 'j' && strcmp(mnemonic, "jmp") != 0) {
         peep_flush_setcc();
@@ -1555,7 +1555,7 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
     /* Peephole: pushq %reg → buffer it; if next is popq %reg2, emit mov instead.
      * pushq %rax; popq %rdi → mov %rax, %rdi (saves 2 memory ops) */
     if (!peep_in_flush && current_section == SECTION_TEXT &&
-        g_compiler_options.opt_level >= OPT_O1 &&
+        OPT_AT_LEAST(OPT_O1) &&
         strcmp(mnemonic, "pushq") == 0 && op1->type == OP_REG) {
         peep_flush_setcc();
         peep_flush_push();  /* flush any previous buffered pushq */
@@ -1571,7 +1571,7 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
 
     /* Peephole: popq %reg after buffered pushq %reg2 → mov %reg2, %reg */
     if (!peep_in_flush && current_section == SECTION_TEXT &&
-        g_compiler_options.opt_level >= OPT_O1 &&
+        OPT_AT_LEAST(OPT_O1) &&
         strcmp(mnemonic, "popq") == 0 && op1->type == OP_REG &&
         peep_pending_push) {
         peep_pending_push = 0;
@@ -1632,7 +1632,7 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
 static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
     /* ---- Peephole: setcc state transitions for 2-operand instructions ---- */
     if (!peep_in_flush && current_section == SECTION_TEXT &&
-        g_compiler_options.opt_level >= OPT_O1 && peep_setcc_state > 0) {
+        OPT_AT_LEAST(OPT_O1) && peep_setcc_state > 0) {
         /* State 1 → 2: movzbq %al, %rax */
         if (peep_setcc_state == 1 &&
             strcmp(mnemonic, "movzbq") == 0 &&
@@ -1662,7 +1662,7 @@ static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
         if (peep_unreachable) return;
 
         /* Peephole: eliminate no-op instructions at -O1+ */
-        if (g_compiler_options.opt_level >= OPT_O1) {
+        if (OPT_AT_LEAST(OPT_O1)) {
             /* add $0, %reg → nop */
             if ((strcmp(mnemonic, "add") == 0 || strcmp(mnemonic, "addl") == 0 ||
                  strcmp(mnemonic, "sub") == 0 || strcmp(mnemonic, "subl") == 0) &&
@@ -2137,7 +2137,7 @@ static void gen_binary_expr(ASTNode *node) {
      * Only for ops that support immediate operands (not div/mod, which need %rcx).
      */
     ASTNode *right_node = node->data.binary_expr.right;
-    if (g_compiler_options.opt_level >= OPT_O1 &&
+    if (OPT_AT_LEAST(OPT_O1) &&
         right_node->type == AST_INTEGER &&
         node->data.binary_expr.op != TOKEN_SLASH &&
         node->data.binary_expr.op != TOKEN_PERCENT &&
@@ -2269,7 +2269,7 @@ static void gen_binary_expr(ASTNode *node) {
      * instruction-level parallelism on modern out-of-order CPUs.
      *   Before: gen(R); pushq %rax; gen(L); popq %rcx
      *   After:  gen(R); mov %rax,%rcx; gen(L)                */
-    if (g_compiler_options.opt_level >= OPT_O2 &&
+    if (OPT_AT_LEAST(OPT_O2) &&
         gen_expr_is_rax_only(node->data.binary_expr.left)) {
         emit_inst2("mov", op_reg("rax"), op_reg("rcx"));
         gen_expression(node->data.binary_expr.left);
@@ -2408,7 +2408,7 @@ static void gen_expression(ASTNode *node) {
     }
     if (node->type == AST_INTEGER) {
         /* -O1: mov $0 → xor (smaller, faster; also breaks false dependencies) */
-        if (g_compiler_options.opt_level >= OPT_O1 && node->data.integer.value == 0) {
+        if (OPT_AT_LEAST(OPT_O1) && node->data.integer.value == 0) {
             emit_inst2("xor", op_reg("eax"), op_reg("eax"));
         } else {
             emit_inst2("mov", op_imm(node->data.integer.value), op_reg("rax"));
@@ -3041,7 +3041,7 @@ static void gen_expression(ASTNode *node) {
         ASTNode *else_br = node->data.if_stmt.else_branch;
 
         /* cmov optimization: if both branches are simple scalars, avoid branches */
-        if (g_compiler_options.opt_level >= OPT_O2 && else_br &&
+        if (OPT_AT_LEAST(OPT_O2) && !OPT_DEBUG_MODE && else_br &&
             is_simple_scalar_expr(then_br) && is_simple_scalar_expr(else_br)) {
             /* Pattern: gen(cond) → save → gen(then) → save → gen(else) → test → cmovne */
             gen_expression(cond);
@@ -3650,7 +3650,7 @@ static void gen_statement(ASTNode *node) {
              *   - All args must fit in registers (no stack args)
              *   - Return types must be register-compatible (no int<->float conversion)
              */
-            if (g_compiler_options.opt_level >= OPT_O2 && ret_expr->type == AST_CALL) {
+            if (OPT_AT_LEAST(OPT_O2) && !OPT_DEBUG_MODE && ret_expr->type == AST_CALL) {
                 int num_args = (int)ret_expr->children_count;
                 int max_reg = g_max_reg_args;
 
@@ -3968,7 +3968,7 @@ static void gen_statement(ASTNode *node) {
                     else emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm0"));
                     last_value_clear();
                 } else {
-                    if (g_compiler_options.opt_level >= OPT_O1) {
+                    if (OPT_AT_LEAST(OPT_O1)) {
                         emit_inst2("xor", op_reg("eax"), op_reg("eax"));
                     } else {
                         emit_inst2("mov", op_imm(0), op_reg("rax"));
@@ -4109,7 +4109,7 @@ static void gen_statement(ASTNode *node) {
         sprintf(l_start, ".L%d", label_start);
         sprintf(l_end, ".L%d", label_end);
 
-        if (g_compiler_options.opt_level >= OPT_O2) {
+        if (OPT_AT_LEAST(OPT_O2)) {
             /* Loop rotation: while(cond){body} → if(cond) do{body}while(cond)
                Eliminates one unconditional jmp per iteration.
                The backward branch (jne .Lstart) is predicted taken by the CPU. */
@@ -4245,7 +4245,7 @@ static void gen_statement(ASTNode *node) {
             gen_statement(node->data.for_stmt.init);
         }
 
-        if (g_compiler_options.opt_level >= OPT_O2 && node->data.for_stmt.condition) {
+        if (OPT_AT_LEAST(OPT_O2) && node->data.for_stmt.condition) {
             /* Loop rotation: for(init;cond;incr){body}
                → init; if(cond) do { body; incr; } while(cond);
                Eliminates one unconditional jmp per iteration. */

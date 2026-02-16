@@ -4651,6 +4651,11 @@ static void ipa_dead_function_elimination(ASTNode *program) {
 ASTNode *optimize(ASTNode *program, OptLevel level) {
     if (!program) return program;
 
+    /* Map -Os/-Og to their effective optimization tier for gate comparisons.
+     * -Os: enables O1+O2 passes (size-preferring; no O3 aggressive opts).
+     * -Og: enables O1 passes only (debug-friendly; no inlining/propagation). */
+    int eff = opt_effective_level(level);
+
     /* Load PGO profile if -fprofile-use was specified */
     if (g_compiler_options.pgo_use_file[0] != '\0' && !g_pgo_profile) {
         g_pgo_profile = pgo_load_profile(g_compiler_options.pgo_use_file);
@@ -4665,10 +4670,14 @@ ASTNode *optimize(ASTNode *program, OptLevel level) {
     {
         find_inline_candidates(program);
         if (g_inline_cand_count > 0) {
-            /* At -O0: only always_inline (hint==2).
+            /* At -O0/-Og: only always_inline (hint==2).
              * At -O1: inline + always_inline (hint>=1).
-             * At -O2+: all eligible (hint>=0). */
-            int min_hint = (level >= OPT_O2) ? 0 : (level >= OPT_O1) ? 1 : 2;
+             * At -O2+/-Os: all eligible (hint>=0). */
+            int min_hint;
+            if (level == OPT_Og)
+                min_hint = 2;  /* -Og: only always_inline, preserve call structure */
+            else
+                min_hint = (eff >= OPT_O2) ? 0 : (eff >= OPT_O1) ? 1 : 2;
             /* Remove candidates below threshold */
             for (int ci = 0; ci < g_inline_cand_count; ci++) {
                 if (g_inline_cands[ci].inline_hint < min_hint) {
@@ -4689,7 +4698,7 @@ ASTNode *optimize(ASTNode *program, OptLevel level) {
         }
     }
 
-    if (level < OPT_O1) return program;  /* -O0: no further optimization */
+    if (eff < OPT_O1) return program;  /* -O0: no further optimization */
 
     /* -O1: AST-level optimizations (constant folding, DCE, strength reduction, algebraic) */
     for (size_t i = 0; i < program->children_count; i++) {
@@ -4715,8 +4724,8 @@ ASTNode *optimize(ASTNode *program, OptLevel level) {
         }
     }
 
-    /* -O2: Within-block constant/copy propagation and dead store elimination */
-    if (level >= OPT_O2) {
+    /* -O2/-Os: Within-block constant/copy propagation and dead store elimination */
+    if (eff >= OPT_O2) {
         for (size_t i = 0; i < program->children_count; i++) {
             ASTNode *child = program->children[i];
             if (child->type == AST_FUNCTION && child->data.function.body) {
@@ -4736,8 +4745,8 @@ ASTNode *optimize(ASTNode *program, OptLevel level) {
         }
     }
 
-    /* -O3: Aggressive optimizations */
-    if (level >= OPT_O3) {
+    /* -O3: Aggressive optimizations (not for -Os or -Og) */
+    if (eff >= OPT_O3) {
         /* Pass 1: Aggressive inlining of multi-statement functions */
         find_aggressive_inline_candidates(program);
         if (g_agg_inline_cand_count > 0) {

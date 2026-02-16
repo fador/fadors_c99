@@ -397,8 +397,8 @@ This section outlines the implementation plan for compiler optimization flags (`
 
 ### Phase 6: `-Os` / `-Og` — Size & Debug Optimizations
 
-- [ ] **`-Os`**: Apply `-O2` optimizations but prefer smaller code size — disable loop unrolling, prefer shorter instruction encodings, avoid aggressive inlining.
-- [ ] **`-Og`**: Apply only optimizations that don't interfere with debugging — constant folding, dead code elimination, but no inlining, no register allocation changes that hide variables.
+- [x] **`-Os`**: Applies `-O2` effective optimization level but avoids code-size-increasing transforms — no loop unrolling, no SIMD vectorization, no aggressive O3 inlining. Uses `opt_effective_level()` mapping (`Os→O2`) with `OPT_SIZE_MODE` guards. Code size ≤ `-O2` on all test cases.
+- [x] **`-Og`**: Applies only `-O1` effective optimization level with additional debug-friendly restrictions — no function inlining (except `always_inline`), no register allocation (variables stay on stack for debugger access), no cmov (preserves branch structure), no tail call optimization (preserves call stack). Uses `opt_effective_level()` mapping (`Og→O1`) with `OPT_DEBUG_MODE` guards.
 
 ### Phase 7: Codegen — Closing the GCC Gap
 

@@ -1107,6 +1107,204 @@ int main(void) {
 EOF
 check_exit "simd_combined_init_reduce" "$TMPDIR/simd_combined.c" 144 "-O3"
 
+# ---- 21. -Os Size Optimization ----
+echo "--- -Os Size Optimization ---"
+
+# 21a. Basic correctness — -Os produces correct results
+cat > "$TMPDIR/os_basic.c" << 'EOF'
+int square(int x) { return x * x; }
+int main(void) {
+    int a = square(5);
+    int b = square(3);
+    return a - b - 7;
+}
+EOF
+check_exit "os_basic_correct" "$TMPDIR/os_basic.c" 9 "-Os"
+
+# 21b. -Os should NOT vectorize (no paddd/movdqu in SIMD-eligible code)
+cat > "$TMPDIR/os_novec.c" << 'EOF'
+int main(void) {
+    int arr[64];
+    int i = 0;
+    while (i < 64) { arr[i] = i * 3 + 1; i = i + 1; }
+    int sum = 0;
+    i = 0;
+    while (i < 64) { sum = sum + arr[i]; i = i + 1; }
+    return sum & 0xFF;
+}
+EOF
+check_exit "os_novec_correct" "$TMPDIR/os_novec.c" 224 "-Os"
+"$CC" -Os -S -o "$TMPDIR/os_novec.s" "$TMPDIR/os_novec.c" 2>/dev/null
+if grep -q 'paddd\|movdqu\|pshufd' "$TMPDIR/os_novec.s"; then
+    fail "os_novec_asm: SIMD instructions found under -Os (should be disabled)"
+else
+    pass "os_novec_asm: no SIMD instructions under -Os"
+fi
+
+# 21c. -Os code size should be <= -O2 code size
+"$CC" -Os -o "$TMPDIR/os_size_os" "$TMPDIR/os_novec.c" 2>/dev/null
+"$CC" -O2 -o "$TMPDIR/os_size_o2" "$TMPDIR/os_novec.c" 2>/dev/null
+size_os=$(size "$TMPDIR/os_size_os" 2>/dev/null | tail -1 | awk '{print $1}')
+size_o2=$(size "$TMPDIR/os_size_o2" 2>/dev/null | tail -1 | awk '{print $1}')
+if [ -n "$size_os" ] && [ -n "$size_o2" ] && [ "$size_os" -le "$size_o2" ]; then
+    pass "os_code_size: -Os text ($size_os) <= -O2 text ($size_o2)"
+else
+    fail "os_code_size: -Os text ($size_os) > -O2 text ($size_o2)"
+fi
+
+# 21d. -Os should still do basic optimizations (constant folding, peephole)
+cat > "$TMPDIR/os_opts.c" << 'EOF'
+int main(void) {
+    int x = 3 + 4;
+    int y = x * 2;
+    return y;
+}
+EOF
+check_exit "os_basic_opts" "$TMPDIR/os_opts.c" 14 "-Os"
+"$CC" -Os -S -o "$TMPDIR/os_opts.s" "$TMPDIR/os_opts.c" 2>/dev/null
+# Should have mov $14 (constant folded) or xor-zero-init
+if grep -q 'mov \$14' "$TMPDIR/os_opts.s" || grep -q 'xorl' "$TMPDIR/os_opts.s"; then
+    pass "os_basic_opts_asm: basic optimizations active under -Os"
+else
+    fail "os_basic_opts_asm: basic optimizations NOT active under -Os"
+fi
+
+# 21e. -Os should NOT do aggressive inlining of larger functions
+cat > "$TMPDIR/os_noinline.c" << 'EOF'
+int compute(int x) {
+    int a = x * 3;
+    int b = a + 7;
+    int c = b * 2;
+    int d = c - 5;
+    return d;
+}
+int main(void) { return compute(4) & 0xFF; }
+EOF
+"$CC" -Os -S -o "$TMPDIR/os_noinline.s" "$TMPDIR/os_noinline.c" 2>/dev/null
+check_exit "os_noinline_correct" "$TMPDIR/os_noinline.c" 33 "-Os"
+
+# 21f. -Os multi-file correctness
+cat > "$TMPDIR/os_multi.c" << 'EOF'
+int fib(int n) {
+    if (n <= 1) return n;
+    return fib(n - 1) + fib(n - 2);
+}
+int main(void) { return fib(10) & 0xFF; }
+EOF
+check_exit "os_multi_correct" "$TMPDIR/os_multi.c" 55 "-Os"
+
+# ---- 22. -Og Debug Optimization ----
+echo "--- -Og Debug Optimization ---"
+
+# 22a. Basic correctness
+cat > "$TMPDIR/og_basic.c" << 'EOF'
+int square(int x) { return x * x; }
+int main(void) {
+    int a = square(5);
+    int b = square(3);
+    return a - b - 7;
+}
+EOF
+check_exit "og_basic_correct" "$TMPDIR/og_basic.c" 9 "-Og"
+
+# 22b. -Og should NOT inline functions (call instruction preserved)
+"$CC" -Og -S -o "$TMPDIR/og_noinline.s" "$TMPDIR/og_basic.c" 2>/dev/null
+if grep -q 'call.*square' "$TMPDIR/og_noinline.s"; then
+    pass "og_noinline: 'call square' preserved under -Og"
+else
+    fail "og_noinline: function was inlined under -Og (call missing)"
+fi
+
+# 22c. -Og should NOT use cmov (confuses debuggers)
+cat > "$TMPDIR/og_nocmov.c" << 'EOF'
+int main(void) {
+    int x = 10;
+    int y = 20;
+    int z = (x < y) ? x : y;
+    return z;
+}
+EOF
+"$CC" -Og -S -o "$TMPDIR/og_nocmov.s" "$TMPDIR/og_nocmov.c" 2>/dev/null
+check_exit "og_nocmov_correct" "$TMPDIR/og_nocmov.c" 10 "-Og"
+if grep -q 'cmov' "$TMPDIR/og_nocmov.s"; then
+    fail "og_nocmov_asm: cmov found under -Og (should use branches)"
+else
+    pass "og_nocmov_asm: no cmov under -Og"
+fi
+
+# 22d. -Og should NOT do tail call optimization (preserves call stack)
+cat > "$TMPDIR/og_notail.c" << 'EOF'
+int helper(int x) { return x + 1; }
+int main(void) { return helper(41); }
+EOF
+"$CC" -Og -S -o "$TMPDIR/og_notail.s" "$TMPDIR/og_notail.c" 2>/dev/null
+check_exit "og_notail_correct" "$TMPDIR/og_notail.c" 42 "-Og"
+if grep -q 'call.*helper' "$TMPDIR/og_notail.s"; then
+    pass "og_notail: call preserved (no tail call under -Og)"
+else
+    fail "og_notail: tail call used under -Og (call missing)"
+fi
+
+# 22e. -Og should still do constant folding (doesn't hurt debugging)
+cat > "$TMPDIR/og_constfold.c" << 'EOF'
+int main(void) {
+    int x = 3 + 4 * 5;
+    return x;
+}
+EOF
+check_exit "og_constfold" "$TMPDIR/og_constfold.c" 23 "-Og"
+
+# 22f. -Og should NOT vectorize
+cat > "$TMPDIR/og_novec.c" << 'EOF'
+int main(void) {
+    int arr[32];
+    int i = 0;
+    while (i < 32) { arr[i] = i; i = i + 1; }
+    int sum = 0;
+    i = 0;
+    while (i < 32) { sum = sum + arr[i]; i = i + 1; }
+    return sum & 0xFF;
+}
+EOF
+check_exit "og_novec_correct" "$TMPDIR/og_novec.c" 240 "-Og"
+"$CC" -Og -S -o "$TMPDIR/og_novec.s" "$TMPDIR/og_novec.c" 2>/dev/null
+if grep -q 'paddd\|movdqu\|pshufd' "$TMPDIR/og_novec.s"; then
+    fail "og_novec_asm: SIMD instructions found under -Og"
+else
+    pass "og_novec_asm: no SIMD instructions under -Og"
+fi
+
+# 22g. -Og should always_inline functions with __attribute__((always_inline))
+cat > "$TMPDIR/og_always_inline.c" << 'EOF'
+static inline __attribute__((always_inline)) int tiny(int x) { return x + 1; }
+int main(void) { return tiny(41); }
+EOF
+"$CC" -Og -S -o "$TMPDIR/og_always_inline.s" "$TMPDIR/og_always_inline.c" 2>/dev/null
+check_exit "og_always_inline_correct" "$TMPDIR/og_always_inline.c" 42 "-Og"
+if grep -q 'call.*tiny' "$TMPDIR/og_always_inline.s"; then
+    fail "og_always_inline_asm: always_inline function NOT inlined under -Og"
+else
+    pass "og_always_inline_asm: always_inline function inlined under -Og"
+fi
+
+# 22h. -Og complex control flow correctness
+cat > "$TMPDIR/og_complex.c" << 'EOF'
+int main(void) {
+    int sum = 0;
+    int i = 0;
+    while (i < 10) {
+        if (i % 2 == 0) {
+            sum = sum + i;
+        } else {
+            sum = sum - 1;
+        }
+        i = i + 1;
+    }
+    return sum & 0xFF;
+}
+EOF
+check_exit "og_complex_correct" "$TMPDIR/og_complex.c" 15 "-Og"
+
 # ---- Summary ----
 echo ""
 echo "=== Results ==="
