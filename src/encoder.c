@@ -6,8 +6,14 @@
 
 static COFFWriter *encoder_writer = NULL;
 
+static int encoder_bits = 64;
+
 void encoder_set_writer(COFFWriter *writer) {
     encoder_writer = writer;
+}
+
+void encoder_set_bitness(int bits) {
+    encoder_bits = bits;
 }
 
 static void emit_reloc(Buffer *buf, const char *label, uint32_t offset) {
@@ -17,7 +23,21 @@ static void emit_reloc(Buffer *buf, const char *label, uint32_t offset) {
         sym_idx = coff_writer_add_symbol(encoder_writer, label, 0, 0, 0, IMAGE_SYM_CLASS_EXTERNAL);
     }
     // IMAGE_REL_AMD64_REL32 is 0x0004
-    coff_writer_add_reloc(encoder_writer, offset, (uint32_t)sym_idx, 0x0004, 1 /* .text */);
+    // IMAGE_REL_I386_REL32 is 0x0014
+    uint16_t type = (encoder_bits == 32) ? 0x0014 : 0x0004;
+    coff_writer_add_reloc(encoder_writer, offset, (uint32_t)sym_idx, type, 1 /* .text */);
+}
+
+static void emit_reloc_abs(Buffer *buf, const char *label, uint32_t offset) {
+    if (!encoder_writer) return;
+    int32_t sym_idx = coff_writer_find_symbol(encoder_writer, label);
+    if (sym_idx < 0) {
+        sym_idx = coff_writer_add_symbol(encoder_writer, label, 0, 0, 0, IMAGE_SYM_CLASS_EXTERNAL);
+    }
+    // IMAGE_REL_I386_DIR32 is 0x0006
+    // IMAGE_REL_AMD64_ADDR32 is 0x0002
+    uint16_t type = (encoder_bits == 32) ? 0x0006 : 0x0002;
+    coff_writer_add_reloc(encoder_writer, offset, (uint32_t)sym_idx, type, 1 /* .text */);
 }
 
 int get_reg_id(const char *reg) {
@@ -46,6 +66,7 @@ int get_reg_id(const char *reg) {
 }
 
 static void emit_rex(Buffer *buf, int w, int r, int x, int b) {
+    if (encoder_bits == 32) return; // REX not strictly valid in 32-bit (encodes as inc/dec)
     // REX prefix: 0100WRXB
     uint8_t rex = 0x40;
     if (w) rex |= 0x08;
@@ -248,7 +269,7 @@ void encode_inst1(Buffer *buf, const char *mnemonic, Operand *op1) {
 }
 
 void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest) {
-    int is_64 = (mnemonic[strlen(mnemonic)-1] == 'q' || strcmp(mnemonic, "mov") == 0 || strcmp(mnemonic, "add") == 0 || strcmp(mnemonic, "sub") == 0 || strcmp(mnemonic, "cmp") == 0);
+    int is_64 = (encoder_bits == 64) && (mnemonic[strlen(mnemonic)-1] == 'q' || strcmp(mnemonic, "mov") == 0 || strcmp(mnemonic, "add") == 0 || strcmp(mnemonic, "sub") == 0 || strcmp(mnemonic, "cmp") == 0);
     if (strcmp(mnemonic, "mov") == 0 || strcmp(mnemonic, "movq") == 0 || strcmp(mnemonic, "movl") == 0) {
         is_64 = (mnemonic[3] != 'l');
         if (src->type == OP_IMM && dest->type == OP_REG) {
@@ -454,7 +475,8 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             emit_rex(buf, is_64, d >= 8, 0, 0);
             buffer_write_byte(buf, 0x8D);
             emit_modrm(buf, 0, d, 5); // RIP-relative
-            emit_reloc(buf, src->data.label, (uint32_t)buf->size);
+            if (encoder_bits == 32) emit_reloc_abs(buf, src->data.label, (uint32_t)buf->size);
+            else emit_reloc(buf, src->data.label, (uint32_t)buf->size);
             buffer_write_dword(buf, 0); // COFF REL32 addend = 0
         } else if (src->type == OP_MEM_SIB && dest->type == OP_REG) {
             /* LEA with SIB addressing: lea disp(base, index, scale), dest */

@@ -63,7 +63,7 @@ void dos_linker_set_entry(DosLinker *l, const char *name) {
 }
 
 /* Symbol Management */
-static int find_global(DosLinker *l, const char *name) {
+static int dos_find_global(DosLinker *l, const char *name) {
     for (size_t i = 0; i < l->sym_count; i++) {
         if (l->symbols[i].storage_class != 3 /* STATIC */ &&
             strcmp(l->symbols[i].name, name) == 0)
@@ -72,7 +72,7 @@ static int find_global(DosLinker *l, const char *name) {
     return -1;
 }
 
-static uint32_t add_sym(DosLinker *l, const char *name, uint64_t value, int section, uint8_t sc, uint16_t type) {
+static uint32_t dos_add_sym(DosLinker *l, const char *name, uint64_t value, int section, uint8_t sc, uint16_t type) {
     if (l->sym_count >= l->sym_cap) {
         l->sym_cap = l->sym_cap ? l->sym_cap * 2 : 256;
         l->symbols = realloc(l->symbols, l->sym_cap * sizeof(DosLinkSymbol));
@@ -87,7 +87,7 @@ static uint32_t add_sym(DosLinker *l, const char *name, uint64_t value, int sect
 }
 
 /* Relocation Management */
-static void add_reloc(DosLinker *l, uint64_t offset, int section, uint32_t sym_index, uint32_t type) {
+static void dos_add_reloc(DosLinker *l, uint64_t offset, int section, uint32_t sym_index, uint32_t type) {
     if (l->reloc_count >= l->reloc_cap) {
         l->reloc_cap = l->reloc_cap ? l->reloc_cap * 2 : 256;
         l->relocs = realloc(l->relocs, l->reloc_cap * sizeof(DosLinkReloc));
@@ -100,7 +100,7 @@ static void add_reloc(DosLinker *l, uint64_t offset, int section, uint32_t sym_i
 }
 
 /* COFF Reader (Simplified from pe_linker.c) */
-static int read_coff_object(DosLinker *l, const unsigned char *data, size_t file_size, const char *filename) {
+static int dos_read_coff_object(DosLinker *l, const unsigned char *data, size_t file_size, const char *filename) {
     if (file_size < sizeof(COFFHeader)) return -1;
     const COFFHeader *hdr = (const COFFHeader *)data;
     
@@ -189,7 +189,7 @@ static int read_coff_object(DosLinker *l, const unsigned char *data, size_t file
         }
         
         if (cs->StorageClass == 2 /* EXTERNAL */) {
-             int existing = find_global(l, name_buf);
+             int existing = dos_find_global(l, name_buf);
              if (existing >= 0) {
                  if (section != SEC_UNDEF && l->symbols[existing].section == SEC_UNDEF) {
                      l->symbols[existing].section = section;
@@ -197,10 +197,10 @@ static int read_coff_object(DosLinker *l, const unsigned char *data, size_t file
                  }
                  sym_map[i] = existing;
              } else {
-                 sym_map[i] = add_sym(l, name_buf, value, section, 2, cs->Type);
+                 sym_map[i] = dos_add_sym(l, name_buf, value, section, 2, cs->Type);
              }
         } else {
-            sym_map[i] = add_sym(l, name_buf, value, section, cs->StorageClass, cs->Type);
+            sym_map[i] = dos_add_sym(l, name_buf, value, section, cs->StorageClass, cs->Type);
         }
         i += cs->NumberOfAuxSymbols;
     }
@@ -212,7 +212,7 @@ static int read_coff_object(DosLinker *l, const unsigned char *data, size_t file
         for (int r = 0; r < shdrs[i].NumberOfRelocations; r++) {
              uint32_t new_sym = sym_map[relocs[r].SymbolTableIndex];
              if (new_sym != (uint32_t)-1) {
-                 add_reloc(l, relocs[r].VirtualAddress + sec_base[i], sec_id[i], new_sym, relocs[r].Type);
+                 dos_add_reloc(l, relocs[r].VirtualAddress + sec_base[i], sec_id[i], new_sym, relocs[r].Type);
              }
         }
     }
@@ -232,7 +232,7 @@ int dos_linker_add_object_file(DosLinker *l, const char *path) {
     unsigned char *buf = malloc(sz);
     fread(buf, 1, sz, f);
     fclose(f);
-    int rc = read_coff_object(l, buf, sz, path);
+    int rc = dos_read_coff_object(l, buf, sz, path);
     free(buf);
     return rc;
 }

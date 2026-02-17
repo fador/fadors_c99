@@ -312,7 +312,13 @@ void arch_x86_64_set_writer(COFFWriter *writer) {
     encoder_set_writer(writer);
 }
 
+static void emit_label_def_ex(const char *name, int is_static);
+
 static void emit_label_def(const char *name) {
+    emit_label_def_ex(name, name[0] == '.');
+}
+
+static void emit_label_def_ex(const char *name, int is_static) {
     // Peephole: only apply to text section labels
     if (current_section == SECTION_TEXT) {
         peep_flush_setcc();
@@ -373,8 +379,7 @@ static void emit_label_def(const char *name) {
     }
 
     if (obj_writer) {
-        uint8_t storage_class = IMAGE_SYM_CLASS_EXTERNAL;
-        if (name[0] == '.') storage_class = IMAGE_SYM_CLASS_STATIC;
+        uint8_t storage_class = is_static ? IMAGE_SYM_CLASS_STATIC : IMAGE_SYM_CLASS_EXTERNAL;
         
         int16_t section_num;
         if (current_section == SECTION_TEXT) section_num = 1; else section_num = 2;
@@ -1337,7 +1342,7 @@ static void gen_global_decl(ASTNode *node) {
             fprintf(out, "_DATA ENDS\n");
         } else {
             fprintf(out, ".data\n");
-            fprintf(out, ".globl %s\n", node->data.var_decl.name);
+            if (!node->data.var_decl.is_static) fprintf(out, ".globl %s\n", node->data.var_decl.name);
             fprintf(out, "%s:\n", node->data.var_decl.name);
              ASTNode *init_att = node->data.var_decl.initializer;
              if (init_att && init_att->type == AST_INTEGER) {
@@ -3873,14 +3878,14 @@ static void gen_statement(ASTNode *node) {
         }
         if (node->data.var_decl.is_static) {
             // Static local variable
-            char slabel[64];
-            sprintf(slabel, "_S_%s_%s_%d", current_func_name ? current_func_name : "global", node->data.var_decl.name, static_label_count++);
+            char slabel[256];
+            snprintf(slabel, sizeof(slabel), "_S_%s.%s.%d", current_func_name ? current_func_name : "global", node->data.var_decl.name, static_label_count++);
             
             Section old_section = current_section;
             current_section = SECTION_DATA;
             
             if (obj_writer) {
-                emit_label_def(slabel);
+                emit_label_def_ex(slabel, 1);
                 int size = node->resolved_type ? node->resolved_type->size : 8;
                 ASTNode *vinit1 = node->data.var_decl.initializer;
                 if (vinit1 && vinit1->type == AST_INIT_LIST) {
@@ -4589,7 +4594,7 @@ static void gen_function(ASTNode *node) {
     peep_setcc_state = 0;
     if (current_syntax == SYNTAX_ATT) {
         if (out && !node->data.function.is_static) fprintf(out, ".globl %s\n", node->data.function.name);
-        emit_label_def(node->data.function.name);
+        emit_label_def_ex(node->data.function.name, node->data.function.is_static);
     } else {
         if (out && !node->data.function.is_static) {
             fprintf(out, "PUBLIC %s\n", node->data.function.name);
@@ -4597,6 +4602,7 @@ static void gen_function(ASTNode *node) {
         } else if (out) {
             fprintf(out, "%s PROC\n", node->data.function.name);
         }
+        emit_label_def_ex(node->data.function.name, node->data.function.is_static);
     }
     
     // Prologue

@@ -252,7 +252,7 @@ static Operand *op_sib(const char *base, const char *index, int scale, int disp)
 }
 
 /* Map 32-bit register name to 64-bit equivalent for SIB addressing */
-static const char *reg_to_64bit(const char *reg) {
+static const char *dos_reg_to_64bit(const char *reg) {
     if (strcmp(reg, "eax") == 0) return "eax";
     if (strcmp(reg, "ecx") == 0) return "ecx";
     if (strcmp(reg, "edx") == 0) return "edx";
@@ -314,7 +314,13 @@ void arch_x86_set_writer(COFFWriter *writer) {
     encoder_set_writer(writer);
 }
 
+static void emit_label_def_ex(const char *name, int is_static);
+
 static void emit_label_def(const char *name) {
+    emit_label_def_ex(name, name[0] == '.');
+}
+
+static void emit_label_def_ex(const char *name, int is_static) {
     // Peephole: only apply to text section labels
     if (current_section == SECTION_TEXT) {
         peep_flush_setcc();
@@ -375,8 +381,7 @@ static void emit_label_def(const char *name) {
     }
 
     if (obj_writer) {
-        uint8_t storage_class = IMAGE_SYM_CLASS_EXTERNAL;
-        if (name[0] == '.') storage_class = IMAGE_SYM_CLASS_STATIC;
+        uint8_t storage_class = is_static ? IMAGE_SYM_CLASS_STATIC : IMAGE_SYM_CLASS_EXTERNAL;
         
         int16_t section_num;
         if (current_section == SECTION_TEXT) section_num = 1; else section_num = 2;
@@ -469,14 +474,8 @@ void arch_x86_init(FILE *output) {
         g_xmm_arg_regs[6] = "xmm6";
         g_xmm_arg_regs[7] = "xmm7";
         // For 32-bit DOS, default to CDECL (stack args)
-    if (g_target == TARGET_DOS) {
-        g_max_reg_args = 0;
-        g_use_shadow_space = 0;
-    } else {
-        g_max_reg_args = 6; // x64 default
     }
-        g_use_shadow_space = 0;
-    }
+    encoder_set_bitness(32);
     if (out && !obj_writer && current_syntax == SYNTAX_INTEL) {
         fprintf(out, "_TEXT SEGMENT\n");
     }
@@ -1402,7 +1401,7 @@ static void gen_global_decl(ASTNode *node) {
             fprintf(out, "_DATA ENDS\n");
         } else {
             fprintf(out, ".data\n");
-            fprintf(out, ".globl %s\n", node->data.var_decl.name);
+            if (!node->data.var_decl.is_static) fprintf(out, ".globl %s\n", node->data.var_decl.name);
             fprintf(out, "%s:\n", node->data.var_decl.name);
              ASTNode *init_att = node->data.var_decl.initializer;
              if (init_att && init_att->type == AST_INTEGER) {
@@ -1503,7 +1502,7 @@ static void print_operand(Operand *op) {
         }
     } else if (op->type == OP_LABEL) {
         const char *lbl = op->data.label ? op->data.label : "null_label";
-        if (current_syntax == SYNTAX_ATT) fprintf(out, "%s(%%rip)", lbl);
+        if (current_syntax == SYNTAX_ATT) fprintf(out, "%s", lbl);
         else fprintf(out, "[%s]", lbl);
     } else if (op->type == OP_MEM_SIB) {
         /* SIB addressing: disp(base, index, scale) in AT&T; [base + index*scale + disp] in Intel */
@@ -1802,7 +1801,7 @@ static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
                 op1->type == OP_IMM && op2->type == OP_REG) {
                 long long val = op1->data.imm;
                 int is_32 = (strcmp(mnemonic, "imull") == 0);
-                const char *reg64 = reg_to_64bit(op2->data.reg);
+                const char *reg64 = dos_reg_to_64bit(op2->data.reg);
                 const char *lea_mn = is_32 ? "leal" : "lea";
                 /* Single-instruction: x*N where (N-1) is a valid SIB scale */
                 int scale = 0;
@@ -4654,7 +4653,7 @@ static void gen_function(ASTNode *node) {
     peep_setcc_state = 0;
     if (current_syntax == SYNTAX_ATT) {
         if (out && !node->data.function.is_static) fprintf(out, ".globl %s\n", node->data.function.name);
-        emit_label_def(node->data.function.name);
+        emit_label_def_ex(node->data.function.name, node->data.function.is_static);
     } else {
         if (out && !node->data.function.is_static) {
             fprintf(out, "PUBLIC %s\n", node->data.function.name);
@@ -4662,6 +4661,7 @@ static void gen_function(ASTNode *node) {
         } else if (out) {
             fprintf(out, "%s PROC\n", node->data.function.name);
         }
+        emit_label_def_ex(node->data.function.name, node->data.function.is_static);
     }
     
     // Prologue

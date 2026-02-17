@@ -2,19 +2,42 @@
 #define ENCODER_H
 
 #include "buffer.h"
-#include "arch_x86_64.h"
+#include "coff_writer.h"
 
-// Note: Using Operand from arch_x86_64.c might be tricky if it's static.
-// I should probably move Operand definition to arch_x86_64.h or a shared header.
-void arch_x86_64_set_syntax(CodegenSyntax syntax);
+/* Simple x86-64 machine code encoder */
+
+typedef enum {
+    OP_REG,
+    OP_IMM,
+    OP_MEM,
+    OP_LABEL,
+    OP_MEM_SIB
+} OperandType;
+
+typedef struct {
+    OperandType type;
+    union {
+        const char *reg;
+        long long imm;
+        struct {
+            const char *base;
+            int offset;
+        } mem;
+        const char *label;
+        struct {
+            const char *base;
+            const char *index;
+            int scale;
+            int disp;
+        } sib;
+    } data;
+} Operand;
+
 void encoder_set_writer(COFFWriter *writer);
-
-int get_reg_id(const char *reg);
+void encoder_set_bitness(int bits);
 
 void encode_inst0(Buffer *buf, const char *mnemonic);
 void encode_inst1(Buffer *buf, const char *mnemonic, Operand *op1);
 void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest);
-void encode_inst3(Buffer *buf, const char *mnemonic,
-                  Operand *src1, Operand *src2, Operand *dest);
 
 #endif

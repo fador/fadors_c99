@@ -180,6 +180,8 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
     codegen_set_writer(current_writer);
     
     if (target == TARGET_DOS) {
+        arch_x86_set_target(target);
+        arch_x86_set_writer(current_writer);
         arch_x86_init(NULL); // DOS uses 32-bit x86 backend
     } else {
         codegen_init(NULL); // x64 backend (default)
@@ -210,7 +212,7 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
         codegen_generate(program);
     }
 
-    if (target == TARGET_WINDOWS)
+    if (target == TARGET_WINDOWS || target == TARGET_DOS)
         coff_writer_write(current_writer, obj_filename);
     else
         elf_writer_write(current_writer, obj_filename);
@@ -293,6 +295,17 @@ static int do_cc(int input_count, const char **input_files,
             rc = linker_link(lnk, exe_filename);
             linker_free(lnk);
             if (rc != 0) printf("Error: ELF linking failed.\n");
+        } else if (target == TARGET_DOS) {
+            DosLinker *dlnk = dos_linker_new();
+            for (i = 0; i < obj_count; i++)
+                dos_linker_add_object_file(dlnk, obj_paths[i]);
+            for (i = 0; i < libpath_count; i++)
+                dos_linker_add_lib_path(dlnk, libpaths[i]);
+            for (i = 0; i < lib_count; i++)
+                dos_linker_add_library(dlnk, libraries[i]);
+            rc = dos_linker_link(dlnk, exe_filename);
+            dos_linker_free(dlnk);
+            if (rc != 0) printf("Error: DOS linking failed.\n");
         } else {
             /* Windows: use custom PE linker (handles libraries too) */
             PELinker *plnk = pe_linker_new();
@@ -406,9 +419,10 @@ static int do_cc(int input_count, const char **input_files,
         return 1;
     }
 
-    if (target == TARGET_DOS)
+    if (target == TARGET_DOS) {
+        arch_x86_set_target(target);
         arch_x86_init(asm_out);
-    else
+    } else
         codegen_init(asm_out);
     optimize(program, g_compiler_options.opt_level);
 

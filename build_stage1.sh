@@ -38,6 +38,8 @@ SOURCES=(
     src/parser.c
     src/codegen.c
     src/arch_x86_64.c
+    src/arch_x86.c
+    src/dos_linker.c
     src/encoder.c
     src/coff_writer.c
     src/elf_writer.c
