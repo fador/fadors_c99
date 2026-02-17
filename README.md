@@ -438,6 +438,45 @@ This section outlines the implementation plan for compiler optimization flags (`
 
 *Phase 7d: SIMD vectorization cut bench_array -O3 from 0.026s to 0.005s (5.2× faster). Reduction uses paddd+pshufd horizontal sum; init uses movdqu stride stores. Average gap is ~4.2× across all benchmarks.*
 
+### Phase 8: Advanced Optimizations — Closing Remaining Gaps
+
+**Goal**: Further close the gap with GCC through additional analysis, loop, control flow, and memory optimizations. These are roughly ordered by expected impact.
+
+#### Phase 8a: Control Flow Optimizations
+- [ ] **Jump threading**: Analyze conditional jumps and duplicate basic blocks to bypass conditional checks that are predictable from dominator context. E.g., if block A branches on `x==0` to B, and B branches on `x==0` again, thread A directly to B's target.
+- [ ] **Branch prediction / block reordering**: Rearrange basic blocks using static heuristics or PGO profile data to make the most likely execution path fall-through (linear layout). Reduces taken-branch penalty.
+- [ ] **Cross-jumping (tail merging)**: Unify identical code sequences found at the end of predecessor blocks into a single shared sequence. Reduces code size without affecting performance.
+
+#### Phase 8b: Code Motion
+- [ ] **Code sinking**: Move instructions into less frequently executed paths (like `else` blocks or error paths) if they are not needed on the hot path. Opposite of hoisting.
+- [ ] **Code hoisting**: Move instructions to a dominator block if they are computed identically on all paths leaving that block. Reduces code duplication.
+- [ ] **Load/store motion (register promotion)**: Promote memory references within a loop to registers — load before the loop, operate in registers, store back after the loop exits. Stronger than current LICM which moves entire instructions.
+
+#### Phase 8c: Advanced Data Flow
+- [ ] **Partial redundancy elimination (PRE)**: A powerful combination of CSE and code motion that removes computations redundant on some (but not all) paths by inserting computations on the non-redundant paths.
+- [ ] **Aggressive dead code elimination (ADCE)**: Mark all code as dead initially, then walk backwards from side effects and return values to mark live code. Removes more dead code than traditional DCE.
+
+#### Phase 8d: Advanced Loop Transforms
+- [ ] **Loop unswitching**: Move a loop-invariant conditional out of the loop by duplicating the loop body for both the true and false paths. Trades code size for branch removal.
+- [ ] **Loop interchange**: Exchange the order of nested loops to improve cache locality (e.g., column-major → row-major access patterns).
+- [ ] **Loop fusion (jamming)**: Combine adjacent loops with the same iteration space into a single loop to reduce loop overhead and improve data locality.
+- [ ] **Loop distribution (fission)**: Split a single loop with independent computations into multiple loops to isolate dependencies or enable vectorization on specific parts.
+- [ ] **Loop tiling (blocking)**: Divide loop iteration space into smaller blocks (tiles) to ensure working set fits in cache/TLB. Critical for matrix operations.
+
+#### Phase 8e: Advanced Vectorization
+- [ ] **SLP vectorization (superword-level parallelism)**: Merge independent scalar operations within a basic block into vector operations. Unlike loop vectorization, operates on straight-line code (e.g., consecutive `a.x=...; a.y=...; a.z=...`).
+
+#### Phase 8f: Memory Optimizations
+- [ ] **Strict aliasing optimization**: Assume pointers of different types do not alias (per C99 §6.5 strict aliasing rules), enabling aggressive load/store reordering and redundant load elimination.
+- [ ] **MemCpy/MemSet optimization**: Replace `memcpy`/`memset` calls with inline instruction sequences for small, known sizes (e.g., `rep movsb`, `movups` for 16-byte copies, scalar stores for ≤8 bytes).
+
+#### Phase 8g: Instruction-Level Optimizations
+- [ ] **Full instruction scheduling**: Reorder machine instructions to minimize pipeline stalls and maximize functional unit utilization. Model instruction latencies and resource constraints for x86_64 (beyond current push/pop→mov peephole).
+- [ ] **Software pipelining**: Reorganize loop iterations so that instructions from future iterations overlap with the current iteration, hiding memory and computation latency.
+
+#### Phase 8h: Whole-Program Optimizations
+- [ ] **Link-time optimization (LTO)**: Defer optimization until link time, allowing the compiler to see the entire program as a single unit. Enables cross-module inlining, DCE, and constant propagation across translation units.
+
 ### Implementation Priority & Dependencies
 
 ```
@@ -454,10 +493,14 @@ Phase 1 (CLI flags)      ─── prerequisite for all others
                     │       └── Phase 4c (-O2 optimizations)
                     │               │
                     │               └── Phase 5 (-O3)
+                    │                       │
+                    │                       └── Phase 8 (Advanced)
                     │
                     ├── Phase 6 (-Os/-Og)
                     │
                     └── Phase 7 (Codegen quality)
+                            │
+                            └── Phase 8g (Instruction scheduling)
 ```
 
-**Suggested order**: Phase 1 → Phase 2a (DWARF) → Phase 3 (-O1) → Phase 4 (-O2) → Phase 2b (CodeView) → Phase 5 (-O3) → Phase 7a (regalloc) → Phase 7b (insn select) → Phase 7c (loops) → Phase 7d (vectorize) → Phase 6.
+**Suggested order**: Phase 1 → Phase 2a (DWARF) → Phase 3 (-O1) → Phase 4 (-O2) → Phase 2b (CodeView) → Phase 5 (-O3) → Phase 7a (regalloc) → Phase 7b (insn select) → Phase 7c (loops) → Phase 7d (vectorize) → Phase 6 → Phase 8 (advanced opts).
