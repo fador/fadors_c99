@@ -146,7 +146,7 @@ Use `-S` to stop after assembly generation.
 - `src/`: Compiler core (Lexer, Parser, AST, CodeGen, Preprocessor, Types, Encoder, Linker).
 - `include/`: Bundled C standard library headers.
 - `stage1/`: Self-compiled compiler assembly (for bootstrapping).
-- `tests/`: Comprehensive automated test suite (97+ tests).
+- `tests/`: Comprehensive automated test suite (97+ numbered tests, 5 benchmarks, 106 total).
 - `CMakeLists.txt`: Build configuration.
 
 ## Testing Procedure
@@ -379,11 +379,11 @@ This section outlines the implementation plan for compiler optimization flags (`
 
 | Benchmark | -O0 | -O1 | -O2 | -O3 | Speedup (O0→O3) |
 |-----------|-----|-----|-----|-----|----------|
-| bench_array | 0.084s | 0.079s | 0.029s | 0.028s | **67%** |
-| bench_struct | 0.168s | 0.134s | 0.089s | 0.072s | **57%** |
-| bench_calls | 0.069s | 0.060s | 0.014s | 0.014s | **80%** |
-| bench_loop | 0.019s | 0.010s | 0.008s | 0.008s | **58%** |
-| bench_branch | 0.038s | 0.029s | 0.025s | 0.025s | **34%** |
+| bench_array | 0.082s | 0.075s | 0.026s | 0.005s | **94%** |
+| bench_struct | 0.141s | 0.116s | 0.072s | 0.080s | **43%** |
+| bench_calls | 0.067s | 0.059s | 0.013s | 0.007s | **90%** |
+| bench_loop | 0.019s | 0.010s | 0.010s | 0.010s | **47%** |
+| bench_branch | 0.039s | 0.027s | 0.025s | 0.025s | **36%** |
 
 **-O2 register allocator impact** (vs previous -O1 baseline):
 
@@ -431,10 +431,10 @@ This section outlines the implementation plan for compiler optimization flags (`
 | Benchmark | fadors99 -O3 | gcc -O2 | Gap | Remaining Root Causes |
 |-----------|-------------|---------|-----|-------------|
 | bench_array | 0.005s | 0.003s | 1.7× | SIMD reduction + init active; remaining gap is alignment & unrolling |
-| bench_struct | 0.069s | 0.005s | 14× | pushq/popq temps in `distance_sq` (5-reg limit), no SIMD accumulator |
+| bench_struct | 0.080s | 0.005s | 16× | pushq/popq temps in `distance_sq` (5-reg limit), no SIMD accumulator |
 | bench_calls | 0.007s | 0.005s | 1.4× | Transitive inlining eliminates all calls; LEA mul-add active |
 | bench_loop | 0.010s | 0.004s | 2.5× | IV SR active; remaining gap is register pressure |
-| bench_branch | 0.025s | 0.019s | 1.3× | Loop rotation active; `call collatz_steps` not inlined |
+| bench_branch | 0.025s | 0.020s | 1.3× | Loop rotation active; `call collatz_steps` not inlined |
 
 *Phase 7d: SIMD vectorization cut bench_array -O3 from 0.026s to 0.005s (5.2× faster). Reduction uses paddd+pshufd horizontal sum; init uses movdqu stride stores. Average gap is ~4.2× across all benchmarks.*
 

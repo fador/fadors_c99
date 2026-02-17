@@ -38,7 +38,7 @@ Compile the compiler with itself using the stage-0 binary:
 ```
 
 - Default stage-0: `build_linux/fadors99`
-- Compiles all 16 source files (`buffer.c`, `types.c`, `ast.c`, `lexer.c`, `preprocessor.c`, `parser.c`, `codegen.c`, `arch_x86_64.c`, `encoder.c`, `coff_writer.c`, `elf_writer.c`, `linker.c`, `pe_linker.c`, `optimizer.c`, `ir.c`, `main.c`) to assembly via the stage-0 compiler, then assembles with GNU `as` and links with `gcc`.
+- Compiles all 17 source files (`buffer.c`, `types.c`, `ast.c`, `lexer.c`, `preprocessor.c`, `parser.c`, `codegen.c`, `arch_x86_64.c`, `encoder.c`, `coff_writer.c`, `elf_writer.c`, `linker.c`, `pe_linker.c`, `optimizer.c`, `ir.c`, `pgo.c`, `main.c`) to assembly via the stage-0 compiler, then assembles with GNU `as` and links with `gcc`.
 - Output: `build_linux/fadors99_stage1` and intermediate assembly in `stage1/*.s`
 - Includes a smoke test: compiles `tests/01_return.c` with stage-1 and verifies exit code = 42.
 
@@ -50,15 +50,15 @@ All test scripts live in the project root. They default to `build_linux/fadors99
 
 | Script | Tests | What It Verifies |
 |--------|-------|-----------------|
-| `test_obj.sh` | ~73 | Object file mode (`-c`) correctness |
-| `test_opt.sh` | ~119 | Optimization passes (`-O1`, `-O2`, `-O3`, `-Os`, `-Og`) |
-| `test_stage1.sh` | ~76 | Stage-1 self-compiled compiler correctness |
-| `test_linker.sh` | ~72 | Built-in ELF linker mode |
-| `test_debug.sh` | ~35 | DWARF debug symbols + GDB/LLDB |
-| `test_ir.sh` | 12 | IR/CFG construction |
-| `test_ssa.sh` | 24 | SSA construction |
-| `test_analysis.sh` | 25 | Liveness analysis + loop detection |
-| `test_phase4d.sh` | 48 | SCCP, CSE/GVN, LICM, register allocation |
+| `test_obj.sh` | 68 | Object file mode (`-c`) correctness |
+| `test_opt.sh` | 119 | Optimization passes (`-O1`, `-O2`, `-O3`, `-Os`, `-Og`) |
+| `test_stage1.sh` | 72 | Stage-1 self-compiled compiler correctness |
+| `test_linker.sh` | 68 | Built-in ELF linker mode |
+| `test_debug.sh` | 39 | DWARF debug symbols + GDB/LLDB |
+| `test_ir.sh` | 21 | IR/CFG construction |
+| `test_ssa.sh` | 39 | SSA construction |
+| `test_analysis.sh` | 66 | Liveness analysis + loop detection |
+| `test_phase4d.sh` | 62 | SCCP, CSE/GVN, LICM, register allocation |
 | `test_valgrind.sh` | ~49 | Memory safety (Valgrind memcheck) |
 
 ### Run All Core Tests
@@ -94,7 +94,7 @@ Compiles each `tests/*.c` to `.o` with the compiler (`-c` flag), links with `gcc
 
 - **Pipeline**: `fadors99 -c` → `.o` → `gcc -no-pie` → run → check exit code
 - **Skips**: `13_extern`, `26_external` (require external linkage)
-- **73 expected results** (e.g., `01_return` → 42, `02_arithmetic` → 7)
+- **68 expected results** (e.g., `01_return` → 42, `02_arithmetic` → 7)
 
 ### test_opt.sh — Optimization Verification
 
@@ -139,7 +139,7 @@ Runs the full test suite through the self-compiled (stage-1) compiler using the 
 ```
 
 - **Pipeline**: `fadors99_stage1 -o` → run → check exit code
-- **76 expectations** (includes `72_global_init_list` through `75_reloc_test`)
+- **72 expectations** (includes `72_global_init_list` through `75_reloc_test`)
 - **Prerequisite**: Run `build_stage1.sh` first
 
 ### test_linker.sh — Built-in Linker Tests
@@ -151,7 +151,7 @@ Tests the compiler's built-in ELF linker. Same test set as `test_obj.sh` but use
 ```
 
 - **Pipeline**: `fadors99 -o` (compile + internal link) → run → check exit code
-- **72 expected results**
+- **68 expected results**
 
 ### test_debug.sh — DWARF Debug Symbol Verification
 
@@ -178,7 +178,7 @@ Verifies IR/CFG construction by compiling with `-O2 --dump-ir` and checking IR o
 ./test_ir.sh [compiler_path]
 ```
 
-- 12 tests: function structure, basic blocks, control flow (if/else, while, for, do-while), function calls, variable tracking, global variables, block/vreg counts.
+- 21 tests: function structure, basic blocks, control flow (if/else, while, for, do-while), function calls, variable tracking, global variables, block/vreg counts.
 
 ### test_ssa.sh — SSA Construction Tests
 
@@ -188,7 +188,7 @@ Verifies SSA form: dominator tree, dominance frontiers, phi insertion, variable 
 ./test_ssa.sh [compiler_path]
 ```
 
-- 24 tests: phi nodes for branches/loops, dominator info, nested control flow, switch, parameter reassignment, multi-function SSA, single-definition property.
+- 39 tests: phi nodes for branches/loops, dominator info, nested control flow, switch, parameter reassignment, multi-function SSA, single-definition property.
 - Uses `set -e` — exits on first failure.
 
 ### test_analysis.sh — Analysis Passes
@@ -199,7 +199,7 @@ Tests liveness analysis and loop detection passes.
 CC=build_linux/fadors99 ./test_analysis.sh
 ```
 
-- 25 tests covering:
+- 66 tests covering:
   - **Liveness**: live-in/live-out annotations across blocks, loops, branches, phi nodes
   - **Loop detection**: depth annotations, nested loops, header identification, do-while, break/continue
 
@@ -211,7 +211,7 @@ Tests SCCP, CSE/GVN, LICM, and register allocation.
 CC=build_linux/fadors99 ./test_phase4d.sh
 ```
 
-- **48 tests** across 6 sections:
+- **62 tests** across 6 sections:
   1. **SCCP** (10): Constant folding across blocks, branches, multi-step chains
   2. **CSE/GVN** (6): Redundant expression elimination
   3. **LICM** (7): Loop-invariant code motion to preheader
@@ -262,17 +262,17 @@ REPS=5 ./bench.sh                  # More repetitions for stability
 
 ### Reference Results
 
-| Benchmark | -O0 | -O1 | -O2 | -O3 | gcc -O2 |
-|-----------|-----|-----|-----|-----|---------|
-| bench_array | 0.083s | 0.077s | 0.026s | 0.005s | 0.003s |
-| bench_branch | 0.038s | 0.027s | 0.025s | 0.025s | 0.019s |
-| bench_calls | 0.067s | 0.059s | 0.013s | 0.007s | 0.005s |
-| bench_loop | 0.019s | 0.010s | 0.010s | 0.010s | 0.004s |
-| bench_struct | 0.135s | 0.108s | 0.070s | 0.069s | 0.005s |
+| Benchmark | -O0 | -O1 | -O2 | -O3 | gcc -O0 | gcc -O2 |
+|-----------|-----|-----|-----|-----|---------|--------|
+| bench_array | 0.082s | 0.075s | 0.026s | 0.005s | 0.064s | 0.003s |
+| bench_branch | 0.039s | 0.027s | 0.025s | 0.025s | 0.042s | 0.020s |
+| bench_calls | 0.067s | 0.059s | 0.013s | 0.007s | 0.033s | 0.005s |
+| bench_loop | 0.019s | 0.010s | 0.010s | 0.010s | 0.027s | 0.004s |
+| bench_struct | 0.141s | 0.116s | 0.072s | 0.080s | 0.069s | 0.005s |
 
 ## Test File Conventions
 
-- All test files are in `tests/`, numbered `01` through `95` plus 5 `bench_*.c` files (106 total).
+- All test files are in `tests/`, numbered `01` through `97` plus 5 `bench_*.c` files and 1 PGO test (106 total).
 - Test correctness is verified via process exit code (0–255).
 - Scripts create a tmpdir and clean up via `trap`.
 - All report PASS/FAIL/SKIP/TOTAL counts.
@@ -302,6 +302,10 @@ src/
 include/             # Bundled standard library headers
 stage1/              # Stage-1 intermediate assembly
 stage2/              # Stage-2 intermediate assembly
+stage2_O0/           # Stage-2 assembly (compiled at -O0)
+stage2_O1/           # Stage-2 assembly (compiled at -O1)
+stage2_O2/           # Stage-2 assembly (compiled at -O2)
+stage2_O3/           # Stage-2 assembly (compiled at -O3)
 ```
 
 ## Compiler Usage Quick Reference
