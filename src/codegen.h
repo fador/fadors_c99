@@ -13,7 +13,8 @@ typedef enum {
 
 typedef enum {
     TARGET_LINUX,
-    TARGET_WINDOWS
+    TARGET_WINDOWS,
+    TARGET_DOS
 } TargetPlatform;
 
 // Optimization level

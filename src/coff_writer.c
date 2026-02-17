@@ -1,3 +1,5 @@
+#define _CRT_SECURE_NO_WARNINGS
+#define _CRT_NONSTDC_NO_DEPRECATE
 #include "coff_writer.h"
 #include "codegen.h"
 #include <stdlib.h>
@@ -38,7 +40,13 @@ void coff_writer_init(COFFWriter *w) {
     w->debug_line_capacity = 0;
     w->debug_funcs = NULL;
     w->debug_func_count = 0;
+    w->debug_func_count = 0;
     w->debug_func_capacity = 0;
+    w->machine_type = IMAGE_FILE_MACHINE_AMD64; // Default
+}
+
+void coff_writer_set_machine(COFFWriter *w, uint16_t machine) {
+    w->machine_type = machine;
 }
 
 void coff_writer_free(COFFWriter *w) {
@@ -98,7 +106,7 @@ uint32_t coff_writer_add_symbol(COFFWriter *w, const char *name, uint32_t value,
     }
     
     uint32_t index = (uint32_t)w->symbols_count++;
-    w->symbols[index].name = strdup(name);
+    w->symbols[index].name = _strdup(name);
     w->symbols[index].value = value;
     w->symbols[index].section = section;
     w->symbols[index].type = type;
@@ -108,6 +116,21 @@ uint32_t coff_writer_add_symbol(COFFWriter *w, const char *name, uint32_t value,
 }
 
 void coff_writer_add_reloc(COFFWriter *w, uint32_t virtual_address, uint32_t symbol_index, uint16_t type, int section) {
+    uint16_t rel_type = 0;
+    if (w->machine_type == IMAGE_FILE_MACHINE_I386) {
+        if (type == COFF_RELOC_ABSOLUTE) {
+            rel_type = 0x0006; // IMAGE_REL_I386_DIR32
+        } else if (type == COFF_RELOC_RELATIVE) {
+            rel_type = 0x0014; // IMAGE_REL_I386_REL32
+        }
+    } else {
+        if (type == COFF_RELOC_ABSOLUTE) {
+            rel_type = 0x0001; // IMAGE_REL_AMD64_ADDR64
+        } else if (type == COFF_RELOC_RELATIVE) {
+            rel_type = 0x0004; // IMAGE_REL_AMD64_REL32
+        }
+    }
+
     if (section == 1) {
         if (w->text_relocs_count >= w->text_relocs_capacity) {
             w->text_relocs_capacity *= 2;
@@ -115,7 +138,7 @@ void coff_writer_add_reloc(COFFWriter *w, uint32_t virtual_address, uint32_t sym
         }
         w->text_relocs[w->text_relocs_count].virtual_address = virtual_address;
         w->text_relocs[w->text_relocs_count].symbol_index = symbol_index;
-        w->text_relocs[w->text_relocs_count].type = type;
+        w->text_relocs[w->text_relocs_count].type = rel_type;
         w->text_relocs_count++;
     } else {
         if (w->data_relocs_count >= w->data_relocs_capacity) {
@@ -124,7 +147,7 @@ void coff_writer_add_reloc(COFFWriter *w, uint32_t virtual_address, uint32_t sym
         }
         w->data_relocs[w->data_relocs_count].virtual_address = virtual_address;
         w->data_relocs[w->data_relocs_count].symbol_index = symbol_index;
-        w->data_relocs[w->data_relocs_count].type = type;
+        w->data_relocs[w->data_relocs_count].type = rel_type;
         w->data_relocs_count++;
     }
 }
@@ -608,7 +631,7 @@ void coff_writer_write(COFFWriter *w, const char *filename) {
 
     /* --- Compute section count and numbers --- */
     COFFHeader header = {0};
-    header.Machine = IMAGE_FILE_MACHINE_AMD64;
+    header.Machine = w->machine_type;
     header.NumberOfSections = 0;
 
     int16_t text_sec_num = 0, data_sec_num = 0;

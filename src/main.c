@@ -1,4 +1,5 @@
 #define _CRT_SECURE_NO_WARNINGS
+#define _CRT_NONSTDC_NO_DEPRECATE
 #include <stdio.h>
 #include "lexer.h"
 #include "parser.h"
@@ -9,9 +10,11 @@
 #include "elf_writer.h"
 #include "linker.h"
 #include "pe_linker.h"
+#include "dos_linker.h"
 #include "types.h"
 #include "optimizer.h"
 #include "ir.h"
+#include "arch_x86.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -129,6 +132,10 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
     if (target == TARGET_WINDOWS) {
         preprocess_define("_WIN32", "1");
         preprocess_define("_WIN64", "1");
+    } else if (target == TARGET_DOS) {
+        preprocess_define("__MSDOS__", "1");
+        preprocess_define("__386__", "1");
+        preprocess_define("__I386__", "1");
     } else {
         preprocess_define("__linux__", "1");
         preprocess_define("__unix__", "1");
@@ -161,6 +168,7 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
     codegen_set_target(target);
     current_writer = malloc(sizeof(COFFWriter));
     coff_writer_init(current_writer);
+    if (target == TARGET_DOS) coff_writer_set_machine(current_writer, IMAGE_FILE_MACHINE_I386);
 
     /* Set debug source info when -g is active */
     if (g_compiler_options.debug_info) {
@@ -170,7 +178,13 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
     }
 
     codegen_set_writer(current_writer);
-    codegen_init(NULL);
+    
+    if (target == TARGET_DOS) {
+        arch_x86_init(NULL); // DOS uses 32-bit x86 backend
+    } else {
+        codegen_init(NULL); // x64 backend (default)
+    }
+
     optimize(program, g_compiler_options.opt_level);
 
     /* Build IR / CFG if optimization level >= O2 */
@@ -190,7 +204,11 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
         }
     }
 
-    codegen_generate(program);
+    if (target == TARGET_DOS) {
+        arch_x86_generate(program);
+    } else {
+        codegen_generate(program);
+    }
 
     if (target == TARGET_WINDOWS)
         coff_writer_write(current_writer, obj_filename);
@@ -314,6 +332,14 @@ static int do_cc(int input_count, const char **input_files,
     if (target == TARGET_WINDOWS) {
         preprocess_define("_WIN32", "1");
         preprocess_define("_WIN64", "1");
+    } else if (target == TARGET_DOS) {
+        preprocess_define("__MSDOS__", "1");
+        preprocess_define("__386__", "1");
+        preprocess_define("__I386__", "1");
+    } else if (target == TARGET_DOS) {
+        preprocess_define("__MSDOS__", "1");
+        preprocess_define("__386__", "1");
+        preprocess_define("__I386__", "1");
     } else {
         preprocess_define("__linux__", "1");
         preprocess_define("__unix__", "1");
@@ -380,7 +406,10 @@ static int do_cc(int input_count, const char **input_files,
         return 1;
     }
 
-    codegen_init(asm_out);
+    if (target == TARGET_DOS)
+        arch_x86_init(asm_out);
+    else
+        codegen_init(asm_out);
     optimize(program, g_compiler_options.opt_level);
 
     /* Build IR / CFG if optimization level >= O2 */
@@ -400,7 +429,10 @@ static int do_cc(int input_count, const char **input_files,
         }
     }
 
-    codegen_generate(program);
+    if (target == TARGET_DOS)
+        arch_x86_generate(program);
+    else
+        codegen_generate(program);
     fclose(asm_out);
     printf("Generated: %s\n", asm_filename);
 
@@ -467,6 +499,35 @@ static int do_link(int obj_count, const char **obj_files, const char *output_nam
             strcpy(exe_filename, "a.exe");
         else
             strcpy(exe_filename, "a.out");
+    }
+
+    if (target == TARGET_DOS) {
+        DosLinker *dlnk = dos_linker_new();
+        int i;
+        for (i = 0; i < obj_count; i++)
+            dos_linker_add_object_file(dlnk, obj_files[i]);
+        for (i = 0; i < libpath_count; i++)
+            dos_linker_add_lib_path(dlnk, libpaths[i]);
+        for (i = 0; i < lib_count; i++)
+            dos_linker_add_library(dlnk, libraries[i]);
+        int rc = dos_linker_link(dlnk, exe_filename);
+        dos_linker_free(dlnk);
+        return rc;
+    }
+
+    if (target == TARGET_DOS) {
+        /* Use our custom DOS linker */
+        DosLinker *dlnk = dos_linker_new();
+        int i;
+        for (i = 0; i < obj_count; i++)
+            dos_linker_add_object_file(dlnk, obj_files[i]);
+        for (i = 0; i < libpath_count; i++)
+            dos_linker_add_lib_path(dlnk, libpaths[i]);
+        for (i = 0; i < lib_count; i++)
+            dos_linker_add_library(dlnk, libraries[i]);
+        int rc = dos_linker_link(dlnk, exe_filename);
+        dos_linker_free(dlnk);
+        return rc;
     }
 
     if (target == TARGET_LINUX) {
@@ -567,6 +628,8 @@ int main(int argc, char **argv) {
                 target = TARGET_LINUX;
             else if (strcmp(t, "windows") == 0 || strcmp(t, "win64") == 0 || strcmp(t, "win") == 0)
                 target = TARGET_WINDOWS;
+            else if (strcmp(t, "dos") == 0 || strcmp(t, "msdos") == 0)
+                target = TARGET_DOS;
             else {
                 printf("Unknown target: %s\n", t);
                 return 1;

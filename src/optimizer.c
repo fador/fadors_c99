@@ -29,6 +29,8 @@
  *  15. Return value propagation: replace calls to functions that always return same constant
  */
 
+#define _CRT_SECURE_NO_WARNINGS
+#define _CRT_NONSTDC_NO_DEPRECATE
 #include "optimizer.h"
 #include "codegen.h"
 #include "lexer.h"
@@ -2609,7 +2611,7 @@ static ASTNode *try_partial_unroll(ASTNode *for_node) {
     /* Partial unrolling disabled: without register allocation the
        duplicated loop bodies just increase code size and icache
        pressure without meaningful speedup. */
-    return NULL;
+
     if (iterations <= 8 || iterations > 256) return NULL;
 
     ASTNode *body = for_node->data.for_stmt.body;

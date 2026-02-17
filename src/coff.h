@@ -17,6 +17,7 @@ typedef struct {
 } COFFHeader;
 
 #define IMAGE_FILE_MACHINE_AMD64 0x8664
+#define IMAGE_FILE_MACHINE_I386  0x014c
 
 // IMAGE_SECTION_HEADER
 typedef struct {

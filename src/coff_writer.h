@@ -18,6 +18,9 @@ typedef struct {
     uint16_t type;
 } RelocEntry;
 
+#define COFF_RELOC_ABSOLUTE 1
+#define COFF_RELOC_RELATIVE 2
+
 /* Debug line number entry: maps a .text offset to a source line */
 typedef struct {
     uint32_t address;   /* offset within .text */
@@ -101,9 +104,12 @@ typedef struct {
     DebugFuncEntry *debug_funcs;
     size_t debug_func_count;
     size_t debug_func_capacity;
+    
+    uint16_t machine_type; // IMAGE_FILE_MACHINE_AMD64 or IMAGE_FILE_MACHINE_I386
 } COFFWriter;
 
 void coff_writer_init(COFFWriter *w);
+void coff_writer_set_machine(COFFWriter *w, uint16_t machine);
 void coff_writer_free(COFFWriter *w);
 int32_t coff_writer_find_symbol(COFFWriter *w, const char *name);
 uint32_t coff_writer_add_symbol(COFFWriter *w, const char *name, uint32_t value, int16_t section, uint16_t type, uint8_t storage_class);
