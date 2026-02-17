@@ -282,11 +282,23 @@ static Type *parse_type(Parser *parser) {
                 if (parser->current_token.type == TOKEN_LBRACE) parse_enum_body(parser, type);
             } else if (tag_kind == TOKEN_KEYWORD_UNION) {
                 type = find_struct(parser, name);
-                if (!type) type = type_union(name);
+                if (!type) {
+                    type = type_union(name);
+                    // Register forward declaration so later definitions reuse this object
+                    if (parser->structs_count < 4096) {
+                        parser->structs[parser->structs_count++] = type;
+                    }
+                }
                 if (parser->current_token.type == TOKEN_LBRACE) parse_tag_body(parser, type);
             } else { // TOKEN_KEYWORD_STRUCT
                 type = find_struct(parser, name);
-                if (!type) type = type_struct(name);
+                if (!type) {
+                    type = type_struct(name);
+                    // Register forward declaration so later definitions reuse this object
+                    if (parser->structs_count < 4096) {
+                        parser->structs[parser->structs_count++] = type;
+                    }
+                }
                 if (parser->current_token.type == TOKEN_LBRACE) parse_tag_body(parser, type);
             }
             free(name);

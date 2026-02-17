@@ -3141,6 +3141,7 @@ static int iv_transform_while(ASTNode *block, int loop_idx) {
         iv_decl->data.var_decl.initializer = make_int(init_val, line);
         iv_decl->data.var_decl.is_static = 0;
         iv_decl->data.var_decl.is_extern = 0;
+        iv_decl->resolved_type = type_long();
         iv_decl->line = line;
 
         block->children_count++;
@@ -3279,6 +3280,7 @@ static int iv_transform_for(ASTNode *block, int loop_idx) {
         iv_decl->data.var_decl.initializer = make_int(init_val, line);
         iv_decl->data.var_decl.is_static = 0;
         iv_decl->data.var_decl.is_extern = 0;
+        iv_decl->resolved_type = type_long();
         iv_decl->line = line;
 
         block->children_count++;

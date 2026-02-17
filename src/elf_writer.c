@@ -284,8 +284,16 @@ void elf_writer_write(COFFWriter *w, const char *filename) {
             int64_t  addend;
 
             if (w->text_relocs[i].type == IMAGE_REL_AMD64_REL32) {
-                /* RIP-relative 32-bit: call, jmp, jcc, lea, mov [rip+disp] */
-                elf_type = ELF_R_X86_64_PLT32;
+                /* RIP-relative 32-bit.
+                 * Use PLT32 for function calls (call/jmp) so the linker can
+                 * route them through the PLT when needed.
+                 * Use PC32 for data references (lea, mov [rip+disp]) so the
+                 * linker resolves them to the actual data address instead of
+                 * a PLT stub — critical for extern data like stdout/stderr. */
+                uint32_t sym_idx = w->text_relocs[i].symbol_index;
+                int is_func = (sym_idx < w->symbols_count &&
+                               w->symbols[sym_idx].type == 0x20);
+                elf_type = is_func ? ELF_R_X86_64_PLT32 : ELF_R_X86_64_PC32;
                 addend   = -4;
             } else if (w->text_relocs[i].type == IMAGE_REL_AMD64_ADDR64) {
                 elf_type = ELF_R_X86_64_64;

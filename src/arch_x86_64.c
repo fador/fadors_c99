@@ -1170,7 +1170,7 @@ static void gen_global_decl(ASTNode *node) {
         int size = node->resolved_type ? node->resolved_type->size : 4;
         ASTNode *init_node = node->data.var_decl.initializer;
         if (init_node && init_node->type == AST_INTEGER) {
-            int val = init_node->data.integer.value;
+            int64_t val = (int64_t)init_node->data.integer.value;
             buffer_write_bytes(&obj_writer->data_section, &val, size);
         } else if (init_node && init_node->type == AST_FLOAT) {
             double val = init_node->data.float_val.value;
@@ -3805,6 +3805,7 @@ static void gen_statement(ASTNode *node) {
                         }
 
                         /* Tear down current stack frame and jump to target */
+                        regalloc_restore_registers();
                         emit_inst0("leave");
                         emit_inst1("jmp", op_label(ret_expr->data.call.name));
                         return; /* done — skip normal return path */
