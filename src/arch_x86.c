@@ -475,7 +475,13 @@ void arch_x86_init(FILE *output) {
         g_xmm_arg_regs[7] = "xmm7";
         // For 32-bit DOS, default to CDECL (stack args)
     }
-    encoder_set_bitness(32);
+    
+    if (g_target == TARGET_DOS) {
+        encoder_set_bitness(16);
+    } else {
+        encoder_set_bitness(32);
+    }
+
     if (out && !obj_writer && current_syntax == SYNTAX_INTEL) {
         fprintf(out, "_TEXT SEGMENT\n");
     }

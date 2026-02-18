@@ -240,11 +240,13 @@ int dos_linker_add_object_file(DosLinker *l, const char *path) {
 int dos_linker_link(DosLinker *l, const char *output_path) {
     /* Layout: [Stub] [Text] [RData] [Data] */
     uint64_t stub_size = sizeof(dos_stub);
+    printf("DEBUG: dos_stub size: %lu\n", stub_size);
     uint64_t text_base = stub_size;
     
     /* Align sections? Flat binary usually 16-byte aligned or more */
     /* Let's align text to 16 bytes */
     if (text_base % 16 != 0) text_base = (text_base + 15) & ~15;
+    printf("DEBUG: text_base: %lu\n", text_base);
     
     uint64_t rdata_base = text_base + l->text.size;
     if (rdata_base % 16 != 0) rdata_base = (rdata_base + 15) & ~15;
@@ -303,7 +305,31 @@ int dos_linker_link(DosLinker *l, const char *output_path) {
     if (!f) return -1;
     
     /* Write MZ Stub */
-    fwrite(dos_stub, 1, sizeof(dos_stub), f);
+    /* Write MZ Stub */
+    unsigned char *stub_copy = malloc(sizeof(dos_stub));
+    memcpy(stub_copy, dos_stub, sizeof(dos_stub));
+    
+    /* Patch JMP logic */
+    /* Stub ends with: E8 xx xx B4 4C CD 21 (7 bytes) */
+    /* JMP (CALL) offset is at sizeof(dos_stub) - 7 */
+    /* Displacement is at sizeof(dos_stub) - 6 */
+    /* Next IP is at sizeof(dos_stub) - 4 */
+    
+    if (text_base > sizeof(dos_stub) - 4) {
+        int patch_idx = sizeof(dos_stub) - 6;
+        int next_ip_offset = sizeof(dos_stub) - 4;
+        /* IP after CALL is next_ip_offset relative to start of stub (if loaded at 0) */
+        
+        int32_t jmp_offset = (int32_t)(text_base - next_ip_offset);
+        stub_copy[patch_idx] = jmp_offset & 0xFF;
+        stub_copy[patch_idx + 1] = (jmp_offset >> 8) & 0xFF;
+        
+        printf("DEBUG: Patching stub at offset %d with val %d (text_base=%lu, next_ip=%d)\n", 
+               patch_idx, jmp_offset, text_base, next_ip_offset);
+    }
+    
+    fwrite(stub_copy, 1, sizeof(dos_stub), f);
+    free(stub_copy);
     
     /* Pad to text_base */
     uint64_t current_pos = sizeof(dos_stub);

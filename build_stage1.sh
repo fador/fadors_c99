@@ -66,7 +66,7 @@ for src in "${SOURCES[@]}"; do
     obj_file="$STAGE1_DIR/${name}.o"
 
     echo -n "  Compiling $src ... "
-    if ! "$STAGE0" "$src" -S 2>/dev/null; then
+    if ! "$STAGE0" "$src" -S; then
         echo "FAIL (compiler error)"
         FAIL=1
         continue
@@ -83,7 +83,7 @@ for src in "${SOURCES[@]}"; do
     fi
 
     echo -n "assembling ... "
-    if ! as -o "$obj_file" "$asm_file" 2>/dev/null; then
+    if ! as -o "$obj_file" "$asm_file"; then
         echo "FAIL (assembler error)"
         FAIL=1
         continue
