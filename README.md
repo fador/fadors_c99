@@ -31,6 +31,7 @@ A self-hosting C99-standard compliant compiler written in C99, targeting x86_64 
 - **Integrated Pipeline**: Full compilation to executable without external tools on Linux. Windows PE linker also built-in.
 - **Built-in x86-64 Encoder**: Direct machine code generation — no external assembler needed. Supports all GPR registers (rax–r15), XMM0–XMM15, YMM0–YMM15, REX prefixes, VEX prefixes (2-byte and 3-byte), ModR/M, SIB encoding. Packed SSE/SSE2 instructions (movups, addps, mulps, movdqu, paddd, etc.) for 128-bit vectorized loops. AVX/AVX2 VEX-encoded instructions (vmovups, vaddps, vmovdqu, vpaddd, etc.) for 256-bit vectorized loops with `-mavx`/`-mavx2` flags.
 - **Custom ELF Linker**: Built-in static linker for Linux that merges `.o` files and static archives (`.a`) into executables. Includes a `_start` stub (no CRT needed) and supports dynamic linking against `libc.so.6` via PLT/GOT generation. Generates DWARF 4 debug sections (`.debug_info`, `.debug_abbrev`, `.debug_line`, `.debug_str`, `.debug_aranges`) when `-g` is used.
+- **Custom DOS Linker**: Links 32-bit COFF object files into 16-bit DOS MZ executables. Generates real-mode prefixes (`0x66`/`0x67`) to run 32-bit instructions in 16-bit mode.
 - **Custom PE/COFF Linker**: Links COFF `.obj` files into PE executables with DLL import table generation (`kernel32.dll`), `.rdata`, `.data`, `.bss` sections.
 - **Custom COFF Object Writer**: Direct machine code → COFF `.obj` generation on Windows (bypasses MASM).
 - **Custom ELF Object Writer**: Direct machine code → ELF `.o` generation on Linux (bypasses GNU `as`).
@@ -41,6 +42,7 @@ A self-hosting C99-standard compliant compiler written in C99, targeting x86_64 
 - **Peephole Optimization**: Multi-state peephole optimizer with: push/pop→mov elimination, jcc-over-jmp inversion, setcc+movzbq+test+jcc→direct jcc fusion, add $0/imul $1/imul $0 elimination, self-move elimination, dead code after unconditional branches, and instruction scheduling (push/pop→register for binary expression operands).
 - **Register Allocator**: AST pre-scan assigns up to 5 callee-saved registers (`%rbx`, `%r12`–`%r15`) to the most-used scalar integer locals and parameters. Eliminates stack loads/stores in hot loops. Activated at `-O2+`.
 - **Stack Management**: Automatic local variable allocation and ABI-compliant register-based argument passing.
+- **DOS Standard Library**: Minimal `<stdio.h>` implementation (`printf`, `puts`, `putchar`, `exit`) via INT 21h syscalls.
 
 ### Bundled Standard Library Headers
 - `<stdio.h>`: `printf`, `fprintf`, `sprintf`, `snprintf`, `sscanf`, `fopen`/`fclose`/`fread`/`fwrite`/`fseek`/`ftell`, `fflush`, `puts`, `fputs`, `fgetc`, `fgets`, `FILE`/`stdin`/`stdout`/`stderr`.
@@ -116,6 +118,11 @@ Automatically detects platform tools. On Linux, the entire pipeline (compile →
 # Linux with dynamic linking (libc)
 ./fadors99 main.c -lc
 # Output: main (dynamically linked against libc.so.6)
+
+# DOS (16-bit real mode)
+./fadors99 main.c --target=dos
+# Output: main.exe (MZ executable for DOS/DOSBox)
+# Note: Supports `printf`, `puts`, `putchar`, `exit`.
 ```
 
 ### Compile to Object File
