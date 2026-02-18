@@ -114,6 +114,17 @@ echo "=== Stage 1 build complete ==="
 echo "Binary: $STAGE1_BIN"
 echo ""
 
+# Assemble DOS library
+echo -n "Assembling DOS library (src/dos_lib.s) ... "
+if gcc -c -m32 -masm=intel -o build_linux/dos_lib.o src/dos_lib.s; then
+    objcopy -O pe-i386 build_linux/dos_lib.o build_linux/dos_lib.o
+    echo "OK"
+else
+    echo "FAIL"
+    exit 1
+fi
+echo ""
+
 # Quick smoke test
 echo -n "Smoke test (01_return.c) ... "
 if "$STAGE1_BIN" tests/01_return.c -S 2>/dev/null && \

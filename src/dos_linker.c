@@ -315,17 +315,26 @@ int dos_linker_link(DosLinker *l, const char *output_path) {
     /* Displacement is at sizeof(dos_stub) - 6 */
     /* Next IP is at sizeof(dos_stub) - 4 */
     
+    uint64_t entry_addr = text_base;
+    int entry_idx = dos_find_global(l, l->entry_name);
+    if (entry_idx >= 0) {
+        entry_addr = l->symbols[entry_idx].value;
+        printf("DEBUG: Found entry '%s' at %lu\n", l->entry_name, entry_addr);
+    } else {
+        printf("Warning: Entry point '%s' not found. Defaulting to start of text.\n", l->entry_name);
+    }
+
     if (text_base > sizeof(dos_stub) - 4) {
         int patch_idx = sizeof(dos_stub) - 6;
         int next_ip_offset = sizeof(dos_stub) - 4;
         /* IP after CALL is next_ip_offset relative to start of stub (if loaded at 0) */
         
-        int32_t jmp_offset = (int32_t)(text_base - next_ip_offset);
+        int32_t jmp_offset = (int32_t)(entry_addr - next_ip_offset);
         stub_copy[patch_idx] = jmp_offset & 0xFF;
         stub_copy[patch_idx + 1] = (jmp_offset >> 8) & 0xFF;
         
-        printf("DEBUG: Patching stub at offset %d with val %d (text_base=%lu, next_ip=%d)\n", 
-               patch_idx, jmp_offset, text_base, next_ip_offset);
+        printf("DEBUG: Patching stub at offset %d with val %d (text_base=%lu, entry=%lu, next_ip=%d)\n", 
+               patch_idx, jmp_offset, text_base, entry_addr, next_ip_offset);
     }
     
     fwrite(stub_copy, 1, sizeof(dos_stub), f);

@@ -223,6 +223,29 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
     return 0;
 }
 
+// Helpers for path resolution
+static void get_executable_path(char *buf, size_t size) {
+#ifdef _WIN32
+    // GetModuleFileName(NULL, buf, (DWORD)size); // Need decl
+    buf[0] = '\0'; // unimplemented for now
+#else
+    long len = (long)readlink("/proc/self/exe", buf, size - 1);
+    if (len != -1) buf[len] = '\0';
+    else buf[0] = '\0';
+#endif
+}
+
+static void get_directory(char *buf, const char *path) {
+    strcpy(buf, path);
+    char *last_slash = strrchr(buf, '/');
+#ifdef _WIN32
+    char *last_back = strrchr(buf, '\\');
+    if (last_back > last_slash) last_slash = last_back;
+#endif
+    if (last_slash) *last_slash = '\0';
+    else buf[0] = '\0';
+}
+
 // ---------- CC mode: compile C source ----------
 static int do_cc(int input_count, const char **input_files,
                  const char *output_name,
@@ -241,8 +264,26 @@ static int do_cc(int input_count, const char **input_files,
     if (stop == STOP_OBJ || stop == STOP_FULL) {
         char *obj_paths[64];
         int obj_count = 0;
+        if (target == TARGET_DOS) {
+            char exe_path[1024];
+            get_executable_path(exe_path, sizeof(exe_path));
+            char exe_dir[1024];
+            get_directory(exe_dir, exe_path);
+            char inc_path[1024];
+            // If running from build_linux/, include is ../include/msdos
+            sprintf(inc_path, "%s/../include/msdos", exe_dir);
+            preprocess_add_include_path(inc_path);
+            // Also try local Include
+            preprocess_add_include_path("include/msdos");
+        }
 
         for (i = 0; i < input_count; i++) {
+            const char *ext = file_extension(input_files[i]);
+            if (strcmp(ext, ".o") == 0 || strcmp(ext, ".obj") == 0) {
+                 obj_paths[obj_count++] = strdup(input_files[i]);
+                 continue;
+            }
+            
             char out_base[256];
             strip_extension(out_base, input_files[i], sizeof(out_base));
 
@@ -297,6 +338,27 @@ static int do_cc(int input_count, const char **input_files,
             if (rc != 0) printf("Error: ELF linking failed.\n");
         } else if (target == TARGET_DOS) {
             DosLinker *dlnk = dos_linker_new();
+            
+            // Auto-link dos_lib.o
+            char exe_path[1024];
+            get_executable_path(exe_path, sizeof(exe_path));
+            char exe_dir[1024];
+            get_directory(exe_dir, exe_path);
+            char lib_path[1024];
+            sprintf(lib_path, "%s/dos_lib.o", exe_dir);
+            
+            // Check if it exists
+            FILE *f = fopen(lib_path, "rb");
+            if (f) {
+                fclose(f);
+                dos_linker_add_object_file(dlnk, lib_path);
+            } else {
+                // Try strictly local
+                if (fopen("dos_lib.o", "rb")) {
+                     dos_linker_add_object_file(dlnk, "dos_lib.o");
+                }
+            }
+            
             for (i = 0; i < obj_count; i++)
                 dos_linker_add_object_file(dlnk, obj_paths[i]);
             for (i = 0; i < libpath_count; i++)

@@ -16,6 +16,16 @@ typedef struct {
 static Macro macros[4096];
 static int macros_count = 0;
 
+static char *include_paths[64];
+static int include_path_count = 0;
+
+void preprocess_add_include_path(const char *path) {
+    if (include_path_count < 64) {
+        // Avoid duplicates? For now just add.
+        include_paths[include_path_count++] = strdup(path);
+    }
+}
+
 typedef struct {
     int active;
     int has_processed;
@@ -201,9 +211,24 @@ char *preprocess(const char *source, const char *filename) {
                     char *found_path = NULL;
                     if (is_system) {
                         char path_buf[512];
-                        sprintf(path_buf, "include/%s", inc_filename);
-                        inc_source = read_file(path_buf);
-                        if (inc_source) found_path = strdup(path_buf);
+                        int found = 0;
+                        
+                        // Try user-configured include paths first
+                        for (int i = 0; i < include_path_count; i++) {
+                            sprintf(path_buf, "%s/%s", include_paths[i], inc_filename);
+                            inc_source = read_file(path_buf);
+                            if (inc_source) {
+                                found_path = strdup(path_buf);
+                                found = 1;
+                                break;
+                            }
+                        }
+                        
+                        if (!found && !inc_source) {
+                            sprintf(path_buf, "include/%s", inc_filename);
+                            inc_source = read_file(path_buf);
+                            if (inc_source) found_path = strdup(path_buf);
+                        }
                         
                         if (!inc_source) {
                             sprintf(path_buf, "../include/%s", inc_filename);
