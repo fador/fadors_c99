@@ -19,7 +19,7 @@ extern int _dos_rename(const char *old, const char *new);
 // -----------------------------------------------------------------------------
 // Memory Management (Static Heap)
 // -----------------------------------------------------------------------------
-#define HEAP_SIZE (48 * 1024) // 48KB heap
+#define HEAP_SIZE (16 * 1024) // 48KB heap
 static char heap_memory[HEAP_SIZE];
 static size_t heap_ptr = 0;
 
@@ -38,6 +38,7 @@ void *malloc(size_t size) {
     size = (size + 7) & ~7;
     
     if (free_list == NULL) {
+        puts("malloc: init heap");
         // Init heap
         free_list = (BlockHeader *)heap_memory;
         free_list->size = HEAP_SIZE - sizeof(BlockHeader);
@@ -62,6 +63,7 @@ void *malloc(size_t size) {
                 curr->next = new_block;
             }
             curr->is_free = 0;
+            puts("malloc: returning block");
             return (void *)((char *)curr + sizeof(BlockHeader));
         }
         prev = curr;

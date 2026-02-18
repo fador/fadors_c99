@@ -157,8 +157,10 @@ void encode_inst0(Buffer *buf, const char *mnemonic) {
         emit_prefixes(buf, 32, 0); // 32-bit operand size for EBP/ESP
         buffer_write_byte(buf, 0xC9);
     } else if (strcmp(mnemonic, "cqo") == 0) {
-
         emit_rex(buf, 1, 0, 0, 0); // REX.W
+        buffer_write_byte(buf, 0x99);
+    } else if (strcmp(mnemonic, "cdq") == 0 || strcmp(mnemonic, "cltd") == 0) {
+        if (encoder_bits == 16) buffer_write_byte(buf, 0x66);
         buffer_write_byte(buf, 0x99);
     } else if (strcmp(mnemonic, "vzeroupper") == 0) {
         /* VEX.128.0F.WIG 77 — zero upper 128 bits of all YMM registers */
@@ -190,12 +192,14 @@ void encode_inst1(Buffer *buf, const char *mnemonic, Operand *op1) {
             if (reg >= 8) emit_rex(buf, 0, 0, 0, 1);
             buffer_write_byte(buf, 0x58 + (reg & 7));
         }
-    } else if (strcmp(mnemonic, "idiv") == 0) {
+    } else if (strcmp(mnemonic, "idiv") == 0 || strcmp(mnemonic, "div") == 0) {
         if (op1->type == OP_REG) {
             int reg = get_reg_id(op1->data.reg);
-            emit_rex(buf, 1, 0, 0, reg >= 8); // REX.W
+            int is_idiv = (strcmp(mnemonic, "idiv") == 0);
+            emit_prefixes(buf, 32, 0); 
+            emit_rex(buf, encoder_bits == 64, 0, 0, reg >= 8);
             buffer_write_byte(buf, 0xF7);
-            emit_modrm(buf, 3, 7, reg); // Mod=3 (reg), Opcode extension=7 for IDIV
+            emit_modrm(buf, 3, is_idiv ? 7 : 6, reg); // /7 for IDIV, /6 for DIV
         }
     } else if (strcmp(mnemonic, "jmp") == 0) {
         if (op1->type == OP_LABEL) {
