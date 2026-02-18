@@ -110,6 +110,8 @@ static const char *g_arg_regs[6];
 static const char *g_xmm_arg_regs[8];
 static int g_max_reg_args = 4;       // 4 for Win64, 6 for SysV
 static int g_use_shadow_space = 1;   // 1 for Win64, 0 for SysV
+static int g_stack_slot_size = 8;    // 4 for 32-bit DOS, 8 for 64-bit 
+static int g_ptr_size = 8;           // 4 for 32-bit DOS, 8 for 64-bit
 
 static TargetPlatform g_target =
 #ifdef _WIN32
@@ -411,6 +413,8 @@ void arch_x86_init(FILE *output) {
         // cdecl: args on stack
         g_max_reg_args = 0;
         g_use_shadow_space = 0;
+        g_stack_slot_size = 4;
+        g_ptr_size = 4;
     } else if (g_target == TARGET_WINDOWS) {
         // Win64 ABI
         g_arg_regs[0] = "ecx";
@@ -775,7 +779,7 @@ static int last_value_can_track(Type *t) {
     if (!t) return 0;
     if (is_float_type(t)) return 0;
     if (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION) return 0;
-    if (t->size <= 0 || t->size > 8) return 0;
+    if (t->size <= 0 || t->size > g_ptr_size) return 0;
     return 1;
 }
 
@@ -1103,7 +1107,7 @@ static int regalloc_is_eligible(RegScanVar *sv) {
     if (sv->type->kind == TYPE_ARRAY || sv->type->kind == TYPE_STRUCT ||
         sv->type->kind == TYPE_UNION) return 0;
     if (sv->type->kind == TYPE_FLOAT || sv->type->kind == TYPE_DOUBLE) return 0;
-    if (sv->type->size > 8) return 0;
+    if (sv->type->size > g_ptr_size) return 0;
     return 1;
 }
 
@@ -1175,7 +1179,7 @@ static void regalloc_analyze(ASTNode *func_node) {
 static void regalloc_emit_saves(void) {
     for (int i = 0; i < regalloc_assignment_count; i++) {
         emit_inst1("push", op_reg(regalloc_assignments[i].reg64));
-        stack_offset -= 8;
+        stack_offset -= g_stack_slot_size;
         regalloc_assignments[i].save_offset = stack_offset;
     }
 }
@@ -1305,9 +1309,9 @@ static void gen_global_decl(ASTNode *node) {
                     /* Write symbol and relocation for the string pointer */
                     uint32_t sym_idx = coff_writer_add_symbol(obj_writer, slabel, 0, 0, 0, IMAGE_SYM_CLASS_EXTERNAL);
                     uint32_t reloc_off = (uint32_t)obj_writer->data_section.size;
-                    coff_writer_add_reloc(obj_writer, reloc_off, sym_idx, 1, 2);
+                    coff_writer_add_reloc(obj_writer, reloc_off, 1, 2); // Type 1 for 32-bit absolute, Type 2 for 64-bit absolute
                     uint64_t zero = 0;
-                    buffer_write_bytes(&obj_writer->data_section, &zero, 8);
+                    buffer_write_bytes(&obj_writer->data_section, &zero, g_ptr_size);
                 } else {
                     /* Unknown element — zero fill */
                     int zi; for (zi = 0; zi < elem_size; zi++)
@@ -1331,9 +1335,9 @@ static void gen_global_decl(ASTNode *node) {
                      uint8_t target_storage_class = IMAGE_SYM_CLASS_EXTERNAL;
                      uint32_t sym_idx = coff_writer_add_symbol(obj_writer, target_name, 0, target_section_num, 0, target_storage_class);
                      uint32_t reloc_offset = (uint32_t)obj_writer->data_section.size;
-                     coff_writer_add_reloc(obj_writer, reloc_offset, sym_idx, 1, 2);
+                     coff_writer_add_reloc(obj_writer, reloc_offset, sym_idx, 1, 2); // Type 1 for 32-bit absolute, Type 2 for 64-bit absolute
                      uint64_t zero = 0;
-                     buffer_write_bytes(&obj_writer->data_section, &zero, 8);
+                     buffer_write_bytes(&obj_writer->data_section, &zero, g_ptr_size);
                      handled = 1;
                  }
             }
@@ -1355,7 +1359,7 @@ static void gen_global_decl(ASTNode *node) {
             int size = node->resolved_type ? node->resolved_type->size : 4;
             const char *directive = "DD";
             if (size == 1) directive = "DB";
-            else if (size == 8) directive = "DQ";
+            else if (size == g_ptr_size) directive = "DQ";
             
             ASTNode *init_intel = node->data.var_decl.initializer;
             if (init_intel && init_intel->type == AST_INTEGER) {
@@ -1370,7 +1374,7 @@ static void gen_global_decl(ASTNode *node) {
                 }
                 const char *edirective = "DB";
                 if (elem_size == 4) edirective = "DD";
-                else if (elem_size >= 8) edirective = "DQ";
+                else if (elem_size >= g_ptr_size) edirective = "DQ";
                 size_t ii;
                 int total_written = 0;
                 for (ii = 0; ii < init_intel->children_count; ii++) {
@@ -1401,8 +1405,8 @@ static void gen_global_decl(ASTNode *node) {
                 }
             } else {
                 fprintf(out, "%s 0\n", directive);
-                if (size > 8) {
-                     fprintf(out, "DB %d DUP(0)\n", size - (size > 1 ? (size > 4 ? 8 : 4) : 1));
+                if (size > g_ptr_size) {
+                     fprintf(out, "DB %d DUP(0)\n", size - (size > 1 ? (size > 4 ? g_ptr_size : 4) : 1));
                 }
             }
             fprintf(out, "_DATA ENDS\n");
@@ -1417,7 +1421,7 @@ static void gen_global_decl(ASTNode *node) {
                  if (size == 1) fprintf(out, "    .byte %I64d\n", val);
                  else if (size == 2) fprintf(out, "    .word %I64d\n", val);
                  else if (size == 4) fprintf(out, "    .long %I64d\n", val);
-                 else if (size == 8) fprintf(out, "    .quad %I64d\n", val);
+                 else if (size == g_ptr_size) fprintf(out, "    .quad %I64d\n", val);
                  else fprintf(out, "    .long %I64d\n", val);
              } else if (init_att && init_att->type == AST_FLOAT) {
                  int size = node->resolved_type ? node->resolved_type->size : 4;
@@ -1436,7 +1440,7 @@ static void gen_global_decl(ASTNode *node) {
                      if (elem && elem->type == AST_INTEGER) {
                          if (elem_size == 1) fprintf(out, "    .byte %I64d\n", elem->data.integer.value);
                          else if (elem_size == 4) fprintf(out, "    .long %I64d\n", elem->data.integer.value);
-                         else if (elem_size == 8) fprintf(out, "    .quad %I64d\n", elem->data.integer.value);
+                         else if (elem_size == g_ptr_size) fprintf(out, "    .quad %I64d\n", elem->data.integer.value);
                          else fprintf(out, "    .long %I64d\n", elem->data.integer.value);
                      } else if (elem && elem->type == AST_FLOAT) {
                          if (elem_size == 4) fprintf(out, "    .float %f\n", elem->data.float_val.value);
@@ -1476,15 +1480,15 @@ static void gen_global_decl(ASTNode *node) {
 }
 
 static void emit_push_xmm(const char *reg) {
-    emit_inst2("sub", op_imm(8), op_reg("esp"));
+    emit_inst2("sub", op_imm(g_stack_slot_size), op_reg("esp"));
     emit_inst2("movsd", op_reg(reg), op_mem("esp", 0));
-    stack_offset -= 8;
+    stack_offset -= g_stack_slot_size;
 }
 
 static void emit_pop_xmm(const char *reg) {
     emit_inst2("movsd", op_mem("esp", 0), op_reg(reg));
-    emit_inst2("add", op_imm(8), op_reg("esp"));
-    stack_offset += 8;
+    emit_inst2("add", op_imm(g_stack_slot_size), op_reg("esp"));
+    stack_offset += g_stack_slot_size;
 }
 
 
@@ -2121,20 +2125,19 @@ static void gen_addr(ASTNode *node) {
                     break;
                 }
             }
-        } else {
         }
     } else if (node->type == AST_ARRAY_ACCESS) {
         if (!node->data.array_access.array || !node->data.array_access.index) { fprintf(stderr, "      Array: NULL child!\n"); return; }
         gen_expression(node->data.array_access.array);
         emit_inst1("push", op_reg("eax"));
-        stack_offset -= 8;
+        stack_offset -= g_stack_slot_size;
         
         gen_expression(node->data.array_access.index);
         
         // Element size calculation - use get_expr_type to avoid chained deref issues
         Type *array_type = get_expr_type(node->data.array_access.array);
 
-        int element_size = 8;
+        int element_size = g_ptr_size; // Default to pointer size
         if (array_type) {
              if (array_type->kind == TYPE_PTR || array_type->kind == TYPE_ARRAY) {
                  if (array_type->data.ptr_to) element_size = array_type->data.ptr_to->size;
@@ -2143,7 +2146,7 @@ static void gen_addr(ASTNode *node) {
         
         emit_inst2("imul", op_imm(element_size), op_reg("eax"));
         emit_inst1("pop", op_reg("ecx"));
-        stack_offset += 8;
+        stack_offset += g_stack_slot_size;
         emit_inst2("add", op_reg("ecx"), op_reg("eax"));
     } else if (node->type == AST_CALL) {
         /* For struct-returning calls, gen_expression returns a pointer in %eax */
@@ -2440,10 +2443,10 @@ static void gen_binary_expr(ASTNode *node) {
         gen_expression(node->data.binary_expr.left);
     } else {
         emit_inst1("push", op_reg("eax"));
-        stack_offset -= 8;
+        stack_offset -= g_stack_slot_size;
         gen_expression(node->data.binary_expr.left);
         emit_inst1("pop", op_reg("ecx"));
-        stack_offset += 8;
+        stack_offset += g_stack_slot_size;
     }
     
     Type *left_type = get_expr_type(node->data.binary_expr.left);
@@ -2803,7 +2806,7 @@ static void gen_expression(ASTNode *node) {
         
         if (!is_pre) {
             emit_inst1("push", op_reg("ecx")); // Save original value
-            stack_offset -= 8;
+            stack_offset -= g_stack_slot_size;
         }
         
         // Modify RCX
@@ -2824,7 +2827,7 @@ static void gen_expression(ASTNode *node) {
         
         if (!is_pre) {
             emit_inst1("pop", op_reg("eax")); // Restore original value to result register
-            stack_offset += 8;
+            stack_offset += g_stack_slot_size;
         } else {
             emit_inst2("mov", op_reg("ecx"), op_reg("eax")); // Result is new value
         }
@@ -2888,7 +2891,7 @@ static void gen_expression(ASTNode *node) {
         Type *t = get_expr_type(left_node);
 
         /* --- Struct / large-type assignment: use memcpy ----------- */
-        if (t && t->size > 8) {
+        if (t && t->size > g_ptr_size) {
             /* Save stack_offset before the struct assignment so we can
              * fully restore it afterwards.  gen_addr(value) for struct-returning
              * calls permanently allocates an sret buffer on the stack;
@@ -2898,8 +2901,8 @@ static void gen_expression(ASTNode *node) {
              * We must do this BEFORE gen_addr(value) because for struct-returning
              * calls, the sret buffer sits at the bottom of the stack frame.
              * A push after the call would overwrite the sret buffer contents. */
-            emit_inst2("sub", op_imm(8), op_reg("esp"));
-            stack_offset -= 8;
+            emit_inst1("push", op_reg("eax"));
+            stack_offset -= g_stack_slot_size;
             int src_save_offset = stack_offset;
             /* Get source address */
             gen_addr(node->data.assign.value);
@@ -3113,7 +3116,7 @@ static void gen_expression(ASTNode *node) {
         const char **xmm_arg_regs = g_xmm_arg_regs;
         int max_reg = g_max_reg_args;
         int shadow = g_use_shadow_space ? 32 : 0;
-        int arg_slot_size = (g_target == TARGET_DOS) ? 4 : 8;
+        int arg_slot_size = g_stack_slot_size;
         
         /* Check if the called function returns a struct (needs hidden pointer) */
         Type *call_ret_type = get_expr_type(node);
@@ -4012,7 +4015,7 @@ static void gen_statement(ASTNode *node) {
                 } else {
                     fprintf(out, ".data\n");
                     emit_label_def(slabel);
-                    int size = node->resolved_type ? node->resolved_type->size : 8;
+                    int size = node->resolved_type ? node->resolved_type->size : g_ptr_size;
                     ASTNode *vinit3 = node->data.var_decl.initializer;
                     if (vinit3 && vinit3->type == AST_INIT_LIST) {
                         int elem_size = 1;
@@ -4039,7 +4042,7 @@ static void gen_statement(ASTNode *node) {
                         if (size == 1) fprintf(out, "    .byte %I64d\n", val);
                         else if (size == 2) fprintf(out, "    .word %I64d\n", val);
                         else if (size == 4) fprintf(out, "    .long %I64d\n", val);
-                        else if (size == 8) fprintf(out, "    .quad %I64d\n", val);
+                         else if (size == g_ptr_size) fprintf(out, "    .quad %I64d\n", val);
                         else fprintf(out, "    .long %I64d\n", val);
 
                     }
@@ -4056,10 +4059,10 @@ static void gen_statement(ASTNode *node) {
             locals_count++;
             return;
         }
-        int size = node->resolved_type ? node->resolved_type->size : 8;
+        int size = node->resolved_type ? node->resolved_type->size : g_stack_slot_size;
         int alloc_size = size;
-        if (alloc_size < 8 && node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
-            alloc_size = 8;
+        if (size < g_stack_slot_size && node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
+            alloc_size = g_stack_slot_size;
         }
         
         ASTNode *init_list = node->data.var_decl.initializer;
@@ -4082,9 +4085,12 @@ static void gen_statement(ASTNode *node) {
             // Zero-initialize with qword stores
             {
                 int off;
-                for (off = 0; off + 8 <= alloc_size; off += 8) {
-                    emit_inst2("movl", op_imm(0), op_mem("ebp", stack_offset + off));
-emit_inst2("movl", op_imm(0), op_mem("ebp", stack_offset + off + 4));
+                for (off = 0; off + g_stack_slot_size <= alloc_size; off += g_stack_slot_size) {
+                    if (g_stack_slot_size == 4) emit_inst2("movl", op_imm(0), op_mem("ebp", stack_offset + off));
+                    else {
+                        emit_inst2("movl", op_imm(0), op_mem("ebp", stack_offset + off));
+                        emit_inst2("movl", op_imm(0), op_mem("ebp", stack_offset + off + 4));
+                    }
                 }
                 if (off + 4 <= alloc_size) {
                     emit_inst2("movl", op_imm(0), op_mem("ebp", stack_offset + off));
@@ -4092,10 +4098,10 @@ emit_inst2("movl", op_imm(0), op_mem("ebp", stack_offset + off + 4));
             }
             
             // Determine element size for arrays
-            int elem_size = 8;
+            int elem_size = g_ptr_size;
             if (node->resolved_type && node->resolved_type->kind == TYPE_ARRAY && node->resolved_type->data.ptr_to) {
                 elem_size = node->resolved_type->data.ptr_to->size;
-                if (elem_size < 4) elem_size = 1;
+                if (elem_size < g_stack_slot_size) elem_size = g_stack_slot_size;
                 else if (elem_size < 8) elem_size = 4;
             }
             
@@ -4106,7 +4112,7 @@ emit_inst2("movl", op_imm(0), op_mem("ebp", stack_offset + off + 4));
                     gen_expression(init_list->children[i]);
                     if (node->resolved_type->data.struct_data.members && (int)i < node->resolved_type->data.struct_data.members_count) {
                         int mem_offset = node->resolved_type->data.struct_data.members[i].offset;
-                        int mem_size = node->resolved_type->data.struct_data.members[i].type ? node->resolved_type->data.struct_data.members[i].type->size : 8;
+                        int mem_size = node->resolved_type->data.struct_data.members[i].type ? node->resolved_type->data.struct_data.members[i].type->size : g_ptr_size;
                         if (mem_size == 1) {
                             emit_inst2("movb", op_reg("al"), op_mem("ebp", stack_offset + mem_offset));
                         } else if (mem_size == 4) {
@@ -4704,9 +4710,9 @@ static void gen_function(ASTNode *node) {
      * Save it to a local slot and shift all parameter registers by 1. */
     int sret_reg_shift = 0;
     if (is_struct_return(current_func_return_type)) {
-        stack_offset -= 8;
+        stack_offset -= g_stack_slot_size;
         sret_offset = stack_offset;
-        emit_inst2("sub", op_imm(8), op_reg("esp"));
+        emit_inst2("sub", op_imm(g_stack_slot_size), op_reg("esp"));
         emit_inst2("mov", op_reg("edi"), op_mem("esp", 0));
         sret_reg_shift = 1;  /* param 0 comes from arg_regs[1], etc. */
     }
@@ -4726,9 +4732,9 @@ static void gen_function(ASTNode *node) {
     for (size_t i = 0; i < node->children_count; i++) {
         ASTNode *param = node->children[i];
         if (param->type == AST_VAR_DECL) {
-            int size = param->resolved_type ? param->resolved_type->size : 8;
+            int size = param->resolved_type ? param->resolved_type->size : g_ptr_size;
             int alloc_size = size;
-            int slot_size = (g_target == TARGET_DOS) ? 4 : 8;
+            int slot_size = g_stack_slot_size;
             if (alloc_size < slot_size && param->resolved_type && param->resolved_type->kind != TYPE_STRUCT && param->resolved_type->kind != TYPE_ARRAY) {
                 alloc_size = slot_size;
             }

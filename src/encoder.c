@@ -327,7 +327,8 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             emit_rex(buf, is_64, s >= 8, 0, 0);
             buffer_write_byte(buf, 0x89);
             emit_modrm(buf, 0, s, 5);
-            emit_reloc(buf, dest->data.label, (uint32_t)buf->size);
+            if (encoder_bits == 32 || encoder_bits == 16) emit_reloc_abs(buf, dest->data.label, (uint32_t)buf->size);
+            else emit_reloc(buf, dest->data.label, (uint32_t)buf->size);
             buffer_write_dword(buf, 0); // COFF REL32 addend = 0
         } else if (src->type == OP_LABEL && dest->type == OP_REG) {
             int d = get_reg_id(dest->data.reg);
@@ -335,7 +336,8 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             emit_rex(buf, is_64, d >= 8, 0, 0);
             buffer_write_byte(buf, 0x8B);
             emit_modrm(buf, 0, d, 5);
-            emit_reloc(buf, src->data.label, (uint32_t)buf->size);
+            if (encoder_bits == 32 || encoder_bits == 16) emit_reloc_abs(buf, src->data.label, (uint32_t)buf->size);
+            else emit_reloc(buf, src->data.label, (uint32_t)buf->size);
             buffer_write_dword(buf, 0); // COFF REL32 addend = 0
         } else if (src->type == OP_REG && dest->type == OP_MEM) {
             int s = get_reg_id(src->data.reg);
@@ -390,7 +392,8 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             emit_rex(buf, 0, s >= 8, 0, 0);
             buffer_write_byte(buf, 0x89);
             emit_modrm(buf, 0, s, 5); // RIP-relative
-            emit_reloc(buf, dest->data.label, (uint32_t)buf->size);
+            if (encoder_bits == 32 || encoder_bits == 16) emit_reloc_abs(buf, dest->data.label, (uint32_t)buf->size);
+            else emit_reloc(buf, dest->data.label, (uint32_t)buf->size);
             buffer_write_dword(buf, 0); // COFF REL32 addend = 0
         }
     } else if (strcmp(mnemonic, "movb") == 0) {
@@ -409,7 +412,8 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             if (encoder_bits == 16) emit_prefixes(buf, 16, 32); /* 32-bit addr */
             buffer_write_byte(buf, 0x88);
             emit_modrm(buf, 0, s, 5); // RIP-relative
-            emit_reloc(buf, dest->data.label, (uint32_t)buf->size);
+            if (encoder_bits == 32 || encoder_bits == 16) emit_reloc_abs(buf, dest->data.label, (uint32_t)buf->size);
+            else emit_reloc(buf, dest->data.label, (uint32_t)buf->size);
             buffer_write_dword(buf, 0); // COFF REL32 addend = 0
         } else if (src->type == OP_MEM && dest->type == OP_REG) {
             int s = get_reg_id(src->data.mem.base);
@@ -840,7 +844,8 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             buffer_write_byte(buf, 0x0F);
             buffer_write_byte(buf, 0x10);
             emit_modrm(buf, 0, d, 5); // RIP-relative
-            emit_reloc(buf, src->data.label, (uint32_t)buf->size);
+            if (encoder_bits == 32 || encoder_bits == 16) emit_reloc_abs(buf, src->data.label, (uint32_t)buf->size);
+            else emit_reloc(buf, src->data.label, (uint32_t)buf->size);
             buffer_write_dword(buf, 0); // COFF REL32 addend = 0
         } else if (src->type == OP_REG && dest->type == OP_LABEL) {
             int s = get_reg_id(src->data.reg);
@@ -848,7 +853,8 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             buffer_write_byte(buf, 0x0F);
             buffer_write_byte(buf, 0x11);
             emit_modrm(buf, 0, s, 5); // RIP-relative
-            emit_reloc(buf, dest->data.label, (uint32_t)buf->size);
+            if (encoder_bits == 32 || encoder_bits == 16) emit_reloc_abs(buf, dest->data.label, (uint32_t)buf->size);
+            else emit_reloc(buf, dest->data.label, (uint32_t)buf->size);
             buffer_write_dword(buf, 0); // COFF REL32 addend = 0
         }
     } else if (strcmp(mnemonic, "addss") == 0 || strcmp(mnemonic, "addsd") == 0 ||

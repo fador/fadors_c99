@@ -1,5 +1,7 @@
 # Fador's C99 Compiler
 
+!Note! This tool is mostly AI coded.
+
 A self-hosting C99-standard compliant compiler written in C99, targeting x86_64 Windows (COFF/PE) and Linux/Unix (ELF). Features a fully custom toolchain on Linux — including assembler, linker, and dynamic linking — with no external tools required. The compiler can compile itself (triple-tested bootstrapping).
 
 ## Features
