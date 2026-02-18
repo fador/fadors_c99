@@ -408,84 +408,7 @@ static void emit_label_def_ex(const char *name, int is_static) {
 
 void arch_x86_init(FILE *output) {
     out = output;
-    if (g_target == TARGET_DOS) {
-        // MS-DOS 32-bit (djgpp/watcom style flat model)
-        // cdecl: args on stack
-        g_max_reg_args = 0;
-        g_use_shadow_space = 0;
-        g_stack_slot_size = 4;
-        g_ptr_size = 4;
-    } else if (g_target == TARGET_WINDOWS) {
-        // Win64 ABI
-        g_arg_regs[0] = "ecx";
-        g_arg_regs[1] = "edx";
-        g_arg_regs[2] = "r8";
-        g_arg_regs[3] = "r9";
-        g_xmm_arg_regs[0] = "xmm0";
-        g_xmm_arg_regs[1] = "xmm1";
-        g_xmm_arg_regs[2] = "xmm2";
-        g_xmm_arg_regs[3] = "xmm3";
-        g_max_reg_args = 4;
-        g_use_shadow_space = 1;
-    } else {
-        // System V AMD64 ABI (Linux/macOS)
-        g_arg_regs[0] = "edi";
-        g_arg_regs[1] = "esi";
-        g_arg_regs[2] = "edx";
-        g_arg_regs[3] = "ecx";
-        /* 32-bit only has 4 arg regs usually? actually fastcall/regparm might use eax/edx/ecx.
-           SysV i386 ABI passes args on STACK.
-           Watcom/fastcall passes in registers.
-           We are defining our own internal ABI or following a standard?
-           If we use internal ABI, we can use whatever.
-           But standard C on DOS (e.g. DJGPP) uses stack (cdecl).
-           If we want to link with libc, we need cdecl.
-           Let's switch to CDECL (stack) for DOS by default?
-           Or support `__cdecl`.
-           If `g_arg_regs` are defined, `gen_function` will use them for parameters?
-           No, `gen_function` checks `current_func_type->attr`?
-           Actually `assign_arg_regs` uses these.
-           For 32-bit x86, usually ALL args are on stack (except maybe fastcall).
-           If we set g_arg_regs to empty, maybe it uses stack?
-           But for now lets keep using registers if our codegen supports it internally, 
-           but external calls might break.
-           Wait, `main.c` doesn't set ABI.
-           If we want standard DOS object files, we should probably stick to CDECL.
-           So `g_arg_regs` should be EMPTY?
-           Let's comment them out or set to NULL?
-           Actually, let's keep EAX/EDX/ECX for scratch, but args on stack.
-           Wait, `assign_arg_regs` logic:
-           for (int i=0; i<num_args; i++) { if (i < max_reg_args) assign reg... }
-           So if I set `g_max_reg_args = 0`, it will put everything on stack.
-           
-           Let's look at `arch_x86_init`:
-           g_max_reg_args = 6; (copied from x64)
-           I should change this to 0 for 32-bit default (stack passing).
-           Or 2/3 for fastcall.
-           Let's use 0 for compatibility with standard C utils on DOS.
-        */
-        g_arg_regs[0] = NULL;
-        g_arg_regs[1] = NULL;
-        g_arg_regs[2] = NULL;
-        g_arg_regs[3] = NULL;
-        g_arg_regs[4] = NULL;
-        g_arg_regs[5] = NULL;
-        g_xmm_arg_regs[0] = "xmm0";
-        g_xmm_arg_regs[1] = "xmm1";
-        g_xmm_arg_regs[2] = "xmm2";
-        g_xmm_arg_regs[3] = "xmm3";
-        g_xmm_arg_regs[4] = "xmm4";
-        g_xmm_arg_regs[5] = "xmm5";
-        g_xmm_arg_regs[6] = "xmm6";
-        g_xmm_arg_regs[7] = "xmm7";
-        // For 32-bit DOS, default to CDECL (stack args)
-    }
-    
-    if (g_target == TARGET_DOS) {
-        encoder_set_bitness(16);
-    } else {
-        encoder_set_bitness(32);
-    }
+    arch_x86_set_target(g_target);
 
     if (out && !obj_writer && current_syntax == SYNTAX_INTEL) {
         fprintf(out, "_TEXT SEGMENT\n");
@@ -498,6 +421,47 @@ void arch_x86_set_syntax(CodegenSyntax syntax) {
 
 void arch_x86_set_target(TargetPlatform target) {
     g_target = target;
+    if (g_target == TARGET_DOS) {
+        g_max_reg_args = 0;
+        g_use_shadow_space = 0;
+        g_stack_slot_size = 4;
+        g_ptr_size = 4;
+        encoder_set_bitness(16);
+    } else if (g_target == TARGET_WINDOWS) {
+        g_arg_regs[0] = "ecx";
+        g_arg_regs[1] = "edx";
+        g_arg_regs[2] = "r8";
+        g_arg_regs[3] = "r9";
+        g_xmm_arg_regs[0] = "xmm0";
+        g_xmm_arg_regs[1] = "xmm1";
+        g_xmm_arg_regs[2] = "xmm2";
+        g_xmm_arg_regs[3] = "xmm3";
+        g_max_reg_args = 4;
+        g_use_shadow_space = 1;
+        g_stack_slot_size = 8;
+        g_ptr_size = 8;
+        encoder_set_bitness(32);
+    } else {
+        g_arg_regs[0] = "edi";
+        g_arg_regs[1] = "esi";
+        g_arg_regs[2] = "edx";
+        g_arg_regs[3] = "ecx";
+        g_arg_regs[4] = NULL;
+        g_arg_regs[5] = NULL;
+        g_xmm_arg_regs[0] = "xmm0";
+        g_xmm_arg_regs[1] = "xmm1";
+        g_xmm_arg_regs[2] = "xmm2";
+        g_xmm_arg_regs[3] = "xmm3";
+        g_xmm_arg_regs[4] = "xmm4";
+        g_xmm_arg_regs[5] = "xmm5";
+        g_xmm_arg_regs[6] = "xmm6";
+        g_xmm_arg_regs[7] = "xmm7";
+        g_max_reg_args = 4;
+        g_use_shadow_space = 0;
+        g_stack_slot_size = 8;
+        g_ptr_size = 8;
+        encoder_set_bitness(32);
+    }
 }
 
 void arch_x86_generate(ASTNode *program) {
