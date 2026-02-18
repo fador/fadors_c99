@@ -33,6 +33,7 @@ set(SOURCES
     src/arch_x86.c
     src/dos_linker.c
     src/pgo.c
+    src/as_parser.c
 )
 
 add_executable(fadors99 ${SOURCES})

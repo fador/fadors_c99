@@ -109,12 +109,6 @@ static const char *g_xmm_arg_regs[8];
 static int g_max_reg_args = 4;       // 4 for Win64, 6 for SysV
 static int g_use_shadow_space = 1;   // 1 for Win64, 0 for SysV
 
-static TargetPlatform g_target =
-#ifdef _WIN32
-    TARGET_WINDOWS;
-#else
-    TARGET_LINUX;
-#endif
 
 static void gen_function(ASTNode *node);
 static void gen_statement(ASTNode *node);
@@ -1366,10 +1360,10 @@ static void gen_global_decl(ASTNode *node) {
                  for (ai = 0; ai < init_att->children_count; ai++) {
                      ASTNode *elem = init_att->children[ai];
                      if (elem && elem->type == AST_INTEGER) {
-                         if (elem_size == 1) fprintf(out, "    .byte %d\n", elem->data.integer.value);
-                         else if (elem_size == 4) fprintf(out, "    .long %d\n", elem->data.integer.value);
-                         else if (elem_size == 8) fprintf(out, "    .quad %d\n", elem->data.integer.value);
-                         else fprintf(out, "    .long %d\n", elem->data.integer.value);
+                         if (elem_size == 1) fprintf(out, "    .byte %lld\n", elem->data.integer.value);
+                         else if (elem_size == 4) fprintf(out, "    .long %lld\n", elem->data.integer.value);
+                         else if (elem_size == 8) fprintf(out, "    .quad %lld\n", elem->data.integer.value);
+                         else fprintf(out, "    .long %lld\n", elem->data.integer.value);
                      } else if (elem && elem->type == AST_FLOAT) {
                          if (elem_size == 4) fprintf(out, "    .float %f\n", elem->data.float_val.value);
                          else fprintf(out, "    .double %f\n", elem->data.float_val.value);
@@ -3953,9 +3947,9 @@ static void gen_statement(ASTNode *node) {
                         for (vi = 0; vi < vinit3->children_count; vi++) {
                             ASTNode *elem = vinit3->children[vi];
                             if (elem && elem->type == AST_INTEGER) {
-                                if (elem_size == 1) fprintf(out, "    .byte %d\n", elem->data.integer.value);
-                                else if (elem_size == 4) fprintf(out, "    .long %d\n", elem->data.integer.value);
-                                else fprintf(out, "    .quad %d\n", elem->data.integer.value);
+                                if (elem_size == 1) fprintf(out, "    .byte %lld\n", elem->data.integer.value);
+                                else if (elem_size == 4) fprintf(out, "    .long %lld\n", elem->data.integer.value);
+                                else fprintf(out, "    .quad %lld\n", elem->data.integer.value);
                             } else {
                                 int zi; for (zi = 0; zi < elem_size; zi++) fprintf(out, "    .byte 0\n");
                             }
@@ -3965,9 +3959,9 @@ static void gen_statement(ASTNode *node) {
                     } else {
                         int val = 0;
                         if (vinit3 && vinit3->type == AST_INTEGER) val = vinit3->data.integer.value;
-                        if (size == 1) fprintf(out, ".byte %d\n", val);
-                        else if (size == 4) fprintf(out, ".long %d\n", val);
-                        else fprintf(out, ".quad %d\n", val);
+                        if (size == 1) fprintf(out, ".byte %lld\n", (long long)val);
+                        else if (size == 4) fprintf(out, ".long %lld\n", (long long)val);
+                        else fprintf(out, ".quad %lld\n", (long long)val);
                     }
                     fprintf(out, ".text\n");
                 }

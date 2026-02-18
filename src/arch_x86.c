@@ -113,12 +113,6 @@ static int g_use_shadow_space = 1;   // 1 for Win64, 0 for SysV
 static int g_stack_slot_size = 8;    // 4 for 32-bit DOS, 8 for 64-bit 
 static int g_ptr_size = 8;           // 4 for 32-bit DOS, 8 for 64-bit
 
-static TargetPlatform g_target =
-#ifdef _WIN32
-    TARGET_WINDOWS;
-#else
-    TARGET_LINUX;
-#endif
 
 static void gen_function(ASTNode *node);
 static void gen_statement(ASTNode *node);
@@ -1257,7 +1251,6 @@ static void gen_global_decl(ASTNode *node) {
                     sprintf(slabel, ".LC%d", label_count++);
                     int slen = elem->data.string.length;
                     /* Emit the string data in .data section */
-                    uint32_t str_offset = (uint32_t)obj_writer->data_section.size;
                     /* We need to emit a placeholder and relocation, but since this
                      * is a pointer within the same data section, we store the string
                      * after all init list data, and record a self-relocation.
@@ -1273,7 +1266,7 @@ static void gen_global_decl(ASTNode *node) {
                     /* Write symbol and relocation for the string pointer */
                     uint32_t sym_idx = coff_writer_add_symbol(obj_writer, slabel, 0, 0, 0, IMAGE_SYM_CLASS_EXTERNAL);
                     uint32_t reloc_off = (uint32_t)obj_writer->data_section.size;
-                    coff_writer_add_reloc(obj_writer, reloc_off, 1, 2); // Type 1 for 32-bit absolute, Type 2 for 64-bit absolute
+                    coff_writer_add_reloc(obj_writer, reloc_off, sym_idx, 1, 2); // Type 1 for 32-bit absolute, Type 2 for 64-bit absolute
                     uint64_t zero = 0;
                     buffer_write_bytes(&obj_writer->data_section, &zero, g_ptr_size);
                 } else {
@@ -1327,7 +1320,7 @@ static void gen_global_decl(ASTNode *node) {
             
             ASTNode *init_intel = node->data.var_decl.initializer;
             if (init_intel && init_intel->type == AST_INTEGER) {
-                fprintf(out, "%s %I64d\n", directive, init_intel->data.integer.value);
+                fprintf(out, "%s %lld\n", directive, init_intel->data.integer.value);
             } else if (init_intel && init_intel->type == AST_FLOAT) {
                 fprintf(out, "%s %f\n", directive, init_intel->data.float_val.value);
             } else if (init_intel && init_intel->type == AST_INIT_LIST) {
@@ -1344,7 +1337,7 @@ static void gen_global_decl(ASTNode *node) {
                 for (ii = 0; ii < init_intel->children_count; ii++) {
                     ASTNode *elem = init_intel->children[ii];
                     if (elem && elem->type == AST_INTEGER) {
-                        fprintf(out, "%s %I64d\n", edirective, elem->data.integer.value);
+                        fprintf(out, "%s %lld\n", edirective, elem->data.integer.value);
                     } else if (elem && elem->type == AST_FLOAT) {
                         fprintf(out, "%s %f\n", edirective, elem->data.float_val.value);
                     } else if (elem && elem->type == AST_STRING) {
@@ -1382,11 +1375,11 @@ static void gen_global_decl(ASTNode *node) {
              if (init_att && init_att->type == AST_INTEGER) {
                  long long val = init_att->data.integer.value;
                  int size = node->resolved_type ? node->resolved_type->size : 4;
-                 if (size == 1) fprintf(out, "    .byte %I64d\n", val);
-                 else if (size == 2) fprintf(out, "    .word %I64d\n", val);
-                 else if (size == 4) fprintf(out, "    .long %I64d\n", val);
-                 else if (size == g_ptr_size) fprintf(out, "    .quad %I64d\n", val);
-                 else fprintf(out, "    .long %I64d\n", val);
+                 if (size == 1) fprintf(out, "    .byte %lld\n", val);
+                 else if (size == 2) fprintf(out, "    .word %lld\n", val);
+                 else if (size == 4) fprintf(out, "    .long %lld\n", val);
+                 else if (size == g_ptr_size) fprintf(out, "    .quad %lld\n", val);
+                 else fprintf(out, "    .long %lld\n", val);
              } else if (init_att && init_att->type == AST_FLOAT) {
                  int size = node->resolved_type ? node->resolved_type->size : 4;
                  if (size == 4) fprintf(out, "    .float %f\n", init_att->data.float_val.value);
@@ -1402,10 +1395,10 @@ static void gen_global_decl(ASTNode *node) {
                  for (ai = 0; ai < init_att->children_count; ai++) {
                      ASTNode *elem = init_att->children[ai];
                      if (elem && elem->type == AST_INTEGER) {
-                         if (elem_size == 1) fprintf(out, "    .byte %I64d\n", elem->data.integer.value);
-                         else if (elem_size == 4) fprintf(out, "    .long %I64d\n", elem->data.integer.value);
-                         else if (elem_size == g_ptr_size) fprintf(out, "    .quad %I64d\n", elem->data.integer.value);
-                         else fprintf(out, "    .long %I64d\n", elem->data.integer.value);
+                         if (elem_size == 1) fprintf(out, "    .byte %lld\n", elem->data.integer.value);
+                         else if (elem_size == 4) fprintf(out, "    .long %lld\n", elem->data.integer.value);
+                         else if (elem_size == g_ptr_size) fprintf(out, "    .quad %lld\n", elem->data.integer.value);
+                         else fprintf(out, "    .long %lld\n", elem->data.integer.value);
                      } else if (elem && elem->type == AST_FLOAT) {
                          if (elem_size == 4) fprintf(out, "    .float %f\n", elem->data.float_val.value);
                          else fprintf(out, "    .double %f\n", elem->data.float_val.value);
@@ -3963,7 +3956,7 @@ static void gen_statement(ASTNode *node) {
                         size_t vi; int tw = 0;
                         for (vi = 0; vi < vinit2->children_count; vi++) {
                             ASTNode *elem = vinit2->children[vi];
-                            if (elem && elem->type == AST_INTEGER) fprintf(out, "%s %I64d\n", edir, elem->data.integer.value);
+                            if (elem && elem->type == AST_INTEGER) fprintf(out, "%s %lld\n", edir, elem->data.integer.value);
                             else fprintf(out, "%s 0\n", edir);
                             tw += elem_size;
                         }
@@ -3971,9 +3964,9 @@ static void gen_statement(ASTNode *node) {
                     } else {
                         long long val = 0;
                         if (vinit2 && vinit2->type == AST_INTEGER) val = vinit2->data.integer.value;
-                        if (size == 1) fprintf(out, "DB %I64d\n", val);
-                        else if (size == 4) fprintf(out, "DD %I64d\n", val);
-                        else fprintf(out, "DQ %I64d\n", val);
+                        if (size == 1) fprintf(out, "DB %lld\n", val);
+                        else if (size == 4) fprintf(out, "DD %lld\n", val);
+                        else fprintf(out, "DQ %lld\n", val);
                     }
                     fprintf(out, "_DATA ENDS\n_TEXT SEGMENT\n");
                 } else {
@@ -4003,11 +3996,11 @@ static void gen_statement(ASTNode *node) {
                     } else {
                         long long val = 0;
                         if (vinit3 && vinit3->type == AST_INTEGER) val = vinit3->data.integer.value;
-                        if (size == 1) fprintf(out, "    .byte %I64d\n", val);
-                        else if (size == 2) fprintf(out, "    .word %I64d\n", val);
-                        else if (size == 4) fprintf(out, "    .long %I64d\n", val);
-                         else if (size == g_ptr_size) fprintf(out, "    .quad %I64d\n", val);
-                        else fprintf(out, "    .long %I64d\n", val);
+                        if (size == 1) fprintf(out, "    .byte %lld\n", val);
+                        else if (size == 2) fprintf(out, "    .word %lld\n", val);
+                        else if (size == 4) fprintf(out, "    .long %lld\n", val);
+                         else if (size == g_ptr_size) fprintf(out, "    .quad %lld\n", val);
+                        else fprintf(out, "    .long %lld\n", val);
 
                     }
                     fprintf(out, ".text\n");

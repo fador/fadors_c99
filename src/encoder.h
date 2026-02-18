@@ -39,5 +39,6 @@ void encoder_set_bitness(int bits);
 void encode_inst0(Buffer *buf, const char *mnemonic);
 void encode_inst1(Buffer *buf, const char *mnemonic, Operand *op1);
 void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest);
+void encode_inst3(Buffer *buf, const char *mnemonic, Operand *op1, Operand *op2, Operand *op3);
 
 #endif

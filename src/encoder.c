@@ -51,10 +51,10 @@ int get_reg_id(const char *reg) {
     if (strcmp(reg, "rcx") == 0 || strcmp(reg, "ecx") == 0 || strcmp(reg, "cx") == 0 || strcmp(reg, "cl") == 0) return 1;
     if (strcmp(reg, "rdx") == 0 || strcmp(reg, "edx") == 0 || strcmp(reg, "dx") == 0 || strcmp(reg, "dl") == 0) return 2;
     if (strcmp(reg, "rbx") == 0 || strcmp(reg, "ebx") == 0 || strcmp(reg, "bx") == 0 || strcmp(reg, "bl") == 0) return 3;
-    if (strcmp(reg, "rsp") == 0 || strcmp(reg, "esp") == 0 || strcmp(reg, "sp") == 0) return 4;
-    if (strcmp(reg, "rbp") == 0 || strcmp(reg, "ebp") == 0 || strcmp(reg, "bp") == 0) return 5;
-    if (strcmp(reg, "rsi") == 0 || strcmp(reg, "esi") == 0 || strcmp(reg, "si") == 0) return 6;
-    if (strcmp(reg, "rdi") == 0 || strcmp(reg, "edi") == 0 || strcmp(reg, "di") == 0) return 7;
+    if (strcmp(reg, "rsp") == 0 || strcmp(reg, "esp") == 0 || strcmp(reg, "sp") == 0 || strcmp(reg, "spl") == 0 || strcmp(reg, "ah") == 0) return 4;
+    if (strcmp(reg, "rbp") == 0 || strcmp(reg, "ebp") == 0 || strcmp(reg, "bp") == 0 || strcmp(reg, "bpl") == 0 || strcmp(reg, "ch") == 0) return 5;
+    if (strcmp(reg, "rsi") == 0 || strcmp(reg, "esi") == 0 || strcmp(reg, "si") == 0 || strcmp(reg, "sil") == 0 || strcmp(reg, "dh") == 0) return 6;
+    if (strcmp(reg, "rdi") == 0 || strcmp(reg, "edi") == 0 || strcmp(reg, "di") == 0 || strcmp(reg, "dil") == 0 || strcmp(reg, "bh") == 0) return 7;
     // R8-R15
     if (strcmp(reg, "r8") == 0 || strcmp(reg, "r8d") == 0 || strcmp(reg, "r8w") == 0 || strcmp(reg, "r8b") == 0) return 8;
     if (strcmp(reg, "r9") == 0 || strcmp(reg, "r9d") == 0 || strcmp(reg, "r9w") == 0 || strcmp(reg, "r9b") == 0) return 9;
@@ -174,6 +174,9 @@ void encode_inst0(Buffer *buf, const char *mnemonic) {
         /* 0F 05 — syscall */
         buffer_write_byte(buf, 0x0F);
         buffer_write_byte(buf, 0x05);
+    } else if (strcmp(mnemonic, "hlt") == 0) {
+        /* F4 — hlt */
+        buffer_write_byte(buf, 0xF4);
     }
 }
 
@@ -230,9 +233,12 @@ void encode_inst1(Buffer *buf, const char *mnemonic, Operand *op1) {
             else if (strcmp(mnemonic, "jle") == 0) opcode = 0x8E;
             else if (strcmp(mnemonic, "jg") == 0) opcode = 0x8F;
             else if (strcmp(mnemonic, "jb") == 0) opcode = 0x82;
-            else if (strcmp(mnemonic, "jae") == 0) opcode = 0x83;
+            else if (strcmp(mnemonic, "jae") == 0 || strcmp(mnemonic, "jnc") == 0) opcode = 0x83;
             else if (strcmp(mnemonic, "jbe") == 0) opcode = 0x86;
             else if (strcmp(mnemonic, "ja") == 0) opcode = 0x87;
+            else if (strcmp(mnemonic, "jns") == 0) opcode = 0x89;
+            else if (strcmp(mnemonic, "js") == 0) opcode = 0x88;
+            else if (strcmp(mnemonic, "jc") == 0) opcode = 0x82;
             
             buffer_write_byte(buf, 0x0F);
             buffer_write_byte(buf, opcode);
@@ -294,6 +300,22 @@ void encode_inst1(Buffer *buf, const char *mnemonic, Operand *op1) {
             emit_rex(buf, 1, 0, 0, reg >= 8);
             buffer_write_byte(buf, 0xFF);
             emit_modrm(buf, 3, 0, reg);
+        }
+    } else if (strcmp(mnemonic, "int") == 0) {
+        if (op1->type == OP_IMM) {
+            buffer_write_byte(buf, 0xCD);
+            buffer_write_byte(buf, (uint8_t)op1->data.imm);
+        }
+    } else if (strcmp(mnemonic, "loop") == 0) {
+        if (op1->type == OP_LABEL) {
+            /* loop rel8. This usually expects a short jump. */
+            /* Our relocations are rel32. For now, let's use a 
+               hack: emit a placeholder for rel8 and a relocation.
+               Or better, the assembler should handle rel8 if possible. */
+            buffer_write_byte(buf, 0xE2);
+            emit_reloc(buf, op1->data.label, (uint32_t)buf->size);
+            buffer_write_byte(buf, 0); // placeholder for rel8
+            /* WARNING: The linker MUST support rel8 relocations for this to work! */
         }
     }
 }

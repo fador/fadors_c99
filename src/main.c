@@ -15,6 +15,7 @@
 #include "optimizer.h"
 #include "ir.h"
 #include "arch_x86.h"
+#include "as_parser.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -57,6 +58,8 @@ typedef enum {
 static Parser *current_parser;
 static COFFWriter *current_writer;
 static int g_dump_ir = 0;  /* --dump-ir: print IR/CFG to stderr */
+
+static int do_builtin_as(const char *input_file, const char *output_name, TargetPlatform target);
 
 // Helper to execute a command
 static int run_command(const char *cmd) {
@@ -577,11 +580,20 @@ static int do_as(const char *input_file, const char *output_name,
 }
 
 // ---------- LINK mode: link objects to executable ----------
+static int do_builtin_as(const char *input_file, const char *output_name,
+                         TargetPlatform target) {
+    if (assemble_file(input_file, output_name, target) != 0) {
+        printf("Error: Built-in assembly failed.\n");
+        return 1;
+    }
+    printf("Assembled (built-in): %s\n", output_name ? output_name : input_file);
+    return 0;
+}
+
 static int do_link(int obj_count, const char **obj_files, const char *output_name,
                    TargetPlatform target,
                    int lib_count, const char **libraries,
                    int libpath_count, const char **libpaths) {
-    char cmd[4096];
     char exe_filename[260];
 
     if (output_name) {
@@ -847,6 +859,7 @@ int main(int argc, char **argv) {
                      define_count, define_names, define_values);
 
     case MODE_AS:
+        if (g_target == TARGET_DOS) return do_builtin_as(input_files[0], output_name, g_target);
         return do_as(input_files[0], output_name, g_target);
 
     case MODE_LINK:
