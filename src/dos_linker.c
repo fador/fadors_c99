@@ -255,6 +255,8 @@ int dos_linker_link(DosLinker *l, const char *output_path) {
     if (data_base % 16 != 0) data_base = (data_base + 15) & ~15;
     
     uint64_t bss_base = data_base + l->data.size;
+    printf("DEBUG: rdata_base: %lu (size %lu), data_base: %lu (size %lu), bss_base: %lu\n",
+           rdata_base, l->rdata.size, data_base, l->data.size, bss_base);
     
     /* Resolve symbols */
     for (size_t i = 0; i < l->sym_count; i++) {
@@ -362,6 +364,23 @@ int dos_linker_link(DosLinker *l, const char *output_path) {
     
     while (current_pos < data_base) { fputc(0, f); current_pos++; }
     fwrite(l->data.data, 1, l->data.size, f);
+    
+    /* Patch MZ header with actual file size */
+    {
+        long total_size = ftell(f);
+        uint16_t e_cblp = total_size % 512;
+        uint16_t e_cp = (total_size + 511) / 512;
+        /* e_minalloc: extra paragraphs needed beyond loaded image (for BSS + heap + stack) */
+        uint16_t e_minalloc = 0x1000; /* 64KB extra */
+        
+        fseek(f, 2, 0);  /* offset of e_cblp */
+        fputc(e_cblp & 0xFF, f); fputc((e_cblp >> 8) & 0xFF, f);
+        fputc(e_cp & 0xFF, f); fputc((e_cp >> 8) & 0xFF, f);
+        
+        /* Patch e_minalloc at offset 0x0A */
+        fseek(f, 0x0A, 0);
+        fputc(e_minalloc & 0xFF, f); fputc((e_minalloc >> 8) & 0xFF, f);
+    }
     
     fclose(f);
     return 0;

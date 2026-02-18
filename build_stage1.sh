@@ -118,6 +118,9 @@ echo ""
 echo -n "Assembling DOS library (src/dos_lib.s) ... "
 if gcc -c -m32 -masm=intel -o build_linux/dos_lib.o src/dos_lib.s; then
     objcopy -O pe-i386 build_linux/dos_lib.o build_linux/dos_lib.o
+    # Compile dos_libc.c using stage1 (stage0 segfaults on this file)
+    echo "Building dos_libc.o..."
+    "$STAGE1_BIN" src/dos_libc.c -c -o build_linux/dos_libc.o --target=dos
     echo "OK"
 else
     echo "FAIL"

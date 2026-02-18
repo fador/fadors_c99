@@ -4,9 +4,11 @@
 
 /* 0 = LP64 (Linux: long=8), 1 = LLP64 (Windows: long=4) */
 static int target_is_windows = 0;
+static int target_is_32bit = 0;
 
-void types_set_target(int is_windows) {
+void types_set_target(int is_windows, int is_32bit) {
     target_is_windows = is_windows;
+    target_is_32bit = is_32bit;
 }
 
 Type *type_int() {
@@ -28,7 +30,7 @@ Type *type_short() {
 Type *type_long() {
     Type *t = malloc(sizeof(Type));
     t->kind = TYPE_LONG;
-    t->size = target_is_windows ? 4 : 8;  /* LLP64 vs LP64 */
+    t->size = (target_is_windows || target_is_32bit) ? 4 : 8;  /* LLP64/ILP32 vs LP64 */
     t->array_len = 0;
     return t;
 }
@@ -68,7 +70,7 @@ Type *type_double() {
 Type *type_ptr(Type *to) {
     Type *t = malloc(sizeof(Type));
     t->kind = TYPE_PTR;
-    t->size = 8;
+    t->size = target_is_32bit ? 4 : 8;
     t->data.ptr_to = to;
     t->array_len = 0;
     return t;

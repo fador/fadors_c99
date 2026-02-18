@@ -3111,6 +3111,7 @@ static void gen_expression(ASTNode *node) {
         const char **xmm_arg_regs = g_xmm_arg_regs;
         int max_reg = g_max_reg_args;
         int shadow = g_use_shadow_space ? 32 : 0;
+        int arg_slot_size = (g_target == TARGET_DOS) ? 4 : 8;
         
         /* Check if the called function returns a struct (needs hidden pointer) */
         Type *call_ret_type = get_expr_type(node);
@@ -3129,7 +3130,7 @@ static void gen_expression(ASTNode *node) {
         if (call_sret) {
             sret_alloc = (call_sret_size + 15) & ~15; /* align to 16 */
         }
-        int padding = (16 - ((current_stack_depth + extra_args * 8 + shadow + sret_alloc) % 16)) % 16;
+        int padding = (16 - ((current_stack_depth + extra_args * arg_slot_size + shadow + sret_alloc) % 16)) % 16;
         
         if (padding > 0) {
             emit_inst2("sub", op_imm(padding), op_reg("esp"));
@@ -3153,7 +3154,7 @@ static void gen_expression(ASTNode *node) {
             } else {
                 emit_inst1("push", op_reg("eax"));
             }
-            stack_offset -= 8; // Update stack offset for nested calls
+            stack_offset -= arg_slot_size; // Update stack offset for nested calls
         }
         
         /* Pop user args into registers, shifted by 1 if sret */
@@ -3164,7 +3165,7 @@ static void gen_expression(ASTNode *node) {
                 emit_pop_xmm(xmm_arg_regs[i]);
             } else {
                 emit_inst1("pop", op_reg(arg_regs[i + call_sret_shift]));
-                stack_offset += 8;
+                stack_offset += arg_slot_size;
             }
         }
         
@@ -3190,7 +3191,7 @@ static void gen_expression(ASTNode *node) {
         if (node->resolved_type == NULL) node->resolved_type = get_expr_type(node);
         
         // Clean up shadow space + extra args + padding (but NOT sret space — caller needs %eax valid)
-        int cleanup = shadow + extra_args * 8 + padding;
+        int cleanup = shadow + extra_args * arg_slot_size + padding;
         if (cleanup > 0) {
             emit_inst2("add", op_imm(cleanup), op_reg("esp"));
         }
@@ -4721,8 +4722,9 @@ static void gen_function(ASTNode *node) {
         if (param->type == AST_VAR_DECL) {
             int size = param->resolved_type ? param->resolved_type->size : 8;
             int alloc_size = size;
-            if (alloc_size < 8 && param->resolved_type && param->resolved_type->kind != TYPE_STRUCT && param->resolved_type->kind != TYPE_ARRAY) {
-                alloc_size = 8;
+            int slot_size = (g_target == TARGET_DOS) ? 4 : 8;
+            if (alloc_size < slot_size && param->resolved_type && param->resolved_type->kind != TYPE_STRUCT && param->resolved_type->kind != TYPE_ARRAY) {
+                alloc_size = slot_size;
             }
             
             if (locals_count >= 8192) { fprintf(stderr, "Error: Too many locals\n"); exit(1); }
@@ -4765,6 +4767,8 @@ static void gen_function(ASTNode *node) {
                 int param_offset;
                 if (g_use_shadow_space) {
                     param_offset = 48 + ((int)i - max_reg) * 8; // Win64
+                } else if (g_target == TARGET_DOS) {
+                    param_offset = 8 + ((int)i - max_reg) * 4; // 32-bit cdecl
                 } else {
                     param_offset = 16 + ((int)i - max_reg) * 8; // SysV
                 }

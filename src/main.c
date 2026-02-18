@@ -162,7 +162,7 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
     lexer_init(&lexer, preprocessed);
     current_parser = malloc(sizeof(Parser));
     parser_init(current_parser, &lexer);
-    types_set_target(target == TARGET_WINDOWS);
+    types_set_target(target == TARGET_WINDOWS, target == TARGET_DOS);
     ASTNode *program = parser_parse(current_parser);
 
     codegen_set_target(target);
@@ -273,8 +273,12 @@ static int do_cc(int input_count, const char **input_files,
             // If running from build_linux/, include is ../include/msdos
             sprintf(inc_path, "%s/../include/msdos", exe_dir);
             preprocess_add_include_path(inc_path);
+            sprintf(inc_path, "%s/../include", exe_dir); // Add generic include
+            preprocess_add_include_path(inc_path);
+            
             // Also try local Include
             preprocess_add_include_path("include/msdos");
+            preprocess_add_include_path("include"); // Add generic include
         }
 
         for (i = 0; i < input_count; i++) {
@@ -348,14 +352,26 @@ static int do_cc(int input_count, const char **input_files,
             sprintf(lib_path, "%s/dos_lib.o", exe_dir);
             
             // Check if it exists
-            FILE *f = fopen(lib_path, "rb");
-            if (f) {
-                fclose(f);
+            FILE *flib = fopen(lib_path, "rb");
+            if (flib) {
+                fclose(flib);
                 dos_linker_add_object_file(dlnk, lib_path);
             } else {
-                // Try strictly local
+                // Try relative to CWD if not found in exe dir
                 if (fopen("dos_lib.o", "rb")) {
                      dos_linker_add_object_file(dlnk, "dos_lib.o");
+                }
+            }
+
+            // Auto-link dos_libc.o
+            sprintf(lib_path, "%s/dos_libc.o", exe_dir);
+            flib = fopen(lib_path, "rb");
+            if (flib) {
+                fclose(flib);
+                dos_linker_add_object_file(dlnk, lib_path);
+            } else {
+                if (fopen("dos_libc.o", "rb")) {
+                     dos_linker_add_object_file(dlnk, "dos_libc.o");
                 }
             }
             
@@ -443,7 +459,7 @@ static int do_cc(int input_count, const char **input_files,
     current_parser = malloc(sizeof(Parser));
     parser_init(current_parser, &lexer);
 
-    types_set_target(target == TARGET_WINDOWS);
+    types_set_target(target == TARGET_WINDOWS, target == TARGET_DOS);
     printf("Parsing...\n"); fflush(stdout);
     ASTNode *program = parser_parse(current_parser);
     printf("Parsing complete.\n");

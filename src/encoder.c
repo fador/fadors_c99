@@ -296,7 +296,9 @@ void encode_inst1(Buffer *buf, const char *mnemonic, Operand *op1) {
 
 void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest) {
     int is_64 = (encoder_bits == 64) && (mnemonic[strlen(mnemonic)-1] == 'q' || strcmp(mnemonic, "mov") == 0 || strcmp(mnemonic, "add") == 0 || strcmp(mnemonic, "sub") == 0 || strcmp(mnemonic, "cmp") == 0);
-    int is_32 = (encoder_bits == 16) && (mnemonic[strlen(mnemonic)-1] != 'w' && mnemonic[strlen(mnemonic)-1] != 'b'); /* Assume 32-bit default in 16-bit execution if not 'w'/'b' */
+    int last = strlen(mnemonic) - 1;
+    int has_size_suffix = (last >= 3) && (mnemonic[last] == 'w' || mnemonic[last] == 'b'); /* Only check suffix on long mnemonics like 'subw', not on 'sub' */
+    int is_32 = (encoder_bits == 16) && !has_size_suffix; /* Assume 32-bit default in 16-bit execution if no explicit 'w'/'b' suffix */
     int addr_32 = (encoder_bits == 16) && ((src->type >= OP_MEM) || (dest->type >= OP_MEM)); /* Assume all mem access is 32-bit [eax] style */
     
     if (strcmp(mnemonic, "mov") == 0 || strcmp(mnemonic, "movq") == 0 || strcmp(mnemonic, "movl") == 0) {
@@ -306,7 +308,7 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             emit_prefixes(buf, is_32 ? 32 : 16, 0);
             emit_rex(buf, is_64, 0, 0, reg >= 8);
             buffer_write_byte(buf, 0xB8 + (reg & 7));
-            if (is_64) buffer_write_qword(buf, (uint64_t)src->data.imm);
+            if (is_64 && encoder_bits == 64) buffer_write_qword(buf, (uint64_t)src->data.imm);
             else buffer_write_dword(buf, (uint32_t)src->data.imm);
         } else if (src->type == OP_REG && dest->type == OP_REG) {
             int s = get_reg_id(src->data.reg);
@@ -424,6 +426,7 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             emit_modrm(buf, 3, s, d);
         } else if (src->type == OP_IMM && dest->type == OP_REG) {
              int d = get_reg_id(dest->data.reg);
+             emit_prefixes(buf, is_32 ? 32 : 16, 0);
              emit_rex(buf, is_64, 0, 0, d >= 8);
              if (src->data.imm >= -128 && src->data.imm <= 127) {
                  buffer_write_byte(buf, 0x83);
@@ -446,6 +449,7 @@ void encode_inst2(Buffer *buf, const char *mnemonic, Operand *src, Operand *dest
             emit_modrm(buf, 3, s, d);
         } else if (src->type == OP_IMM && dest->type == OP_REG) {
              int d = get_reg_id(dest->data.reg);
+             emit_prefixes(buf, is_32 ? 32 : 16, 0);
              emit_rex(buf, is_64, 0, 0, d >= 8);
              if (src->data.imm >= -128 && src->data.imm <= 127) {
                  buffer_write_byte(buf, 0x83);
