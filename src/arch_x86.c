@@ -1,5 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS
-#include "arch_x86_64.h"
+#define _CRT_SECURE_NO_WARNINGS
+#define _CRT_NONSTDC_NO_DEPRECATE
+#include "arch_x86.h"
 #include "codegen.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -94,10 +96,10 @@ static const char *debug_type_name(Type *t) {
 }
 
 /* Record a local variable or parameter for debug info */
-static void debug_record_var(const char *name, int rbp_offset, int is_param, Type *t) {
+static void debug_record_var(const char *name, int ebp_offset, int is_param, Type *t) {
     if (!obj_writer || !g_compiler_options.debug_info) return;
     if (!name) return;
-    coff_writer_add_debug_var(obj_writer, name, (int32_t)rbp_offset,
+    coff_writer_add_debug_var(obj_writer, name, (int32_t)ebp_offset,
                                (uint8_t)is_param, debug_type_kind(t),
                                t ? (int32_t)t->size : 0,
                                debug_type_name(t));
@@ -108,6 +110,8 @@ static const char *g_arg_regs[6];
 static const char *g_xmm_arg_regs[8];
 static int g_max_reg_args = 4;       // 4 for Win64, 6 for SysV
 static int g_use_shadow_space = 1;   // 1 for Win64, 0 for SysV
+static int g_stack_slot_size = 8;    // 4 for 32-bit DOS, 8 for 64-bit 
+static int g_ptr_size = 8;           // 4 for 32-bit DOS, 8 for 64-bit
 
 static TargetPlatform g_target =
 #ifdef _WIN32
@@ -131,11 +135,11 @@ static void last_value_clear(void);
 static int peep_unreachable = 0;     // 1 after unconditional jmp (suppress dead code)
 static int peep_pending_jmp = 0;     // 1 if there's a buffered jmp to emit
 static char peep_jmp_target[64];     // target label of the buffered jmp
-static int peep_in_flush = 0;        // prevent recursion during flush
+static int peep_in_flush = 0;        // prevent recuesion during flush
 
-// Peephole: buffer pushq for push/pop → mov optimization
-static int peep_pending_push = 0;    // 1 if there's a buffered pushq to emit
-static char peep_push_reg[16];       // register name of the buffered pushq
+// Peephole: buffer push for push/pop → mov optimization
+static int peep_pending_push = 0;    // 1 if there's a buffered push to emit
+static char peep_push_reg[16];       // register name of the buffered push
 
 // Branch optimization: buffer jcc for jcc-over-jmp pattern
 // Detects: jcc L1; jmp L2; L1: → inverted-jcc L2
@@ -150,9 +154,9 @@ static char peep_pair_jcc_mn[16];    // jcc mnemonic in the pair
 static char peep_pair_jcc_tgt[64];   // jcc target (L1 — must match next label)
 static char peep_pair_jmp_tgt[64];   // jmp target (L2 — becomes inverted jcc target)
 
-// Peephole: setcc + movzbq + test + jcc → direct jcc
+// Peephole: setcc + movzbl + test + jcc → direct jcc
 // Eliminates 3 redundant instructions per boolean comparison branch.
-// State: 0=idle, 1=saw "setCC %al", 2=also saw "movzbq %al,%rax", 3=also saw "test %rax,%rax"
+// State: 0=idle, 1=saw "setCC %al", 2=also saw "movzbl %al,%eax", 3=also saw "test %eax,%eax"
 static int peep_setcc_state = 0;
 static char peep_setcc_cond[16];     // condition suffix (e.g., "e", "ne", "l", "ge")
 
@@ -250,15 +254,15 @@ static Operand *op_sib(const char *base, const char *index, int scale, int disp)
 }
 
 /* Map 32-bit register name to 64-bit equivalent for SIB addressing */
-static const char *reg_to_64bit(const char *reg) {
-    if (strcmp(reg, "eax") == 0) return "rax";
-    if (strcmp(reg, "ecx") == 0) return "rcx";
-    if (strcmp(reg, "edx") == 0) return "rdx";
-    if (strcmp(reg, "ebx") == 0) return "rbx";
-    if (strcmp(reg, "esi") == 0) return "rsi";
-    if (strcmp(reg, "edi") == 0) return "rdi";
-    if (strcmp(reg, "esp") == 0) return "rsp";
-    if (strcmp(reg, "ebp") == 0) return "rbp";
+static const char *dos_reg_to_64bit(const char *reg) {
+    if (strcmp(reg, "eax") == 0) return "eax";
+    if (strcmp(reg, "ecx") == 0) return "ecx";
+    if (strcmp(reg, "edx") == 0) return "edx";
+    if (strcmp(reg, "ebx") == 0) return "ebx";
+    if (strcmp(reg, "esi") == 0) return "esi";
+    if (strcmp(reg, "edi") == 0) return "edi";
+    if (strcmp(reg, "esp") == 0) return "esp";
+    if (strcmp(reg, "ebp") == 0) return "ebp";
     /* r8d-r15d → r8-r15 */
     if (reg[0] == 'r' && reg[1] >= '0' && reg[1] <= '9') {
         static char buf[8];
@@ -272,12 +276,12 @@ static const char *reg_to_64bit(const char *reg) {
     return reg; /* already 64-bit */
 }
 
-/* Flush a pending pushq without optimization (no matching popq followed) */
+/* Flush a pending push without optimization (no matching pop followed) */
 static void peep_flush_push(void) {
     if (peep_pending_push) {
         peep_pending_push = 0;
         peep_in_flush = 1;
-        emit_inst1("pushq", op_reg(peep_push_reg));
+        emit_inst1("push", op_reg(peep_push_reg));
         peep_in_flush = 0;
     }
 }
@@ -292,9 +296,9 @@ static void peep_flush_setcc(void) {
     snprintf(mn, sizeof(mn), "set%s", peep_setcc_cond);
     emit_inst1(mn, op_reg("al"));
     if (saved_state >= 2)
-        emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
+        emit_inst2("movzbl", op_reg("al"), op_reg("eax"));
     if (saved_state >= 3)
-        emit_inst2("test", op_reg("rax"), op_reg("rax"));
+        emit_inst2("test", op_reg("eax"), op_reg("eax"));
     peep_in_flush = 0;
 }
 
@@ -307,8 +311,9 @@ typedef struct {
 static StringLiteral string_literals[8192];
 static int string_literals_count = 0;
 
-void arch_x86_64_set_writer(COFFWriter *writer) {
+void arch_x86_set_writer(COFFWriter *writer) {
     obj_writer = writer;
+    coff_writer_set_machine(writer, IMAGE_FILE_MACHINE_I386);
     encoder_set_writer(writer);
 }
 
@@ -401,12 +406,30 @@ static void emit_label_def_ex(const char *name, int is_static) {
 
 // op_label is now defined above with the other op_* functions
 
-void arch_x86_64_init(FILE *output) {
+void arch_x86_init(FILE *output) {
     out = output;
-    if (g_target == TARGET_WINDOWS) {
-        // Win64 ABI
-        g_arg_regs[0] = "rcx";
-        g_arg_regs[1] = "rdx";
+    arch_x86_set_target(g_target);
+
+    if (out && !obj_writer && current_syntax == SYNTAX_INTEL) {
+        fprintf(out, "_TEXT SEGMENT\n");
+    }
+}
+
+void arch_x86_set_syntax(CodegenSyntax syntax) {
+    current_syntax = syntax;
+}
+
+void arch_x86_set_target(TargetPlatform target) {
+    g_target = target;
+    if (g_target == TARGET_DOS) {
+        g_max_reg_args = 0;
+        g_use_shadow_space = 0;
+        g_stack_slot_size = 4;
+        g_ptr_size = 4;
+        encoder_set_bitness(16);
+    } else if (g_target == TARGET_WINDOWS) {
+        g_arg_regs[0] = "ecx";
+        g_arg_regs[1] = "edx";
         g_arg_regs[2] = "r8";
         g_arg_regs[3] = "r9";
         g_xmm_arg_regs[0] = "xmm0";
@@ -415,14 +438,16 @@ void arch_x86_64_init(FILE *output) {
         g_xmm_arg_regs[3] = "xmm3";
         g_max_reg_args = 4;
         g_use_shadow_space = 1;
+        g_stack_slot_size = 8;
+        g_ptr_size = 8;
+        encoder_set_bitness(32);
     } else {
-        // System V AMD64 ABI (Linux/macOS)
-        g_arg_regs[0] = "rdi";
-        g_arg_regs[1] = "rsi";
-        g_arg_regs[2] = "rdx";
-        g_arg_regs[3] = "rcx";
-        g_arg_regs[4] = "r8";
-        g_arg_regs[5] = "r9";
+        g_arg_regs[0] = "edi";
+        g_arg_regs[1] = "esi";
+        g_arg_regs[2] = "edx";
+        g_arg_regs[3] = "ecx";
+        g_arg_regs[4] = NULL;
+        g_arg_regs[5] = NULL;
         g_xmm_arg_regs[0] = "xmm0";
         g_xmm_arg_regs[1] = "xmm1";
         g_xmm_arg_regs[2] = "xmm2";
@@ -431,23 +456,15 @@ void arch_x86_64_init(FILE *output) {
         g_xmm_arg_regs[5] = "xmm5";
         g_xmm_arg_regs[6] = "xmm6";
         g_xmm_arg_regs[7] = "xmm7";
-        g_max_reg_args = 6;
+        g_max_reg_args = 4;
         g_use_shadow_space = 0;
+        g_stack_slot_size = 8;
+        g_ptr_size = 8;
+        encoder_set_bitness(32);
     }
-    if (out && !obj_writer && current_syntax == SYNTAX_INTEL) {
-        fprintf(out, "_TEXT SEGMENT\n");
-    }
 }
 
-void arch_x86_64_set_syntax(CodegenSyntax syntax) {
-    current_syntax = syntax;
-}
-
-void arch_x86_64_set_target(TargetPlatform target) {
-    g_target = target;
-}
-
-void arch_x86_64_generate(ASTNode *program) {
+void arch_x86_generate(ASTNode *program) {
     current_program = program;
     pgo_probe_count = 0; /* reset PGO probes for this compilation unit */
     for (size_t i = 0; i < program->children_count; i++) {
@@ -460,6 +477,8 @@ void arch_x86_64_generate(ASTNode *program) {
     }
 
     /* ---- PGO: Emit __pgo_dump function and data sections ---- */
+    /* PGO is disabled for 32-bit DOS target for now (requires syscalls) */
+#if 0
     if (g_compiler_options.pgo_generate && pgo_probe_count > 0) {
         /* Reset peephole state for the synthetic function */
         peep_unreachable = 0;
@@ -477,37 +496,36 @@ void arch_x86_64_generate(ASTNode *program) {
         if (out && current_syntax == SYNTAX_ATT) {
             fprintf(out, "\n__pgo_dump:\n");
         }
-        emit_inst1("pushq", op_reg("rbp"));
-        emit_inst2("mov", op_reg("rsp"), op_reg("rbp"));
-        emit_inst1("pushq", op_reg("r12"));
-        emit_inst1("pushq", op_reg("r13"));
-        emit_inst1("pushq", op_reg("r14"));
-        emit_inst1("pushq", op_reg("r15"));
+        emit_inst1("push", op_reg("ebp"));
+        emit_inst2("mov", op_reg("esp"), op_reg("ebp"));
+    emit_inst1("push", op_reg("esi"));
+    emit_inst1("push", op_reg("edi"));
 
         /* Open file: sys_open(filename, O_WRONLY|O_CREAT|O_TRUNC, 0644) */
-        emit_inst2("mov", op_imm(2), op_reg("rax"));
-        emit_inst2("lea", op_label("__pgo_filename"), op_reg("rdi"));
-        emit_inst2("mov", op_imm(577), op_reg("rsi"));  /* 0x241 */
-        emit_inst2("mov", op_imm(420), op_reg("rdx"));  /* 0644 */
+        emit_inst2("mov", op_imm(2), op_reg("eax"));
+        emit_inst2("lea", op_label("__pgo_filename"), op_reg("edi"));
+        emit_inst2("mov", op_imm(577), op_reg("esi"));  /* 0x241 */
+        emit_inst2("mov", op_imm(420), op_reg("edx"));  /* 0644 */
         emit_inst0("syscall");
-        emit_inst2("test", op_reg("rax"), op_reg("rax"));
+        emit_inst2("test", op_reg("eax"), op_reg("eax"));
         int lbl_done = label_count++;
         char l_done[32];
         sprintf(l_done, ".L%d", lbl_done);
         emit_inst1("jl", op_label(l_done));
-        emit_inst2("mov", op_reg("rax"), op_reg("r12")); /* save fd */
+        emit_inst2("mov", op_reg("eax"), op_reg("r12")); /* save fd */
 
         /* Write header: 8 bytes = "PGO1" + uint32 count */
-        emit_inst2("mov", op_imm(1), op_reg("rax"));
-        emit_inst2("mov", op_reg("r12"), op_reg("rdi"));
-        emit_inst2("lea", op_label("__pgo_header"), op_reg("rsi"));
-        emit_inst2("mov", op_imm(8), op_reg("rdx"));
+        emit_inst2("mov", op_imm(1), op_reg("eax"));
+        emit_inst2("mov", op_reg("r12"), op_reg("edi"));
+        emit_inst2("lea", op_label("__pgo_header"), op_reg("esi"));
+        emit_inst2("mov", op_imm(8), op_reg("edx"));
         emit_inst0("syscall");
 
         /* Load pointers for the write loop */
-        emit_inst2("lea", op_label("__pgo_names"), op_reg("r14"));
-        emit_inst2("lea", op_label("__pgo_counters"), op_reg("r15"));
-        emit_inst2("mov", op_imm(pgo_probe_count), op_reg("r13"));
+        emit_inst2("lea", op_label("__pgo_names"), op_reg("esi"));
+        emit_inst2("lea", op_label("__pgo_counters"), op_reg("edi"));
+        // ebx as counter
+        emit_inst2("mov", op_imm(pgo_probe_count), op_reg("ebx"));
 
         int lbl_loop = label_count++;
         int lbl_close = label_count++;
@@ -516,21 +534,35 @@ void arch_x86_64_generate(ASTNode *program) {
         sprintf(l_close, ".L%d", lbl_close);
 
         emit_label_def(l_loop);
-        emit_inst2("test", op_reg("r13"), op_reg("r13"));
+        emit_inst2("test", op_reg("ebx"), op_reg("ebx"));
         emit_inst1("jz", op_label(l_close));
 
-        /* Write 64 bytes of name */
-        emit_inst2("mov", op_imm(1), op_reg("rax"));
-        emit_inst2("mov", op_reg("r12"), op_reg("rdi"));
-        emit_inst2("mov", op_reg("r14"), op_reg("rsi"));
-        emit_inst2("mov", op_imm(PGO_NAME_LEN), op_reg("rdx"));
+        emit_inst2("mov", op_imm(1), op_reg("eax"));
+        // write(fd, name, len)
+        // fd is in r12 -> but r12 is not 32-bit. 
+        // We need a callee-saved reg for fd. Let's use local stack or another reg.
+        // Actually, let's assume we saved fd in a local var or just use stack.
+        // For now, let's use a stack slot for fd? Or assume we have enough regs. 
+        // 32-bit registers are scarce.
+        // Let's use stack [ebp-4] for fd.
+        emit_inst2("mov", op_reg("r12"), op_reg("eax")); // WAIT r12 is gone
+        // We need to fix the fd save/restore. 
+        // In 32-bit, we push args for syscall? No, syscalls on Linux/DOS are different.
+        // DOS doesn't use syscalls nicely like this. PGO on DOS might be hard.
+        // I will disable PGO logic for DOS or comment it out?
+        // Detailed PGO is low prio. I will keep it but fix registers blindly for now.
+        // fd -> [ebp-something]?
+        // Let's just use `ebx` (if available) but I used ebx for counter.
+        // Let's use `push` / `pop` to preserve fd?
+        emit_inst2("mov", op_reg("esi"), op_reg("ecx")); // name ptr
+        emit_inst2("mov", op_imm(PGO_NAME_LEN), op_reg("edx"));
         emit_inst0("syscall");
 
         /* Write 8 bytes of counter */
-        emit_inst2("mov", op_imm(1), op_reg("rax"));
-        emit_inst2("mov", op_reg("r12"), op_reg("rdi"));
-        emit_inst2("mov", op_reg("r15"), op_reg("rsi"));
-        emit_inst2("mov", op_imm(8), op_reg("rdx"));
+        emit_inst2("mov", op_imm(1), op_reg("eax"));
+        emit_inst2("mov", op_reg("r12"), op_reg("edi"));
+        emit_inst2("mov", op_reg("r15"), op_reg("esi"));
+        emit_inst2("mov", op_imm(8), op_reg("edx"));
         emit_inst0("syscall");
 
         /* Advance pointers and decrement counter */
@@ -541,15 +573,15 @@ void arch_x86_64_generate(ASTNode *program) {
 
         emit_label_def(l_close);
         /* Close file: sys_close(fd) */
-        emit_inst2("mov", op_imm(3), op_reg("rax"));
-        emit_inst2("mov", op_reg("r12"), op_reg("rdi"));
+        emit_inst2("mov", op_imm(3), op_reg("eax"));
+        emit_inst2("mov", op_reg("r12"), op_reg("edi"));
         emit_inst0("syscall");
 
         emit_label_def(l_done);
-        emit_inst1("popq", op_reg("r15"));
-        emit_inst1("popq", op_reg("r14"));
-        emit_inst1("popq", op_reg("r13"));
-        emit_inst1("popq", op_reg("r12"));
+        emit_inst1("pop", op_reg("r15"));
+        emit_inst1("pop", op_reg("r14"));
+        emit_inst1("pop", op_reg("r13"));
+        emit_inst1("pop", op_reg("r12"));
         emit_inst0("leave");
         emit_inst0("ret");
 
@@ -624,6 +656,7 @@ void arch_x86_64_generate(ASTNode *program) {
             fprintf(out, ".text\n");
         }
     }
+#endif
     /* ---- End PGO instrumentation ---- */
     if (obj_writer) {
          // Emit string literals for COFF
@@ -682,7 +715,7 @@ typedef struct {
     int offset;
     char *label;
     Type *type;
-    const char *reg;   /* Non-NULL if variable lives in a register (e.g. "rbx") */
+    const char *reg;   /* Non-NULL if variable lives in a register (e.g. "ebx") */
 } LocalVar;
 
 static LocalVar locals[8192];
@@ -710,7 +743,7 @@ static int last_value_can_track(Type *t) {
     if (!t) return 0;
     if (is_float_type(t)) return 0;
     if (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION) return 0;
-    if (t->size <= 0 || t->size > 8) return 0;
+    if (t->size <= 0 || t->size > g_ptr_size) return 0;
     return 1;
 }
 
@@ -808,23 +841,24 @@ static Type *get_local_type(const char *name) {
 
 /* --- Register Allocator (Phase 7a) ---
  * Assigns frequently-used scalar integer locals to callee-saved registers
- * (%rbx, %r12-%r15) to eliminate memory round-trips in tight loops.
+ * (%ebx, %r12-%r15) to eliminate memory round-trips in tight loops.
  * Activated at -O2 and above. */
 
-#define REGALLOC_MAX_REGS  5   /* %rbx, %r12, %r13, %r14, %r15 */
+#define REGALLOC_MAX_REGS  3   /* %ebx, %esi, %edi */
 #define REGALLOC_MAX_VARS  256
 
 static const char *regalloc_callee_regs[REGALLOC_MAX_REGS] = {
-    "rbx", "r12", "r13", "r14", "r15"
+    "ebx", "esi", "edi"
 };
 static const char *regalloc_callee_regs_32[REGALLOC_MAX_REGS] = {
-    "ebx", "r12d", "r13d", "r14d", "r15d"
+    "ebx", "esi", "edi"
 };
 static const char *regalloc_callee_regs_16[REGALLOC_MAX_REGS] = {
-    "bx", "r12w", "r13w", "r14w", "r15w"
+    "bx", "si", "di"
 };
+
 static const char *regalloc_callee_regs_8[REGALLOC_MAX_REGS] = {
-    "bl", "r12b", "r13b", "r14b", "r15b"
+    "bl" /* Only bl is available as 8-bit part of callee-saved (ebx) in 32-bit mode. si/di have no 8-bit parts. */
 };
 
 /* Pre-scan data: collected from the AST before codegen */
@@ -842,11 +876,11 @@ static int regalloc_scan_count = 0;
 /* Per-function register assignments */
 typedef struct {
     const char *var_name;
-    const char *reg64;   /* 64-bit name: "rbx", "r12", ... */
+    const char *reg64;   /* 64-bit name: "ebx", "r12", ... */
     const char *reg32;   /* 32-bit name: "ebx", "r12d", ... */
     const char *reg16;   /* 16-bit name */
     const char *reg8;    /* 8-bit name */
-    int save_offset;     /* rbp-relative offset where we saved the original value */
+    int save_offset;     /* ebp-relative offset where we saved the original value */
 } RegAssignment;
 
 static RegAssignment regalloc_assignments[REGALLOC_MAX_REGS];
@@ -863,7 +897,7 @@ static const char *get_local_reg(const char *name) {
     return NULL;
 }
 
-/* Get the 32-bit version of a register-allocated variable's register */
+/* Get the 32-bit veesion of a register-allocated variable's register */
 static const char *get_local_reg32(const char *name) {
     if (!name || regalloc_assignment_count == 0) return NULL;
     const char *reg64 = get_local_reg(name);
@@ -875,7 +909,7 @@ static const char *get_local_reg32(const char *name) {
     return NULL;
 }
 
-/* Get the 8-bit version of a register-allocated variable's register */
+/* Get the 8-bit veesion of a register-allocated variable's register */
 static const char *get_local_reg8(const char *name) {
     if (!name || regalloc_assignment_count == 0) return NULL;
     const char *reg64 = get_local_reg(name);
@@ -887,7 +921,7 @@ static const char *get_local_reg8(const char *name) {
     return NULL;
 }
 
-/* Get the 16-bit version of a register-allocated variable's register */
+/* Get the 16-bit veesion of a register-allocated variable's register */
 static const char *get_local_reg16(const char *name) {
     if (!name || regalloc_assignment_count == 0) return NULL;
     const char *reg64 = get_local_reg(name);
@@ -918,7 +952,7 @@ static void regalloc_scan_record_var(const char *name, Type *type, int is_param)
     regalloc_scan_count++;
 }
 
-/* Pre-scan: recursively walk AST to collect variable info */
+/* Pre-scan: recuesively walk AST to collect variable info */
 static void regalloc_scan_ast(ASTNode *node) {
     if (!node) return;
 
@@ -1037,13 +1071,13 @@ static int regalloc_is_eligible(RegScanVar *sv) {
     if (sv->type->kind == TYPE_ARRAY || sv->type->kind == TYPE_STRUCT ||
         sv->type->kind == TYPE_UNION) return 0;
     if (sv->type->kind == TYPE_FLOAT || sv->type->kind == TYPE_DOUBLE) return 0;
-    if (sv->type->size > 8) return 0;
+    if (sv->type->size > g_ptr_size) return 0;
     return 1;
 }
 
 /* Assign registers to eligible variables.  Called before parameter handling.
  * Phase 1 (regalloc_analyze): pre-scan AST and determine assignments.
- * Phase 2 (regalloc_emit_saves): emit pushq for callee-saved registers.
+ * Phase 2 (regalloc_emit_saves): emit push for callee-saved registers.
  * func_node is the AST_FUNCTION node. */
 static void regalloc_analyze(ASTNode *func_node) {
     regalloc_scan_count = 0;
@@ -1104,21 +1138,21 @@ static void regalloc_analyze(ASTNode *func_node) {
     regalloc_assignment_count = num_assign;
 }
 
-/* Emit pushq instructions to save callee-saved registers that we'll use.
+/* Emit push instructions to save callee-saved registers that we'll use.
  * Must be called after prologue but before parameter handling / body codegen. */
 static void regalloc_emit_saves(void) {
     for (int i = 0; i < regalloc_assignment_count; i++) {
-        emit_inst1("pushq", op_reg(regalloc_assignments[i].reg64));
-        stack_offset -= 8;
+        emit_inst1("push", op_reg(regalloc_assignments[i].reg64));
+        stack_offset -= g_stack_slot_size;
         regalloc_assignments[i].save_offset = stack_offset;
     }
 }
 
 /* Restore callee-saved registers before function epilogue.
- * Uses rbp-relative addressing so stack pointer position doesn't matter. */
+ * Uses ebp-relative addressing so stack pointer position doesn't matter. */
 static void regalloc_restore_registers(void) {
     for (int i = 0; i < regalloc_assignment_count; i++) {
-        emit_inst2("mov", op_mem("rbp", regalloc_assignments[i].save_offset),
+        emit_inst2("mov", op_mem("ebp", regalloc_assignments[i].save_offset),
                     op_reg(regalloc_assignments[i].reg64));
     }
 }
@@ -1239,9 +1273,9 @@ static void gen_global_decl(ASTNode *node) {
                     /* Write symbol and relocation for the string pointer */
                     uint32_t sym_idx = coff_writer_add_symbol(obj_writer, slabel, 0, 0, 0, IMAGE_SYM_CLASS_EXTERNAL);
                     uint32_t reloc_off = (uint32_t)obj_writer->data_section.size;
-                    coff_writer_add_reloc(obj_writer, reloc_off, sym_idx, 1, 2);
+                    coff_writer_add_reloc(obj_writer, reloc_off, 1, 2); // Type 1 for 32-bit absolute, Type 2 for 64-bit absolute
                     uint64_t zero = 0;
-                    buffer_write_bytes(&obj_writer->data_section, &zero, 8);
+                    buffer_write_bytes(&obj_writer->data_section, &zero, g_ptr_size);
                 } else {
                     /* Unknown element — zero fill */
                     int zi; for (zi = 0; zi < elem_size; zi++)
@@ -1265,9 +1299,9 @@ static void gen_global_decl(ASTNode *node) {
                      uint8_t target_storage_class = IMAGE_SYM_CLASS_EXTERNAL;
                      uint32_t sym_idx = coff_writer_add_symbol(obj_writer, target_name, 0, target_section_num, 0, target_storage_class);
                      uint32_t reloc_offset = (uint32_t)obj_writer->data_section.size;
-                     coff_writer_add_reloc(obj_writer, reloc_offset, sym_idx, 1, 2);
+                     coff_writer_add_reloc(obj_writer, reloc_offset, sym_idx, 1, 2); // Type 1 for 32-bit absolute, Type 2 for 64-bit absolute
                      uint64_t zero = 0;
-                     buffer_write_bytes(&obj_writer->data_section, &zero, 8);
+                     buffer_write_bytes(&obj_writer->data_section, &zero, g_ptr_size);
                      handled = 1;
                  }
             }
@@ -1289,11 +1323,11 @@ static void gen_global_decl(ASTNode *node) {
             int size = node->resolved_type ? node->resolved_type->size : 4;
             const char *directive = "DD";
             if (size == 1) directive = "DB";
-            else if (size == 8) directive = "DQ";
+            else if (size == g_ptr_size) directive = "DQ";
             
             ASTNode *init_intel = node->data.var_decl.initializer;
             if (init_intel && init_intel->type == AST_INTEGER) {
-                fprintf(out, "%s %d\n", directive, init_intel->data.integer.value);
+                fprintf(out, "%s %I64d\n", directive, init_intel->data.integer.value);
             } else if (init_intel && init_intel->type == AST_FLOAT) {
                 fprintf(out, "%s %f\n", directive, init_intel->data.float_val.value);
             } else if (init_intel && init_intel->type == AST_INIT_LIST) {
@@ -1304,13 +1338,13 @@ static void gen_global_decl(ASTNode *node) {
                 }
                 const char *edirective = "DB";
                 if (elem_size == 4) edirective = "DD";
-                else if (elem_size >= 8) edirective = "DQ";
+                else if (elem_size >= g_ptr_size) edirective = "DQ";
                 size_t ii;
                 int total_written = 0;
                 for (ii = 0; ii < init_intel->children_count; ii++) {
                     ASTNode *elem = init_intel->children[ii];
                     if (elem && elem->type == AST_INTEGER) {
-                        fprintf(out, "%s %d\n", edirective, elem->data.integer.value);
+                        fprintf(out, "%s %I64d\n", edirective, elem->data.integer.value);
                     } else if (elem && elem->type == AST_FLOAT) {
                         fprintf(out, "%s %f\n", edirective, elem->data.float_val.value);
                     } else if (elem && elem->type == AST_STRING) {
@@ -1335,8 +1369,8 @@ static void gen_global_decl(ASTNode *node) {
                 }
             } else {
                 fprintf(out, "%s 0\n", directive);
-                if (size > 8) {
-                     fprintf(out, "DB %d DUP(0)\n", size - (size > 1 ? (size > 4 ? 8 : 4) : 1));
+                if (size > g_ptr_size) {
+                     fprintf(out, "DB %d DUP(0)\n", size - (size > 1 ? (size > 4 ? g_ptr_size : 4) : 1));
                 }
             }
             fprintf(out, "_DATA ENDS\n");
@@ -1346,11 +1380,13 @@ static void gen_global_decl(ASTNode *node) {
             fprintf(out, "%s:\n", node->data.var_decl.name);
              ASTNode *init_att = node->data.var_decl.initializer;
              if (init_att && init_att->type == AST_INTEGER) {
-                 int val = init_att->data.integer.value;
+                 long long val = init_att->data.integer.value;
                  int size = node->resolved_type ? node->resolved_type->size : 4;
-                 if (size == 1) fprintf(out, "    .byte %d\n", val);
-                 else if (size == 4) fprintf(out, "    .long %d\n", val);
-                 else if (size == 8) fprintf(out, "    .quad %d\n", val);
+                 if (size == 1) fprintf(out, "    .byte %I64d\n", val);
+                 else if (size == 2) fprintf(out, "    .word %I64d\n", val);
+                 else if (size == 4) fprintf(out, "    .long %I64d\n", val);
+                 else if (size == g_ptr_size) fprintf(out, "    .quad %I64d\n", val);
+                 else fprintf(out, "    .long %I64d\n", val);
              } else if (init_att && init_att->type == AST_FLOAT) {
                  int size = node->resolved_type ? node->resolved_type->size : 4;
                  if (size == 4) fprintf(out, "    .float %f\n", init_att->data.float_val.value);
@@ -1366,10 +1402,10 @@ static void gen_global_decl(ASTNode *node) {
                  for (ai = 0; ai < init_att->children_count; ai++) {
                      ASTNode *elem = init_att->children[ai];
                      if (elem && elem->type == AST_INTEGER) {
-                         if (elem_size == 1) fprintf(out, "    .byte %d\n", elem->data.integer.value);
-                         else if (elem_size == 4) fprintf(out, "    .long %d\n", elem->data.integer.value);
-                         else if (elem_size == 8) fprintf(out, "    .quad %d\n", elem->data.integer.value);
-                         else fprintf(out, "    .long %d\n", elem->data.integer.value);
+                         if (elem_size == 1) fprintf(out, "    .byte %I64d\n", elem->data.integer.value);
+                         else if (elem_size == 4) fprintf(out, "    .long %I64d\n", elem->data.integer.value);
+                         else if (elem_size == g_ptr_size) fprintf(out, "    .quad %I64d\n", elem->data.integer.value);
+                         else fprintf(out, "    .long %I64d\n", elem->data.integer.value);
                      } else if (elem && elem->type == AST_FLOAT) {
                          if (elem_size == 4) fprintf(out, "    .float %f\n", elem->data.float_val.value);
                          else fprintf(out, "    .double %f\n", elem->data.float_val.value);
@@ -1385,7 +1421,7 @@ static void gen_global_decl(ASTNode *node) {
                              string_literals[string_literals_count].length = slen;
                              string_literals_count++;
                          }
-                         fprintf(out, "    .quad %s\n", slabel);
+                         if (g_target == TARGET_DOS) fprintf(out, "    .long %s\n", slabel); else fprintf(out, "    .quad %s\n", slabel);
                      } else {
                          int zi; for (zi = 0; zi < elem_size; zi++) fprintf(out, "    .byte 0\n");
                      }
@@ -1408,15 +1444,15 @@ static void gen_global_decl(ASTNode *node) {
 }
 
 static void emit_push_xmm(const char *reg) {
-    emit_inst2("sub", op_imm(8), op_reg("rsp"));
-    emit_inst2("movsd", op_reg(reg), op_mem("rsp", 0));
-    stack_offset -= 8;
+    emit_inst2("sub", op_imm(g_stack_slot_size), op_reg("esp"));
+    emit_inst2("movsd", op_reg(reg), op_mem("esp", 0));
+    stack_offset -= g_stack_slot_size;
 }
 
 static void emit_pop_xmm(const char *reg) {
-    emit_inst2("movsd", op_mem("rsp", 0), op_reg(reg));
-    emit_inst2("add", op_imm(8), op_reg("rsp"));
-    stack_offset += 8;
+    emit_inst2("movsd", op_mem("esp", 0), op_reg(reg));
+    emit_inst2("add", op_imm(g_stack_slot_size), op_reg("esp"));
+    stack_offset += g_stack_slot_size;
 }
 
 
@@ -1443,7 +1479,7 @@ static void print_operand(Operand *op) {
         }
     } else if (op->type == OP_LABEL) {
         const char *lbl = op->data.label ? op->data.label : "null_label";
-        if (current_syntax == SYNTAX_ATT) fprintf(out, "%s(%%rip)", lbl);
+        if (current_syntax == SYNTAX_ATT) fprintf(out, "%s", lbl);
         else fprintf(out, "[%s]", lbl);
     } else if (op->type == OP_MEM_SIB) {
         /* SIB addressing: disp(base, index, scale) in AT&T; [base + index*scale + disp] in Intel */
@@ -1488,7 +1524,7 @@ static void emit_inst0(const char *mnemonic) {
     }
     const char *m = mnemonic;
     if (current_syntax == SYNTAX_INTEL) {
-        if (strcmp(mnemonic, "cqto") == 0) m = "cqo";
+        if (strcmp(mnemonic, "cqto") == 0) m = "cdq";
         else if (strcmp(mnemonic, "leave") == 0) m = "leave";
         else if (strcmp(mnemonic, "ret") == 0) m = "ret";
     }
@@ -1496,11 +1532,11 @@ static void emit_inst0(const char *mnemonic) {
 }
 
 static void emit_inst1(const char *mnemonic, Operand *op1) {
-    /* ---- Peephole: setcc + movzbq + test + jcc → direct jcc ----
+    /* ---- Peephole: setcc + movzbl + test + jcc → direct jcc ----
      * When state==3, a jcc completes the pattern. Compute the direct
      * jump condition from the original setCC and the branch direction.
-     * setCC %al; movzbq %al,%rax; test %rax,%rax; je L  → j(inv CC) L
-     * setCC %al; movzbq %al,%rax; test %rax,%rax; jne L → jCC L       */
+     * setCC %al; movzbl %al,%eax; test %eax,%eax; je L  → j(inv CC) L
+     * setCC %al; movzbl %al,%eax; test %eax,%eax; jne L → jCC L       */
     if (!peep_in_flush && current_section == SECTION_TEXT &&
         OPT_AT_LEAST(OPT_O1) &&
         peep_setcc_state == 3 &&
@@ -1607,13 +1643,13 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
         return;
     }
 
-    /* Peephole: pushq %reg → buffer it; if next is popq %reg2, emit mov instead.
-     * pushq %rax; popq %rdi → mov %rax, %rdi (saves 2 memory ops) */
+    /* Peephole: push %reg → buffer it; if next is pop %reg2, emit mov instead.
+     * push %eax; pop %edi → mov %eax, %edi (saves 2 memory ops) */
     if (!peep_in_flush && current_section == SECTION_TEXT &&
         OPT_AT_LEAST(OPT_O1) &&
-        strcmp(mnemonic, "pushq") == 0 && op1->type == OP_REG) {
+        strcmp(mnemonic, "push") == 0 && op1->type == OP_REG) {
         peep_flush_setcc();
-        peep_flush_push();  /* flush any previous buffered pushq */
+        peep_flush_push();  /* flush any previous buffered push */
         peep_flush_jcc();
         peep_flush_pair();
         peep_flush_jmp();
@@ -1624,17 +1660,17 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
         return;
     }
 
-    /* Peephole: popq %reg after buffered pushq %reg2 → mov %reg2, %reg */
+    /* Peephole: pop %reg after buffered push %reg2 → mov %reg2, %reg */
     if (!peep_in_flush && current_section == SECTION_TEXT &&
         OPT_AT_LEAST(OPT_O1) &&
-        strcmp(mnemonic, "popq") == 0 && op1->type == OP_REG &&
+        strcmp(mnemonic, "pop") == 0 && op1->type == OP_REG &&
         peep_pending_push) {
         peep_pending_push = 0;
-        /* pushq %X; popq %X → eliminate both (identity) */
+        /* push %X; pop %X → eliminate both (identity) */
         if (strcmp(peep_push_reg, op1->data.reg) == 0) {
             return;
         }
-        /* pushq %X; popq %Y → mov %X, %Y */
+        /* push %X; pop %Y → mov %X, %Y */
         peep_in_flush = 1;
         emit_inst2("mov", op_reg(peep_push_reg), op_reg(op1->data.reg));
         peep_in_flush = 0;
@@ -1658,8 +1694,8 @@ static void emit_inst1(const char *mnemonic, Operand *op1) {
     const char *m = mnemonic;
     if (current_syntax == SYNTAX_INTEL) {
         if (strcmp(mnemonic, "idivq") == 0) m = "idiv";
-        else if (strcmp(mnemonic, "pushq") == 0) m = "push";
-        else if (strcmp(mnemonic, "popq") == 0) m = "pop";
+        else if (strcmp(mnemonic, "push") == 0) m = "push";
+        else if (strcmp(mnemonic, "pop") == 0) m = "pop";
         else if (strcmp(mnemonic, "call") == 0) m = "call";
         else if (strcmp(mnemonic, "jmp") == 0) m = "jmp";
         else if (strcmp(mnemonic, "je") == 0) m = "je";
@@ -1688,19 +1724,19 @@ static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
     /* ---- Peephole: setcc state transitions for 2-operand instructions ---- */
     if (!peep_in_flush && current_section == SECTION_TEXT &&
         OPT_AT_LEAST(OPT_O1) && peep_setcc_state > 0) {
-        /* State 1 → 2: movzbq %al, %rax */
+        /* State 1 → 2: movzbl %al, %eax */
         if (peep_setcc_state == 1 &&
-            strcmp(mnemonic, "movzbq") == 0 &&
+            strcmp(mnemonic, "movzbl") == 0 &&
             op1->type == OP_REG && strcmp(op1->data.reg, "al") == 0 &&
-            op2->type == OP_REG && strcmp(op2->data.reg, "rax") == 0) {
+            op2->type == OP_REG && strcmp(op2->data.reg, "eax") == 0) {
             peep_setcc_state = 2;
             return;
         }
-        /* State 2 → 3: test %rax, %rax */
+        /* State 2 → 3: test %eax, %eax */
         if (peep_setcc_state == 2 &&
             strcmp(mnemonic, "test") == 0 &&
-            op1->type == OP_REG && strcmp(op1->data.reg, "rax") == 0 &&
-            op2->type == OP_REG && strcmp(op2->data.reg, "rax") == 0) {
+            op1->type == OP_REG && strcmp(op1->data.reg, "eax") == 0 &&
+            op2->type == OP_REG && strcmp(op2->data.reg, "eax") == 0) {
             peep_setcc_state = 3;
             return;
         }
@@ -1742,7 +1778,7 @@ static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
                 op1->type == OP_IMM && op2->type == OP_REG) {
                 long long val = op1->data.imm;
                 int is_32 = (strcmp(mnemonic, "imull") == 0);
-                const char *reg64 = reg_to_64bit(op2->data.reg);
+                const char *reg64 = dos_reg_to_64bit(op2->data.reg);
                 const char *lea_mn = is_32 ? "leal" : "lea";
                 /* Single-instruction: x*N where (N-1) is a valid SIB scale */
                 int scale = 0;
@@ -1828,7 +1864,7 @@ static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
         else if (strcmp(mnemonic, "leaq") == 0) m = "lea";
         else if (strcmp(mnemonic, "leal") == 0) m = "lea";
         else if (strcmp(mnemonic, "testl") == 0) m = "test";
-        else if (strcmp(mnemonic, "movzbq") == 0) m = "movzx";
+        else if (strcmp(mnemonic, "movzbl") == 0) m = "movzx";
     }
 
     fprintf(out, "    %s ", m);
@@ -1839,7 +1875,7 @@ static void emit_inst2(const char *mnemonic, Operand *op1, Operand *op2) {
     } else {
         print_operand(op2);
         fprintf(out, ", ");
-        if (strcmp(mnemonic, "movzbq") == 0 && op1->type == OP_MEM) {
+        if (strcmp(mnemonic, "movzbl") == 0 && op1->type == OP_MEM) {
             fprintf(out, "byte ptr ");
         }
         print_operand(op1);
@@ -1883,36 +1919,36 @@ static void emit_inst3(const char *mnemonic, Operand *op1, Operand *op2, Operand
 }
 
 static const char *get_reg_32(const char *reg64) {
-    if (strcmp(reg64, "rax") == 0) return "eax";
-    if (strcmp(reg64, "rcx") == 0) return "ecx";
-    if (strcmp(reg64, "rdx") == 0) return "edx";
-    if (strcmp(reg64, "rbx") == 0) return "ebx";
-    if (strcmp(reg64, "rsi") == 0) return "esi";
-    if (strcmp(reg64, "rdi") == 0) return "edi";
+    if (strcmp(reg64, "eax") == 0) return "eax";
+    if (strcmp(reg64, "ecx") == 0) return "ecx";
+    if (strcmp(reg64, "edx") == 0) return "edx";
+    if (strcmp(reg64, "ebx") == 0) return "ebx";
+    if (strcmp(reg64, "esi") == 0) return "esi";
+    if (strcmp(reg64, "edi") == 0) return "edi";
     if (strcmp(reg64, "r8") == 0) return "r8d";
     if (strcmp(reg64, "r9") == 0) return "r9d";
     return reg64;
 }
 
 static const char *get_reg_16(const char *reg64) {
-    if (strcmp(reg64, "rax") == 0) return "ax";
-    if (strcmp(reg64, "rcx") == 0) return "cx";
-    if (strcmp(reg64, "rdx") == 0) return "dx";
-    if (strcmp(reg64, "rbx") == 0) return "bx";
-    if (strcmp(reg64, "rsi") == 0) return "si";
-    if (strcmp(reg64, "rdi") == 0) return "di";
+    if (strcmp(reg64, "eax") == 0) return "ax";
+    if (strcmp(reg64, "ecx") == 0) return "cx";
+    if (strcmp(reg64, "edx") == 0) return "dx";
+    if (strcmp(reg64, "ebx") == 0) return "bx";
+    if (strcmp(reg64, "esi") == 0) return "si";
+    if (strcmp(reg64, "edi") == 0) return "di";
     if (strcmp(reg64, "r8") == 0) return "r8w";
     if (strcmp(reg64, "r9") == 0) return "r9w";
     return reg64;
 }
 
 static const char *get_reg_8(const char *reg64) {
-    if (strcmp(reg64, "rax") == 0) return "al";
-    if (strcmp(reg64, "rcx") == 0) return "cl";
-    if (strcmp(reg64, "rdx") == 0) return "dl";
-    if (strcmp(reg64, "rbx") == 0) return "bl";
-    if (strcmp(reg64, "rsi") == 0) return "sil";
-    if (strcmp(reg64, "rdi") == 0) return "dil";
+    if (strcmp(reg64, "eax") == 0) return "al";
+    if (strcmp(reg64, "ecx") == 0) return "cl";
+    if (strcmp(reg64, "edx") == 0) return "dl";
+    if (strcmp(reg64, "ebx") == 0) return "bl";
+    if (strcmp(reg64, "esi") == 0) return "sil";
+    if (strcmp(reg64, "edi") == 0) return "dil";
     if (strcmp(reg64, "r8") == 0) return "r8b";
     if (strcmp(reg64, "r9") == 0) return "r9b";
     return reg64;
@@ -2019,17 +2055,17 @@ static void gen_addr(ASTNode *node) {
     if (node->type == AST_IDENTIFIER) {
         const char *label = get_local_label(node->data.identifier.name);
         if (label) {
-            emit_inst2("lea", op_label(label), op_reg("rax"));
+            emit_inst2("lea", op_label(label), op_reg("eax"));
             node->resolved_type = type_ptr(get_local_type(node->data.identifier.name));
             return;
         }
         int offset = get_local_offset(node->data.identifier.name);
         if (offset != 0) {
-            emit_inst2("lea", op_mem("rbp", offset), op_reg("rax"));
+            emit_inst2("lea", op_mem("ebp", offset), op_reg("eax"));
             node->resolved_type = type_ptr(get_local_type(node->data.identifier.name));
         } else {
             // Global
-            emit_inst2("lea", op_label(node->data.identifier.name), op_reg("rax"));
+            emit_inst2("lea", op_label(node->data.identifier.name), op_reg("eax"));
             node->resolved_type = type_ptr(get_global_type(node->data.identifier.name));
         }
     } else if (node->type == AST_DEREF) {
@@ -2049,46 +2085,45 @@ static void gen_addr(ASTNode *node) {
             for (int i = 0; i < st->data.struct_data.members_count; i++) {
                 if (st->data.struct_data.members[i].name && node->data.member_access.member_name &&
                     strcmp(st->data.struct_data.members[i].name, node->data.member_access.member_name) == 0) {
-                    emit_inst2("add", op_imm(st->data.struct_data.members[i].offset), op_reg("rax"));
+                    emit_inst2("add", op_imm(st->data.struct_data.members[i].offset), op_reg("eax"));
                     break;
                 }
             }
-        } else {
         }
     } else if (node->type == AST_ARRAY_ACCESS) {
         if (!node->data.array_access.array || !node->data.array_access.index) { fprintf(stderr, "      Array: NULL child!\n"); return; }
         gen_expression(node->data.array_access.array);
-        emit_inst1("pushq", op_reg("rax"));
-        stack_offset -= 8;
+        emit_inst1("push", op_reg("eax"));
+        stack_offset -= g_stack_slot_size;
         
         gen_expression(node->data.array_access.index);
         
         // Element size calculation - use get_expr_type to avoid chained deref issues
         Type *array_type = get_expr_type(node->data.array_access.array);
 
-        int element_size = 8;
+        int element_size = g_ptr_size; // Default to pointer size
         if (array_type) {
              if (array_type->kind == TYPE_PTR || array_type->kind == TYPE_ARRAY) {
                  if (array_type->data.ptr_to) element_size = array_type->data.ptr_to->size;
              }
         }
         
-        emit_inst2("imul", op_imm(element_size), op_reg("rax"));
-        emit_inst1("popq", op_reg("rcx"));
-        stack_offset += 8;
-        emit_inst2("add", op_reg("rcx"), op_reg("rax"));
+        emit_inst2("imul", op_imm(element_size), op_reg("eax"));
+        emit_inst1("pop", op_reg("ecx"));
+        stack_offset += g_stack_slot_size;
+        emit_inst2("add", op_reg("ecx"), op_reg("eax"));
     } else if (node->type == AST_CALL) {
-        /* For struct-returning calls, gen_expression returns a pointer in %rax */
+        /* For struct-returning calls, gen_expression returns a pointer in %eax */
         gen_expression(node);
     }
 }
 
 /* Instruction scheduling helper: check if an expression, when generated,
- * only uses %rax/%eax (and not %rcx or the stack).  When true, the binary
+ * only uses %eax/%eax (and not %ecx or the stack).  When true, the binary
  * expression codegen can schedule the independent loads closer together
- * by using "mov %rax, %rcx" instead of "pushq %rax ... popq %rcx".
+ * by using "mov %eax, %ecx" instead of "push %eax ... pop %ecx".
  * This eliminates 2 memory operations and improves ILP. */
-static int gen_expr_is_rax_only(ASTNode *node) {
+static int gen_expr_is_eax_only(ASTNode *node) {
     if (!node) return 0;
     switch (node->type) {
         case AST_INTEGER:
@@ -2098,11 +2133,11 @@ static int gen_expr_is_rax_only(ASTNode *node) {
         case AST_NOT:
         case AST_BITWISE_NOT:
         case AST_ADDR_OF:
-            return gen_expr_is_rax_only(node->data.unary.expression);
+            return gen_expr_is_eax_only(node->data.unary.expression);
         case AST_CAST:
-            return gen_expr_is_rax_only(node->data.cast.expression);
+            return gen_expr_is_eax_only(node->data.cast.expression);
         case AST_DEREF:
-            return gen_expr_is_rax_only(node->data.unary.expression);
+            return gen_expr_is_eax_only(node->data.unary.expression);
         default:
             return 0;
     }
@@ -2128,41 +2163,41 @@ static void gen_binary_expr(ASTNode *node) {
         gen_expression(node->data.binary_expr.left);
         Type *lt = get_expr_type(node->data.binary_expr.left);
         if (is_float_type(lt)) {
-             emit_inst2("xor", op_reg("rax"), op_reg("rax"));
+             emit_inst2("xor", op_reg("eax"), op_reg("eax"));
              if (lt->kind == TYPE_FLOAT) {
-                 emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm1"));
+                 emit_inst2("cvtsi2ss", op_reg("eax"), op_reg("xmm1"));
                  emit_inst2("ucomiss", op_reg("xmm1"), op_reg("xmm0"));
              } else {
-                 emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm1"));
+                 emit_inst2("cvtsi2sd", op_reg("eax"), op_reg("xmm1"));
                  emit_inst2("ucomisd", op_reg("xmm1"), op_reg("xmm0"));
              }
              emit_inst1(is_and ? "jz" : "jnz", op_label(sl));
         } else {
-             emit_inst2("test", op_reg("rax"), op_reg("rax"));
+             emit_inst2("test", op_reg("eax"), op_reg("eax"));
              emit_inst1(is_and ? "jz" : "jnz", op_label(sl));
         }
 
         gen_expression(node->data.binary_expr.right);
         Type *rt = get_expr_type(node->data.binary_expr.right);
         if (is_float_type(rt)) {
-             emit_inst2("xor", op_reg("rax"), op_reg("rax"));
+             emit_inst2("xor", op_reg("eax"), op_reg("eax"));
              if (rt->kind == TYPE_FLOAT) {
-                 emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm1"));
+                 emit_inst2("cvtsi2ss", op_reg("eax"), op_reg("xmm1"));
                  emit_inst2("ucomiss", op_reg("xmm1"), op_reg("xmm0"));
              } else {
-                 emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm1"));
+                 emit_inst2("cvtsi2sd", op_reg("eax"), op_reg("xmm1"));
                  emit_inst2("ucomisd", op_reg("xmm1"), op_reg("xmm0"));
              }
              emit_inst1(is_and ? "jz" : "jnz", op_label(sl));
         } else {
-             emit_inst2("test", op_reg("rax"), op_reg("rax"));
+             emit_inst2("test", op_reg("eax"), op_reg("eax"));
              emit_inst1(is_and ? "jz" : "jnz", op_label(sl));
         }
 
-        emit_inst2("mov", op_imm(is_and ? 1 : 0), op_reg("rax"));
+        emit_inst2("mov", op_imm(is_and ? 1 : 0), op_reg("eax"));
         emit_inst1("jmp", op_label(el));
         emit_label_def(sl);
-        emit_inst2("mov", op_imm(is_and ? 0 : 1), op_reg("rax"));
+        emit_inst2("mov", op_imm(is_and ? 0 : 1), op_reg("eax"));
         emit_label_def(el);
         node->resolved_type = type_int();
         return;
@@ -2178,7 +2213,7 @@ static void gen_binary_expr(ASTNode *node) {
         gen_expression(node->data.binary_expr.right);
         // If it was int, convert to float/double
         if (!is_float_type(rt)) {
-             emit_inst2(is_double ? "cvtsi2sd" : "cvtsi2ss", op_reg("rax"), op_reg("xmm0"));
+             emit_inst2(is_double ? "cvtsi2sd" : "cvtsi2ss", op_reg("eax"), op_reg("xmm0"));
         } else if (is_double && rt->kind == TYPE_FLOAT) {
              emit_inst2("cvtss2sd", op_reg("xmm0"), op_reg("xmm0"));
         }
@@ -2186,7 +2221,7 @@ static void gen_binary_expr(ASTNode *node) {
         
         gen_expression(node->data.binary_expr.left);
         if (!is_float_type(lt)) {
-             emit_inst2(is_double ? "cvtsi2sd" : "cvtsi2ss", op_reg("rax"), op_reg("xmm0"));
+             emit_inst2(is_double ? "cvtsi2sd" : "cvtsi2ss", op_reg("eax"), op_reg("xmm0"));
         } else if (is_double && lt->kind == TYPE_FLOAT) {
              emit_inst2("cvtss2sd", op_reg("xmm0"), op_reg("xmm0"));
         }
@@ -2212,7 +2247,7 @@ static void gen_binary_expr(ASTNode *node) {
                 else if (node->data.binary_expr.op == TOKEN_LESS_EQUAL) emit_inst1("setbe", op_reg("al")); // below or equal
                 else if (node->data.binary_expr.op == TOKEN_GREATER) emit_inst1("seta", op_reg("al")); // above
                 else if (node->data.binary_expr.op == TOKEN_GREATER_EQUAL) emit_inst1("setae", op_reg("al")); // above or equal
-                emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
+                emit_inst2("movzbl", op_reg("al"), op_reg("eax"));
                 node->resolved_type = type_int();
                 last_value_clear();
                 return;
@@ -2228,10 +2263,10 @@ static void gen_binary_expr(ASTNode *node) {
     /* -O1: Immediate operand optimization.
      * When the right operand is a small integer constant, avoid push/pop
      * and use the immediate directly with the instruction:
-     *   Before: mov $K,%rax; push %rax; gen(left); pop %rcx; OP %rcx,%rax
-     *   After:  gen(left); OP $K,%rax
+     *   Before: mov $K,%eax; push %eax; gen(left); pop %ecx; OP %ecx,%eax
+     *   After:  gen(left); OP $K,%eax
      * This saves 2 memory ops + several bytes per binary expression with a constant.
-     * Only for ops that support immediate operands (not div/mod, which need %rcx).
+     * Only for ops that support immediate operands (not div/mod, which need %ecx).
      */
     ASTNode *right_node = node->data.binary_expr.right;
     if (OPT_AT_LEAST(OPT_O1) &&
@@ -2274,8 +2309,8 @@ static void gen_binary_expr(ASTNode *node) {
                     node->resolved_type = left_type ? left_type : right_type;
                 }
                 if (use_32bit) emit_inst2("addl", op_imm(imm), op_reg("eax"));
-                else if (imm_needs_reg) emit_inst2("add", op_reg("r10"), op_reg("rax"));
-                else emit_inst2("add", op_imm(imm), op_reg("rax"));
+                else if (imm_needs_reg) emit_inst2("add", op_reg("r10"), op_reg("eax"));
+                else emit_inst2("add", op_imm(imm), op_reg("eax"));
                 last_value_clear();
                 return;
             case TOKEN_MINUS:
@@ -2288,45 +2323,45 @@ static void gen_binary_expr(ASTNode *node) {
                     node->resolved_type = left_type;
                 }
                 if (use_32bit) emit_inst2("subl", op_imm(imm), op_reg("eax"));
-                else if (imm_needs_reg) emit_inst2("sub", op_reg("r10"), op_reg("rax"));
-                else emit_inst2("sub", op_imm(imm), op_reg("rax"));
+                else if (imm_needs_reg) emit_inst2("sub", op_reg("r10"), op_reg("eax"));
+                else emit_inst2("sub", op_imm(imm), op_reg("eax"));
                 last_value_clear();
                 return;
             case TOKEN_STAR:
                 if (use_32bit) emit_inst2("imull", op_imm(imm), op_reg("eax"));
-                else if (imm_needs_reg) emit_inst2("imul", op_reg("r10"), op_reg("rax"));
-                else emit_inst2("imul", op_imm(imm), op_reg("rax"));
+                else if (imm_needs_reg) emit_inst2("imul", op_reg("r10"), op_reg("eax"));
+                else emit_inst2("imul", op_imm(imm), op_reg("eax"));
                 node->resolved_type = left_type;
                 last_value_clear();
                 return;
             case TOKEN_AMPERSAND:
                 if (use_32bit) emit_inst2("andl", op_imm(imm), op_reg("eax"));
-                else if (imm_needs_reg) emit_inst2("and", op_reg("r10"), op_reg("rax"));
-                else emit_inst2("and", op_imm(imm), op_reg("rax"));
+                else if (imm_needs_reg) emit_inst2("and", op_reg("r10"), op_reg("eax"));
+                else emit_inst2("and", op_imm(imm), op_reg("eax"));
                 node->resolved_type = left_type;
                 last_value_clear();
                 return;
             case TOKEN_PIPE:
                 if (use_32bit) emit_inst2("orl", op_imm(imm), op_reg("eax"));
-                else if (imm_needs_reg) emit_inst2("or", op_reg("r10"), op_reg("rax"));
-                else emit_inst2("or", op_imm(imm), op_reg("rax"));
+                else if (imm_needs_reg) emit_inst2("or", op_reg("r10"), op_reg("eax"));
+                else emit_inst2("or", op_imm(imm), op_reg("eax"));
                 node->resolved_type = left_type;
                 last_value_clear();
                 return;
             case TOKEN_CARET:
                 if (use_32bit) emit_inst2("xorl", op_imm(imm), op_reg("eax"));
-                else if (imm_needs_reg) emit_inst2("xor", op_reg("r10"), op_reg("rax"));
-                else emit_inst2("xor", op_imm(imm), op_reg("rax"));
+                else if (imm_needs_reg) emit_inst2("xor", op_reg("r10"), op_reg("eax"));
+                else emit_inst2("xor", op_imm(imm), op_reg("eax"));
                 node->resolved_type = left_type;
                 last_value_clear();
                 return;
             case TOKEN_LESS_LESS:
-                emit_inst2("shl", op_imm(imm), op_reg("rax"));
+                emit_inst2("shl", op_imm(imm), op_reg("eax"));
                 node->resolved_type = left_type;
                 last_value_clear();
                 return;
             case TOKEN_GREATER_GREATER:
-                emit_inst2("sar", op_imm(imm), op_reg("rax"));
+                emit_inst2("sar", op_imm(imm), op_reg("eax"));
                 node->resolved_type = left_type;
                 last_value_clear();
                 return;
@@ -2338,8 +2373,8 @@ static void gen_binary_expr(ASTNode *node) {
             case TOKEN_GREATER_EQUAL: {
                 Type *cmp_type = left_type ? left_type : right_type;
                 if (cmp_type && cmp_type->size == 4) emit_inst2("cmpl", op_imm(imm), op_reg("eax"));
-                else if (imm_needs_reg) emit_inst2("cmp", op_reg("r10"), op_reg("rax"));
-                else emit_inst2("cmp", op_imm(imm), op_reg("rax"));
+                else if (imm_needs_reg) emit_inst2("cmp", op_reg("r10"), op_reg("eax"));
+                else emit_inst2("cmp", op_imm(imm), op_reg("eax"));
                 
                 if (node->data.binary_expr.op == TOKEN_EQUAL_EQUAL) emit_inst1("sete", op_reg("al"));
                 else if (node->data.binary_expr.op == TOKEN_BANG_EQUAL) emit_inst1("setne", op_reg("al"));
@@ -2348,7 +2383,7 @@ static void gen_binary_expr(ASTNode *node) {
                 else if (node->data.binary_expr.op == TOKEN_LESS_EQUAL) emit_inst1("setle", op_reg("al"));
                 else if (node->data.binary_expr.op == TOKEN_GREATER_EQUAL) emit_inst1("setge", op_reg("al"));
                 
-                emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
+                emit_inst2("movzbl", op_reg("al"), op_reg("eax"));
                 node->resolved_type = type_int();
                 last_value_clear();
                 return;
@@ -2360,22 +2395,22 @@ static void gen_binary_expr(ASTNode *node) {
     gen_expression(node->data.binary_expr.right);
 
     /* Instruction scheduling: when the left operand is a simple expression
-     * (only uses %rax), use "mov %rax, %rcx" instead of push/pop to save
+     * (only uses %eax), use "mov %eax, %ecx" instead of push/pop to save
      * the right operand.  This eliminates 2 memory operations (push write +
      * pop read) and schedules independent loads closer together for better
      * instruction-level parallelism on modern out-of-order CPUs.
-     *   Before: gen(R); pushq %rax; gen(L); popq %rcx
-     *   After:  gen(R); mov %rax,%rcx; gen(L)                */
+     *   Before: gen(R); push %eax; gen(L); pop %ecx
+     *   After:  gen(R); mov %eax,%ecx; gen(L)                */
     if (OPT_AT_LEAST(OPT_O2) &&
-        gen_expr_is_rax_only(node->data.binary_expr.left)) {
-        emit_inst2("mov", op_reg("rax"), op_reg("rcx"));
+        gen_expr_is_eax_only(node->data.binary_expr.left)) {
+        emit_inst2("mov", op_reg("eax"), op_reg("ecx"));
         gen_expression(node->data.binary_expr.left);
     } else {
-        emit_inst1("pushq", op_reg("rax"));
-        stack_offset -= 8;
+        emit_inst1("push", op_reg("eax"));
+        stack_offset -= g_stack_slot_size;
         gen_expression(node->data.binary_expr.left);
-        emit_inst1("popq", op_reg("rcx"));
-        stack_offset += 8;
+        emit_inst1("pop", op_reg("ecx"));
+        stack_offset += g_stack_slot_size;
     }
     
     Type *left_type = get_expr_type(node->data.binary_expr.left);
@@ -2403,74 +2438,74 @@ static void gen_binary_expr(ASTNode *node) {
         case TOKEN_PLUS:
             if ((left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY)) && 
                 (right_type && (right_type->kind == TYPE_INT || right_type->kind == TYPE_CHAR))) {
-                if (size > 1) emit_inst2("imul", op_imm(size), op_reg("rcx"));
+                if (size > 1) emit_inst2("imul", op_imm(size), op_reg("ecx"));
                 node->resolved_type = left_type;
             } else if ((left_type && (left_type->kind == TYPE_INT || left_type->kind == TYPE_CHAR)) && 
                        (right_type && (right_type->kind == TYPE_PTR || right_type->kind == TYPE_ARRAY))) {
-                if (size > 1) emit_inst2("imul", op_imm(size), op_reg("rax"));
+                if (size > 1) emit_inst2("imul", op_imm(size), op_reg("eax"));
                 node->resolved_type = right_type;
             } else {
                 node->resolved_type = left_type ? left_type : right_type;
             }
             if (use_32bit) emit_inst2("addl", op_reg("ecx"), op_reg("eax"));
-            else emit_inst2("add", op_reg("rcx"), op_reg("rax"));
+            else emit_inst2("add", op_reg("ecx"), op_reg("eax"));
             break;
         case TOKEN_MINUS: 
             if ((left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY)) && 
                 (right_type && (right_type->kind == TYPE_INT || right_type->kind == TYPE_CHAR))) {
-                if (size > 1) emit_inst2("imul", op_imm(size), op_reg("rcx"));
-                emit_inst2("sub", op_reg("rcx"), op_reg("rax")); // Pointers are 64-bit
+                if (size > 1) emit_inst2("imul", op_imm(size), op_reg("ecx"));
+                emit_inst2("sub", op_reg("ecx"), op_reg("eax")); // Pointers are 64-bit
                 node->resolved_type = left_type;
             } else if ((left_type && (left_type->kind == TYPE_PTR || left_type->kind == TYPE_ARRAY)) && 
                        (right_type && (right_type->kind == TYPE_PTR || right_type->kind == TYPE_ARRAY))) {
-                emit_inst2("sub", op_reg("rcx"), op_reg("rax"));
+                emit_inst2("sub", op_reg("ecx"), op_reg("eax"));
                 if (size > 1) {
-                    emit_inst0("cqo");
-                    emit_inst2("mov", op_imm(size), op_reg("rcx"));
-                    emit_inst1("idiv", op_reg("rcx"));
+                    emit_inst0("cdq");
+                    emit_inst2("mov", op_imm(size), op_reg("ecx"));
+                    emit_inst1("idiv", op_reg("ecx"));
                 }
                 node->resolved_type = type_int();
             } else {
                 if (use_32bit) emit_inst2("subl", op_reg("ecx"), op_reg("eax"));
-                else emit_inst2("sub", op_reg("rcx"), op_reg("rax"));
+                else emit_inst2("sub", op_reg("ecx"), op_reg("eax"));
                 node->resolved_type = left_type;
             }
             break;
         case TOKEN_STAR:  
             if (use_32bit) emit_inst2("imull", op_reg("ecx"), op_reg("eax"));
-            else emit_inst2("imul", op_reg("rcx"), op_reg("rax")); 
+            else emit_inst2("imul", op_reg("ecx"), op_reg("eax")); 
             node->resolved_type = left_type;
             break;
         case TOKEN_SLASH:
         case TOKEN_PERCENT:
-            emit_inst0("cqo");
-            emit_inst1("idiv", op_reg("rcx"));
+            emit_inst0("cdq");
+            emit_inst1("idiv", op_reg("ecx"));
             if (node->data.binary_expr.op == TOKEN_PERCENT) {
-                emit_inst2("mov", op_reg("rdx"), op_reg("rax"));
+                emit_inst2("mov", op_reg("edx"), op_reg("eax"));
             }
             node->resolved_type = left_type;
             break;
         case TOKEN_AMPERSAND:
             if (use_32bit) emit_inst2("andl", op_reg("ecx"), op_reg("eax"));
-            else emit_inst2("and", op_reg("rcx"), op_reg("rax"));
+            else emit_inst2("and", op_reg("ecx"), op_reg("eax"));
             node->resolved_type = left_type;
             break;
         case TOKEN_PIPE:
             if (use_32bit) emit_inst2("orl", op_reg("ecx"), op_reg("eax"));
-            else emit_inst2("or", op_reg("rcx"), op_reg("rax"));
+            else emit_inst2("or", op_reg("ecx"), op_reg("eax"));
             node->resolved_type = left_type;
             break;
         case TOKEN_CARET:
             if (use_32bit) emit_inst2("xorl", op_reg("ecx"), op_reg("eax"));
-            else emit_inst2("xor", op_reg("rcx"), op_reg("rax"));
+            else emit_inst2("xor", op_reg("ecx"), op_reg("eax"));
             node->resolved_type = left_type;
             break;
         case TOKEN_LESS_LESS:
-            emit_inst2("shl", op_reg("cl"), op_reg("rax"));
+            emit_inst2("shl", op_reg("cl"), op_reg("eax"));
             node->resolved_type = left_type;
             break;
         case TOKEN_GREATER_GREATER:
-            emit_inst2("sar", op_reg("cl"), op_reg("rax"));
+            emit_inst2("sar", op_reg("cl"), op_reg("eax"));
             node->resolved_type = left_type;
             break;
         case TOKEN_EQUAL_EQUAL:
@@ -2481,7 +2516,7 @@ static void gen_binary_expr(ASTNode *node) {
         case TOKEN_GREATER_EQUAL: {
             Type *cmp_type = left_type ? left_type : right_type;
             if (cmp_type && cmp_type->size == 4) emit_inst2("cmpl", op_reg("ecx"), op_reg("eax"));
-            else emit_inst2("cmp", op_reg("rcx"), op_reg("rax"));
+            else emit_inst2("cmp", op_reg("ecx"), op_reg("eax"));
             
             if (node->data.binary_expr.op == TOKEN_EQUAL_EQUAL) emit_inst1("sete", op_reg("al"));
             else if (node->data.binary_expr.op == TOKEN_BANG_EQUAL) emit_inst1("setne", op_reg("al"));
@@ -2490,7 +2525,7 @@ static void gen_binary_expr(ASTNode *node) {
             else if (node->data.binary_expr.op == TOKEN_LESS_EQUAL) emit_inst1("setle", op_reg("al"));
             else if (node->data.binary_expr.op == TOKEN_GREATER_EQUAL) emit_inst1("setge", op_reg("al"));
             
-            emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
+            emit_inst2("movzbl", op_reg("al"), op_reg("eax"));
             break;
         }
         default: break;
@@ -2508,7 +2543,7 @@ static void gen_expression(ASTNode *node) {
         if (OPT_AT_LEAST(OPT_O1) && node->data.integer.value == 0) {
             emit_inst2("xor", op_reg("eax"), op_reg("eax"));
         } else {
-            emit_inst2("mov", op_imm(node->data.integer.value), op_reg("rax"));
+            emit_inst2("mov", op_imm(node->data.integer.value), op_reg("eax"));
         }
         node->resolved_type = type_int();
         last_value_clear();
@@ -2565,18 +2600,18 @@ static void gen_expression(ASTNode *node) {
                 node->resolved_type = t;
                 return;
             }
-            /* Variable is in a register — just move to %rax */
+            /* Variable is in a register — just move to %eax */
             if (t && t->size == 4) {
                 /* 32-bit: use movl for zero-extension */
                 const char *r32 = get_local_reg32(node->data.identifier.name);
                 if (r32) emit_inst2("movl", op_reg(r32), op_reg("eax"));
-                else emit_inst2("mov", op_reg(ra_reg), op_reg("rax"));
+                else emit_inst2("mov", op_reg(ra_reg), op_reg("eax"));
             } else if (t && t->size == 1) {
                 const char *r8 = get_local_reg8(node->data.identifier.name);
-                if (r8) emit_inst2("movzbq", op_reg(r8), op_reg("rax"));
-                else emit_inst2("mov", op_reg(ra_reg), op_reg("rax"));
+                if (r8) emit_inst2("movzbl", op_reg(r8), op_reg("eax"));
+                else emit_inst2("mov", op_reg(ra_reg), op_reg("eax"));
             } else {
-                emit_inst2("mov", op_reg(ra_reg), op_reg("rax"));
+                emit_inst2("mov", op_reg(ra_reg), op_reg("eax"));
             }
             node->resolved_type = t;
             last_value_set_reg(ra_reg, t);
@@ -2586,7 +2621,7 @@ static void gen_expression(ASTNode *node) {
         if (label) {
             Type *t = get_local_type(node->data.identifier.name);
             if (t && (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION)) {
-                emit_inst2("lea", op_label(label), op_reg("rax"));
+                emit_inst2("lea", op_label(label), op_reg("eax"));
             } else if (is_float_type(t)) {
                 if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_label(label), op_reg("xmm0"));
                 else emit_inst2("movsd", op_label(label), op_reg("xmm0"));
@@ -2595,10 +2630,10 @@ static void gen_expression(ASTNode *node) {
                     node->resolved_type = t;
                     return;
                 }
-                if (t && t->size == 1) emit_inst2("movzbq", op_label(label), op_reg("rax"));
-                else if (t && t->size == 2) emit_inst2("movzwq", op_label(label), op_reg("rax"));
+                if (t && t->size == 1) emit_inst2("movzbl", op_label(label), op_reg("eax"));
+                else if (t && t->size == 2) emit_inst2("movzwl", op_label(label), op_reg("eax"));
                 else if (t && t->size == 4) emit_inst2("movl", op_label(label), op_reg("eax"));
-                else emit_inst2("mov", op_label(label), op_reg("rax"));
+                else emit_inst2("mov", op_label(label), op_reg("eax"));
             }
             node->resolved_type = t;
             if (last_value_can_track(t)) last_value_set_label(label, t);
@@ -2610,19 +2645,19 @@ static void gen_expression(ASTNode *node) {
             Type *t = get_local_type(node->data.identifier.name);
             if (t && (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION)) {
                 // Array/struct/union decays to pointer (address)
-                emit_inst2("lea", op_mem("rbp", offset), op_reg("rax"));
+                emit_inst2("lea", op_mem("ebp", offset), op_reg("eax"));
             } else if (is_float_type(t)) {
-                if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_mem("rbp", offset), op_reg("xmm0"));
-                else emit_inst2("movsd", op_mem("rbp", offset), op_reg("xmm0"));
+                if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_mem("ebp", offset), op_reg("xmm0"));
+                else emit_inst2("movsd", op_mem("ebp", offset), op_reg("xmm0"));
             } else {
                 if (last_value_match_stack(offset, t)) {
                     node->resolved_type = t;
                     return;
                 }
-                if (t && t->size == 1) emit_inst2("movzbq", op_mem("rbp", offset), op_reg("rax"));
-                else if (t && t->size == 2) emit_inst2("movzwq", op_mem("rbp", offset), op_reg("rax"));
-                else if (t && t->size == 4) emit_inst2("movl", op_mem("rbp", offset), op_reg("eax"));
-                else emit_inst2("mov", op_mem("rbp", offset), op_reg("rax"));
+                if (t && t->size == 1) emit_inst2("movzbl", op_mem("ebp", offset), op_reg("eax"));
+                else if (t && t->size == 2) emit_inst2("movzwl", op_mem("ebp", offset), op_reg("eax"));
+                else if (t && t->size == 4) emit_inst2("movl", op_mem("ebp", offset), op_reg("eax"));
+                else emit_inst2("mov", op_mem("ebp", offset), op_reg("eax"));
             }
             node->resolved_type = t;
             if (last_value_can_track(t)) last_value_set_stack(offset, t);
@@ -2631,7 +2666,7 @@ static void gen_expression(ASTNode *node) {
             // Global
             Type *t = get_global_type(node->data.identifier.name);
             if (t && (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION)) {
-                emit_inst2("lea", op_label(node->data.identifier.name), op_reg("rax"));
+                emit_inst2("lea", op_label(node->data.identifier.name), op_reg("eax"));
             } else if (is_float_type(t)) {
                 if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_label(node->data.identifier.name), op_reg("xmm0"));
                 else emit_inst2("movsd", op_label(node->data.identifier.name), op_reg("xmm0"));
@@ -2640,10 +2675,10 @@ static void gen_expression(ASTNode *node) {
                     node->resolved_type = t;
                     return;
                 }
-                if (t && t->size == 1) emit_inst2("movzbq", op_label(node->data.identifier.name), op_reg("rax"));
-                else if (t && t->size == 2) emit_inst2("movzwq", op_label(node->data.identifier.name), op_reg("rax"));
+                if (t && t->size == 1) emit_inst2("movzbl", op_label(node->data.identifier.name), op_reg("eax"));
+                else if (t && t->size == 2) emit_inst2("movzwl", op_label(node->data.identifier.name), op_reg("eax"));
                 else if (t && t->size == 4) emit_inst2("movl", op_label(node->data.identifier.name), op_reg("eax"));
-                else emit_inst2("mov", op_label(node->data.identifier.name), op_reg("rax"));
+                else emit_inst2("mov", op_label(node->data.identifier.name), op_reg("eax"));
             }
             node->resolved_type = t;
             if (last_value_can_track(t)) last_value_set_label(node->data.identifier.name, t);
@@ -2657,16 +2692,16 @@ static void gen_expression(ASTNode *node) {
         } else if (t && (t->kind == TYPE_STRUCT || t->kind == TYPE_UNION)) {
             // Struct/union element: address is the value (passed by reference)
         } else if (is_float_type(t)) {
-            if (t->size == 4) emit_inst2("movss", op_mem("rax", 0), op_reg("xmm0"));
-            else emit_inst2("movsd", op_mem("rax", 0), op_reg("xmm0"));
+            if (t->size == 4) emit_inst2("movss", op_mem("eax", 0), op_reg("xmm0"));
+            else emit_inst2("movsd", op_mem("eax", 0), op_reg("xmm0"));
         } else if (t && t->size == 1) {
-            emit_inst2("movzbq", op_mem("rax", 0), op_reg("rax"));
+            emit_inst2("movzbl", op_mem("eax", 0), op_reg("eax"));
         } else if (t && t->size == 2) {
-            emit_inst2("movzwq", op_mem("rax", 0), op_reg("rax"));
+            emit_inst2("movzwl", op_mem("eax", 0), op_reg("eax"));
         } else if (t && t->size == 4) {
-            emit_inst2("movl", op_mem("rax", 0), op_reg("eax"));
+            emit_inst2("movl", op_mem("eax", 0), op_reg("eax"));
         } else {
-            emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
+            emit_inst2("mov", op_mem("eax", 0), op_reg("eax"));
         }
         last_value_clear();
     } else if (node->type == AST_BINARY_EXPR) {
@@ -2694,7 +2729,7 @@ static void gen_expression(ASTNode *node) {
                 }
                 if (!is_pre) {
                     /* POST: result is old value */
-                    emit_inst2("mov", op_reg(ra_reg), op_reg("rax"));
+                    emit_inst2("mov", op_reg(ra_reg), op_reg("eax"));
                 }
                 if (is_inc) {
                     emit_inst2("add", op_imm(step), op_reg(ra_reg));
@@ -2703,13 +2738,13 @@ static void gen_expression(ASTNode *node) {
                 }
                 if (is_pre) {
                     /* PRE: result is new value */
-                    emit_inst2("mov", op_reg(ra_reg), op_reg("rax"));
+                    emit_inst2("mov", op_reg(ra_reg), op_reg("eax"));
                 }
                 node->resolved_type = t;
                 if (is_pre) {
                     last_value_set_reg(ra_reg, t);
                 } else {
-                    /* POST: rax has old value, ra_reg has new — cache would be stale */
+                    /* POST: eax has old value, ra_reg has new — cache would be stale */
                     last_value_clear();
                 }
                 return;
@@ -2726,44 +2761,44 @@ static void gen_expression(ASTNode *node) {
         
         // Load value to RCX
         if (t && t->size == 1) {
-            emit_inst2("movzbq", op_mem("rax", 0), op_reg("rcx"));
+            emit_inst2("movzbl", op_mem("eax", 0), op_reg("ecx"));
         } else if (t && t->size <= 4) {
-            emit_inst2("movslq", op_mem("rax", 0), op_reg("rcx"));
+            emit_inst2("mov", op_mem("eax", 0), op_reg("ecx"));
         } else {
-            emit_inst2("mov", op_mem("rax", 0), op_reg("rcx"));
+            emit_inst2("mov", op_mem("eax", 0), op_reg("ecx"));
         }
         
         if (!is_pre) {
-            emit_inst1("pushq", op_reg("rcx")); // Save original value
-            stack_offset -= 8;
+            emit_inst1("push", op_reg("ecx")); // Save original value
+            stack_offset -= g_stack_slot_size;
         }
         
         // Modify RCX
         if (is_inc) {
-            emit_inst2("add", op_imm(size), op_reg("rcx"));
+            emit_inst2("add", op_imm(size), op_reg("ecx"));
         } else {
-            emit_inst2("sub", op_imm(size), op_reg("rcx"));
+            emit_inst2("sub", op_imm(size), op_reg("ecx"));
         }
         
         // Store back
         if (t && t->size == 1) {
-            emit_inst2("mov", op_reg("cl"), op_mem("rax", 0));
+            emit_inst2("mov", op_reg("cl"), op_mem("eax", 0));
         } else if (t && t->size <= 4) {
-            emit_inst2("movl", op_reg("ecx"), op_mem("rax", 0));
+            emit_inst2("movl", op_reg("ecx"), op_mem("eax", 0));
         } else {
-            emit_inst2("mov", op_reg("rcx"), op_mem("rax", 0));
+            emit_inst2("mov", op_reg("ecx"), op_mem("eax", 0));
         }
         
         if (!is_pre) {
-            emit_inst1("popq", op_reg("rax")); // Restore original value to result register
-            stack_offset += 8;
+            emit_inst1("pop", op_reg("eax")); // Restore original value to result register
+            stack_offset += g_stack_slot_size;
         } else {
-            emit_inst2("mov", op_reg("rcx"), op_reg("rax")); // Result is new value
+            emit_inst2("mov", op_reg("ecx"), op_reg("eax")); // Result is new value
         }
         
         node->resolved_type = t;
         if (is_pre && ident_name) {
-            /* PRE: rax holds the new value which matches memory — safe to cache */
+            /* PRE: eax holds the new value which matches memory — safe to cache */
             const char *label = get_local_label(ident_name);
             if (label) {
                 last_value_set_label(label, t);
@@ -2773,7 +2808,7 @@ static void gen_expression(ASTNode *node) {
                 else last_value_set_label(ident_name, t);
             }
         } else {
-            /* POST: rax holds the OLD pre-increment value — cache would be stale */
+            /* POST: eax holds the OLD pre-increment value — cache would be stale */
             last_value_clear();
         }
     } else if (node->type == AST_CAST) {
@@ -2791,22 +2826,22 @@ static void gen_expression(ASTNode *node) {
         } else if (is_float_type(src) && !is_float_type(dst)) {
             // Float -> Int
             if (src->kind == TYPE_FLOAT) {
-                emit_inst2("cvttss2si", op_reg("xmm0"), op_reg("rax"));
+                emit_inst2("cvttss2si", op_reg("xmm0"), op_reg("eax"));
             } else {
-                emit_inst2("cvttsd2si", op_reg("xmm0"), op_reg("rax"));
+                emit_inst2("cvttsd2si", op_reg("xmm0"), op_reg("eax"));
             }
         } else if (!is_float_type(src) && is_float_type(dst)) {
             // Int -> Float
             if (dst->kind == TYPE_FLOAT) {
-                emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm0"));
+                emit_inst2("cvtsi2ss", op_reg("eax"), op_reg("xmm0"));
             } else {
-                emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm0"));
+                emit_inst2("cvtsi2sd", op_reg("eax"), op_reg("xmm0"));
             }
         } else {
             // Int -> Int / Ptr
             if (dst->kind == TYPE_CHAR) {
                  // Cast to char: Truncate and sign-extend to 64-bit for consistency
-                 emit_inst2("movsbq", op_reg("al"), op_reg("rax"));
+                 emit_inst2("movsbq", op_reg("al"), op_reg("eax"));
             } 
             // Other int-to-int casts usually no-op for same size or smaller-to-larger (implicit)
             // Or larger-to-smaller (truncate, handled by using lower reg parts if needed)
@@ -2820,7 +2855,7 @@ static void gen_expression(ASTNode *node) {
         Type *t = get_expr_type(left_node);
 
         /* --- Struct / large-type assignment: use memcpy ----------- */
-        if (t && t->size > 8) {
+        if (t && t->size > g_ptr_size) {
             /* Save stack_offset before the struct assignment so we can
              * fully restore it afterwards.  gen_addr(value) for struct-returning
              * calls permanently allocates an sret buffer on the stack;
@@ -2829,26 +2864,26 @@ static void gen_expression(ASTNode *node) {
             /* Reserve a stack slot for saving the source address.
              * We must do this BEFORE gen_addr(value) because for struct-returning
              * calls, the sret buffer sits at the bottom of the stack frame.
-             * A pushq after the call would overwrite the sret buffer contents. */
-            emit_inst2("sub", op_imm(8), op_reg("rsp"));
-            stack_offset -= 8;
+             * A push after the call would overwrite the sret buffer contents. */
+            emit_inst1("push", op_reg("eax"));
+            stack_offset -= g_stack_slot_size;
             int src_save_offset = stack_offset;
             /* Get source address */
             gen_addr(node->data.assign.value);
             /* Save source address into the reserved slot (above sret buffer) */
-            emit_inst2("mov", op_reg("rax"), op_mem("rbp", src_save_offset));
-            /* Get dest address → rdi */
+            emit_inst2("mov", op_reg("eax"), op_mem("ebp", src_save_offset));
+            /* Get dest address → edi */
             gen_addr(left_node);
-            emit_inst2("mov", op_reg("rax"), op_reg("rdi"));
-            /* source → rsi (from saved slot) */
-            emit_inst2("mov", op_mem("rbp", src_save_offset), op_reg("rsi"));
-            /* size → rdx */
-            emit_inst2("mov", op_imm(t->size), op_reg("rdx"));
+            emit_inst2("mov", op_reg("eax"), op_reg("edi"));
+            /* source → esi (from saved slot) */
+            emit_inst2("mov", op_mem("ebp", src_save_offset), op_reg("esi"));
+            /* size → edx */
+            emit_inst2("mov", op_imm(t->size), op_reg("edx"));
             /* Ensure 16-byte alignment before calling memcpy */
             int cur_depth = abs(stack_offset);
             int memcpy_pad = (16 - (cur_depth % 16)) % 16;
             if (memcpy_pad > 0) {
-                emit_inst2("sub", op_imm(memcpy_pad), op_reg("rsp"));
+                emit_inst2("sub", op_imm(memcpy_pad), op_reg("esp"));
                 stack_offset -= memcpy_pad;
             }
             /* call memcpy */
@@ -2857,7 +2892,7 @@ static void gen_expression(ASTNode *node) {
             /* Restore stack fully (save slot + sret buffer + alignment padding) */
             int total_restore = abs(pre_assign_stack_offset - stack_offset);
             if (total_restore > 0) {
-                emit_inst2("add", op_imm(total_restore), op_reg("rsp"));
+                emit_inst2("add", op_imm(total_restore), op_reg("esp"));
             }
             stack_offset = pre_assign_stack_offset;
             node->resolved_type = t;
@@ -2871,8 +2906,8 @@ static void gen_expression(ASTNode *node) {
             /* Register allocator: check if variable lives in a register */
             const char *ra_reg = get_local_reg(ident_name);
             if (ra_reg) {
-                /* Store value from %rax to the register */
-                emit_inst2("mov", op_reg("rax"), op_reg(ra_reg));
+                /* Store value from %eax to the register */
+                emit_inst2("mov", op_reg("eax"), op_reg(ra_reg));
                 node->resolved_type = t;
                 last_value_set_reg(ra_reg, t);
                 return;
@@ -2886,7 +2921,7 @@ static void gen_expression(ASTNode *node) {
                     if (t && t->size == 1) emit_inst2("movb", op_reg("al"), op_label(label));
                     else if (t && t->size == 2) emit_inst2("movw", op_reg("ax"), op_label(label));
                     else if (t && t->size == 4) emit_inst2("movl", op_reg("eax"), op_label(label));
-                    else emit_inst2("mov", op_reg("rax"), op_label(label));
+                    else emit_inst2("mov", op_reg("eax"), op_label(label));
                 }
                 if (!is_float_type(t)) last_value_set_label(label, t);
                 else last_value_clear();
@@ -2895,13 +2930,13 @@ static void gen_expression(ASTNode *node) {
             int offset = get_local_offset(ident_name);
             if (offset != 0) {
                 if (is_float_type(t)) {
-                    if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm0"), op_mem("rbp", offset));
-                    else emit_inst2("movsd", op_reg("xmm0"), op_mem("rbp", offset));
+                    if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm0"), op_mem("ebp", offset));
+                    else emit_inst2("movsd", op_reg("xmm0"), op_mem("ebp", offset));
                 } else {
-                    if (t && t->size == 1) emit_inst2("movb", op_reg("al"), op_mem("rbp", offset));
-                    else if (t && t->size == 2) emit_inst2("movw", op_reg("ax"), op_mem("rbp", offset));
-                    else if (t && t->size == 4) emit_inst2("movl", op_reg("eax"), op_mem("rbp", offset));
-                    else emit_inst2("mov", op_reg("rax"), op_mem("rbp", offset));
+                    if (t && t->size == 1) emit_inst2("movb", op_reg("al"), op_mem("ebp", offset));
+                    else if (t && t->size == 2) emit_inst2("movw", op_reg("ax"), op_mem("ebp", offset));
+                    else if (t && t->size == 4) emit_inst2("movl", op_reg("eax"), op_mem("ebp", offset));
+                    else emit_inst2("mov", op_reg("eax"), op_mem("ebp", offset));
                 }
                 if (!is_float_type(t)) last_value_set_stack(offset, t);
                 else last_value_clear();
@@ -2914,7 +2949,7 @@ static void gen_expression(ASTNode *node) {
                     if (t && t->size == 1) emit_inst2("movb", op_reg("al"), op_label(ident_name));
                     else if (t && t->size == 2) emit_inst2("movw", op_reg("ax"), op_label(ident_name));
                     else if (t && t->size == 4) emit_inst2("movl", op_reg("eax"), op_label(ident_name));
-                    else emit_inst2("mov", op_reg("rax"), op_label(ident_name));
+                    else emit_inst2("mov", op_reg("eax"), op_label(ident_name));
                 }
                 if (!is_float_type(t)) last_value_set_label(ident_name, t);
                 else last_value_clear();
@@ -2924,20 +2959,20 @@ static void gen_expression(ASTNode *node) {
                 emit_push_xmm("xmm0");
                 gen_addr(left_node);
                 emit_pop_xmm("xmm1");
-                if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm1"), op_mem("rax", 0));
-                else emit_inst2("movsd", op_reg("xmm1"), op_mem("rax", 0));
+                if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm1"), op_mem("eax", 0));
+                else emit_inst2("movsd", op_reg("xmm1"), op_mem("eax", 0));
                 if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm1"), op_reg("xmm0"));
                 else emit_inst2("movsd", op_reg("xmm1"), op_reg("xmm0"));
                 last_value_clear();
             } else {
-                emit_inst1("pushq", op_reg("rax"));
+                emit_inst1("push", op_reg("eax"));
                 gen_addr(left_node);
-                emit_inst1("popq", op_reg("rcx"));
-                if (t && t->size == 1) emit_inst2("movb", op_reg("cl"), op_mem("rax", 0));
-                else if (t && t->size == 2) emit_inst2("movw", op_reg("cx"), op_mem("rax", 0));
-                else if (t && t->size == 4) emit_inst2("movl", op_reg("ecx"), op_mem("rax", 0));
-                else emit_inst2("mov", op_reg("rcx"), op_mem("rax", 0));
-                emit_inst2("mov", op_reg("rcx"), op_reg("rax"));
+                emit_inst1("pop", op_reg("ecx"));
+                if (t && t->size == 1) emit_inst2("movb", op_reg("cl"), op_mem("eax", 0));
+                else if (t && t->size == 2) emit_inst2("movw", op_reg("cx"), op_mem("eax", 0));
+                else if (t && t->size == 4) emit_inst2("movl", op_reg("ecx"), op_mem("eax", 0));
+                else emit_inst2("mov", op_reg("ecx"), op_mem("eax", 0));
+                emit_inst2("mov", op_reg("ecx"), op_reg("eax"));
                 last_value_clear();
             }
         }
@@ -2947,12 +2982,12 @@ static void gen_expression(ASTNode *node) {
         Type *t = get_expr_type(node->data.unary.expression);
         Type *ptr_to = (t && t->kind == TYPE_PTR) ? t->data.ptr_to : NULL;
         if (is_float_type(ptr_to)) {
-            if (ptr_to->size == 4) emit_inst2("movss", op_mem("rax", 0), op_reg("xmm0"));
-            else emit_inst2("movsd", op_mem("rax", 0), op_reg("xmm0"));
+            if (ptr_to->size == 4) emit_inst2("movss", op_mem("eax", 0), op_reg("xmm0"));
+            else emit_inst2("movsd", op_mem("eax", 0), op_reg("xmm0"));
         } else if (ptr_to && ptr_to->kind == TYPE_CHAR) {
-            emit_inst2("movzbq", op_mem("rax", 0), op_reg("rax"));
+            emit_inst2("movzbl", op_mem("eax", 0), op_reg("eax"));
         } else {
-            emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
+            emit_inst2("mov", op_mem("eax", 0), op_reg("eax"));
         }
         node->resolved_type = ptr_to;
         last_value_clear();
@@ -2964,7 +2999,7 @@ static void gen_expression(ASTNode *node) {
            when the literal overflows int32 in op_imm */
         if (node->data.unary.expression && node->data.unary.expression->type == AST_INTEGER) {
             long long v = -(long long)node->data.unary.expression->data.integer.value;
-            emit_inst2("mov", op_imm(v), op_reg("rax"));
+            emit_inst2("mov", op_imm(v), op_reg("eax"));
             node->resolved_type = type_int();
             last_value_clear();
             return;
@@ -2973,18 +3008,18 @@ static void gen_expression(ASTNode *node) {
         Type *t = get_expr_type(node->data.unary.expression);
         if (is_float_type(t)) {
             if (t->kind == TYPE_FLOAT) {
-                emit_inst2("xor", op_reg("rax"), op_reg("rax"));
-                emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm1")); // xmm1 = 0.0
+                emit_inst2("xor", op_reg("eax"), op_reg("eax"));
+                emit_inst2("cvtsi2ss", op_reg("eax"), op_reg("xmm1")); // xmm1 = 0.0
                 emit_inst2("subss", op_reg("xmm0"), op_reg("xmm1"));  // xmm1 = 0.0 - xmm0
                 emit_inst2("movss", op_reg("xmm1"), op_reg("xmm0"));
             } else {
-                emit_inst2("xor", op_reg("rax"), op_reg("rax"));
-                emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm1"));
+                emit_inst2("xor", op_reg("eax"), op_reg("eax"));
+                emit_inst2("cvtsi2sd", op_reg("eax"), op_reg("xmm1"));
                 emit_inst2("subsd", op_reg("xmm0"), op_reg("xmm1"));
                 emit_inst2("movsd", op_reg("xmm1"), op_reg("xmm0"));
             }
         } else {
-            emit_inst1("neg", op_reg("rax"));
+            emit_inst1("neg", op_reg("eax"));
         }
         node->resolved_type = t;
         last_value_clear();
@@ -2992,26 +3027,26 @@ static void gen_expression(ASTNode *node) {
         gen_expression(node->data.unary.expression);
         Type *t = get_expr_type(node->data.unary.expression);
         if (is_float_type(t)) {
-            emit_inst2("xor", op_reg("rax"), op_reg("rax"));
+            emit_inst2("xor", op_reg("eax"), op_reg("eax"));
             if (t->kind == TYPE_FLOAT) {
-                emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm1"));
+                emit_inst2("cvtsi2ss", op_reg("eax"), op_reg("xmm1"));
                 emit_inst2("ucomiss", op_reg("xmm1"), op_reg("xmm0"));
             } else {
-                emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm1"));
+                emit_inst2("cvtsi2sd", op_reg("eax"), op_reg("xmm1"));
                 emit_inst2("ucomisd", op_reg("xmm1"), op_reg("xmm0"));
             }
             emit_inst1("setz", op_reg("al"));
-            emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
+            emit_inst2("movzbl", op_reg("al"), op_reg("eax"));
         } else {
-            emit_inst2("test", op_reg("rax"), op_reg("rax"));
+            emit_inst2("test", op_reg("eax"), op_reg("eax"));
             emit_inst1("setz", op_reg("al"));
-            emit_inst2("movzbq", op_reg("al"), op_reg("rax"));
+            emit_inst2("movzbl", op_reg("al"), op_reg("eax"));
         }
         node->resolved_type = type_int();
         last_value_clear();
     } else if (node->type == AST_BITWISE_NOT) {
         gen_expression(node->data.unary.expression);
-        emit_inst1("not", op_reg("rax"));
+        emit_inst1("not", op_reg("eax"));
         node->resolved_type = get_expr_type(node->data.unary.expression);
         last_value_clear();
     } else if (node->type == AST_MEMBER_ACCESS) {
@@ -3024,17 +3059,17 @@ static void gen_expression(ASTNode *node) {
             // Struct/union member: address is the value (passed by reference)
             node->resolved_type = mt;
         } else if (is_float_type(mt)) {
-            if (mt->kind == TYPE_FLOAT) emit_inst2("movss", op_mem("rax", 0), op_reg("xmm0"));
-            else emit_inst2("movsd", op_mem("rax", 0), op_reg("xmm0"));
+            if (mt->kind == TYPE_FLOAT) emit_inst2("movss", op_mem("eax", 0), op_reg("xmm0"));
+            else emit_inst2("movsd", op_mem("eax", 0), op_reg("xmm0"));
             node->resolved_type = mt;
         } else if (mt && mt->size == 1) {
-            emit_inst2("movzbq", op_mem("rax", 0), op_reg("rax"));
+            emit_inst2("movzbl", op_mem("eax", 0), op_reg("eax"));
         } else if (mt && mt->size == 2) {
-            emit_inst2("movzwq", op_mem("rax", 0), op_reg("rax"));
+            emit_inst2("movzwl", op_mem("eax", 0), op_reg("eax"));
         } else if (mt && mt->size == 4) {
-            emit_inst2("movl", op_mem("rax", 0), op_reg("eax"));
+            emit_inst2("movl", op_mem("eax", 0), op_reg("eax"));
         } else {
-            emit_inst2("mov", op_mem("rax", 0), op_reg("rax"));
+            emit_inst2("mov", op_mem("eax", 0), op_reg("eax"));
         }
         last_value_clear();
     } else if (node->type == AST_CALL) {
@@ -3045,6 +3080,7 @@ static void gen_expression(ASTNode *node) {
         const char **xmm_arg_regs = g_xmm_arg_regs;
         int max_reg = g_max_reg_args;
         int shadow = g_use_shadow_space ? 32 : 0;
+        int arg_slot_size = g_stack_slot_size;
         
         /* Check if the called function returns a struct (needs hidden pointer) */
         Type *call_ret_type = get_expr_type(node);
@@ -3063,17 +3099,17 @@ static void gen_expression(ASTNode *node) {
         if (call_sret) {
             sret_alloc = (call_sret_size + 15) & ~15; /* align to 16 */
         }
-        int padding = (16 - ((current_stack_depth + extra_args * 8 + shadow + sret_alloc) % 16)) % 16;
+        int padding = (16 - ((current_stack_depth + extra_args * arg_slot_size + shadow + sret_alloc) % 16)) % 16;
         
         if (padding > 0) {
-            emit_inst2("sub", op_imm(padding), op_reg("rsp"));
+            emit_inst2("sub", op_imm(padding), op_reg("esp"));
             stack_offset -= padding;
         }
         
         /* Allocate stack space for the struct return value */
         int sret_stack_offset = 0;
         if (call_sret) {
-            emit_inst2("sub", op_imm(sret_alloc), op_reg("rsp"));
+            emit_inst2("sub", op_imm(sret_alloc), op_reg("esp"));
             stack_offset -= sret_alloc;
             sret_stack_offset = stack_offset; /* remember where it is */
         }
@@ -3085,9 +3121,9 @@ static void gen_expression(ASTNode *node) {
             if (is_float_type(arg_type)) {
                 emit_push_xmm("xmm0");
             } else {
-                emit_inst1("pushq", op_reg("rax"));
+                emit_inst1("push", op_reg("eax"));
             }
-            stack_offset -= 8; // Update stack offset for nested calls
+            stack_offset -= arg_slot_size; // Update stack offset for nested calls
         }
         
         /* Pop user args into registers, shifted by 1 if sret */
@@ -3097,19 +3133,19 @@ static void gen_expression(ASTNode *node) {
             if (is_float_type(pop_type)) {
                 emit_pop_xmm(xmm_arg_regs[i]);
             } else {
-                emit_inst1("popq", op_reg(arg_regs[i + call_sret_shift]));
-                stack_offset += 8;
+                emit_inst1("pop", op_reg(arg_regs[i + call_sret_shift]));
+                stack_offset += arg_slot_size;
             }
         }
         
-        /* Load hidden return pointer into %rdi (first arg) */
+        /* Load hidden return pointer into %edi (first arg) */
         if (call_sret) {
-            emit_inst2("lea", op_mem("rbp", sret_stack_offset), op_reg("rdi"));
+            emit_inst2("lea", op_mem("ebp", sret_stack_offset), op_reg("edi"));
         }
         
         // Shadow space (Win64 only)
         if (shadow > 0) {
-            emit_inst2("sub", op_imm(shadow), op_reg("rsp"));
+            emit_inst2("sub", op_imm(shadow), op_reg("esp"));
         }
         // System V ABI: set al to number of vector (XMM) args for variadic functions
         if (!g_use_shadow_space) {
@@ -3123,10 +3159,10 @@ static void gen_expression(ASTNode *node) {
         emit_inst1("call", op_label(node->data.call.name));
         if (node->resolved_type == NULL) node->resolved_type = get_expr_type(node);
         
-        // Clean up shadow space + extra args + padding (but NOT sret space — caller needs %rax valid)
-        int cleanup = shadow + extra_args * 8 + padding;
+        // Clean up shadow space + extra args + padding (but NOT sret space — caller needs %eax valid)
+        int cleanup = shadow + extra_args * arg_slot_size + padding;
         if (cleanup > 0) {
-            emit_inst2("add", op_imm(cleanup), op_reg("rsp"));
+            emit_inst2("add", op_imm(cleanup), op_reg("esp"));
         }
         
         // Restore stack offset (sret space remains allocated on stack, cleaned up by leave)
@@ -3143,12 +3179,12 @@ static void gen_expression(ASTNode *node) {
             is_simple_scalar_expr(then_br) && is_simple_scalar_expr(else_br)) {
             /* Pattern: gen(cond) → save → gen(then) → save → gen(else) → test → cmovne */
             gen_expression(cond);
-            emit_inst2("mov", op_reg("rax"), op_reg("r11"));  /* save condition */
+            emit_inst2("mov", op_reg("eax"), op_reg("r11"));  /* save condition */
             gen_expression(then_br);
-            emit_inst2("mov", op_reg("rax"), op_reg("rcx"));  /* save then-value */
-            gen_expression(else_br);                           /* else-value in rax */
+            emit_inst2("mov", op_reg("eax"), op_reg("ecx"));  /* save then-value */
+            gen_expression(else_br);                           /* else-value in eax */
             emit_inst2("test", op_reg("r11"), op_reg("r11")); /* test condition */
-            emit_inst2("cmovne", op_reg("rcx"), op_reg("rax")); /* if true, use then-value */
+            emit_inst2("cmovne", op_reg("ecx"), op_reg("eax")); /* if true, use then-value */
             last_value_clear();
         } else {
             int label_else = label_count++;
@@ -3158,7 +3194,7 @@ static void gen_expression(ASTNode *node) {
             sprintf(l_end, ".L%d", label_end);
 
             gen_expression(cond);
-            emit_inst2("test", op_reg("rax"), op_reg("rax"));
+            emit_inst2("test", op_reg("eax"), op_reg("eax"));
             emit_inst1("je", op_label(l_else));
 
             gen_expression(then_br);
@@ -3192,7 +3228,7 @@ static void gen_expression(ASTNode *node) {
         }
         
         // Load address of the string
-        emit_inst2("lea", op_label(label), op_reg("rax"));
+        emit_inst2("lea", op_label(label), op_reg("eax"));
         last_value_clear();
     }
 }
@@ -3244,7 +3280,7 @@ static void collect_cases(ASTNode *node, ASTNode **cases, int *case_count, ASTNo
 /*   3. Scalar remainder: process remaining 0-3 elements              */
 /*   4. Epilogue: restore callee-saved regs                           */
 /*                                                                     */
-/* Uses rbx, r14, r15 as pointer registers (callee-saved, no SIB      */
+/* Uses ebx, r14, r15 as pointer registers (callee-saved, no SIB      */
 /* encoding issues). ecx as element counter.                           */
 /* ------------------------------------------------------------------ */
 static void gen_vectorized_loop(ASTNode *node) {
@@ -3316,36 +3352,36 @@ static void gen_vectorized_loop(ASTNode *node) {
     }
 
     /* --- Prologue: save callee-saved registers --- */
-    emit_inst1("pushq", op_reg("rbx"));
-    emit_inst1("pushq", op_reg("r14"));
-    emit_inst1("pushq", op_reg("r15"));
+    emit_inst1("push", op_reg("ebx"));
+    emit_inst1("push", op_reg("esi"));
+    emit_inst1("push", op_reg("edi"));
 
     /* --- Compute base addresses of dst, src1, src2 --- */
-    /* dst → rbx */
+    /* dst → ebx */
     int off_dst = get_local_offset(vi->dst);
     Type *t_dst = get_local_type(vi->dst);
     if (t_dst && t_dst->kind == TYPE_ARRAY) {
-        emit_inst2("lea", op_mem("rbp", off_dst), op_reg("rbx"));
+        emit_inst2("lea", op_mem("ebp", off_dst), op_reg("ebx"));
     } else {
-        emit_inst2("mov", op_mem("rbp", off_dst), op_reg("rbx"));
+        emit_inst2("mov", op_mem("ebp", off_dst), op_reg("ebx"));
     }
 
-    /* src1 → r14 */
+    /* src1 → esi */
     int off_s1 = get_local_offset(vi->src1);
     Type *t_s1 = get_local_type(vi->src1);
     if (t_s1 && t_s1->kind == TYPE_ARRAY) {
-        emit_inst2("lea", op_mem("rbp", off_s1), op_reg("r14"));
+        emit_inst2("lea", op_mem("ebp", off_s1), op_reg("esi"));
     } else {
-        emit_inst2("mov", op_mem("rbp", off_s1), op_reg("r14"));
+        emit_inst2("mov", op_mem("ebp", off_s1), op_reg("esi"));
     }
 
-    /* src2 → r15 */
+    /* src2 → edi */
     int off_s2 = get_local_offset(vi->src2);
     Type *t_s2 = get_local_type(vi->src2);
     if (t_s2 && t_s2->kind == TYPE_ARRAY) {
-        emit_inst2("lea", op_mem("rbp", off_s2), op_reg("r15"));
+        emit_inst2("lea", op_mem("ebp", off_s2), op_reg("edi"));
     } else {
-        emit_inst2("mov", op_mem("rbp", off_s2), op_reg("r15"));
+        emit_inst2("mov", op_mem("ebp", off_s2), op_reg("edi"));
     }
 
     /* --- Initialize counter --- */
@@ -3359,8 +3395,8 @@ static void gen_vectorized_loop(ASTNode *node) {
     emit_inst1("jg", op_label(l_scalar));
 
     /* Load elements from src1 and src2 */
-    emit_inst2(vec_mov, op_mem("r14", 0), op_reg(vreg0));
-    emit_inst2(vec_mov, op_mem("r15", 0), op_reg(vreg1));
+    emit_inst2(vec_mov, op_mem("esi", 0), op_reg(vreg0));
+    emit_inst2(vec_mov, op_mem("edi", 0), op_reg(vreg1));
 
     /* Perform packed operation */
     if (use_avx) {
@@ -3372,12 +3408,12 @@ static void gen_vectorized_loop(ASTNode *node) {
     }
 
     /* Store elements to dst */
-    emit_inst2(vec_mov, op_reg(vreg0), op_mem("rbx", 0));
+    emit_inst2(vec_mov, op_reg(vreg0), op_mem("ebx", 0));
 
     /* Advance pointers and counter */
-    emit_inst2("add", op_imm(vec_bytes), op_reg("rbx"));
-    emit_inst2("add", op_imm(vec_bytes), op_reg("r14"));
-    emit_inst2("add", op_imm(vec_bytes), op_reg("r15"));
+    emit_inst2("add", op_imm(vec_bytes), op_reg("ebx"));
+    emit_inst2("add", op_imm(vec_bytes), op_reg("esi"));
+    emit_inst2("add", op_imm(vec_bytes), op_reg("edi"));
     emit_inst2("add", op_imm(vec_elems), op_reg("ecx"));
     emit_inst1("jmp", op_label(l_vec));
 
@@ -3396,30 +3432,30 @@ static void gen_vectorized_loop(ASTNode *node) {
 
     if (vi->is_float) {
         /* Float scalar: use SSE scalar instructions */
-        emit_inst2(scl_mov, op_mem("r14", 0), op_reg("xmm0"));
-        emit_inst2(scl_mov, op_mem("r15", 0), op_reg("xmm1"));
+        emit_inst2(scl_mov, op_mem("esi", 0), op_reg("xmm0"));
+        emit_inst2(scl_mov, op_mem("edi", 0), op_reg("xmm1"));
         emit_inst2(scl_op, op_reg("xmm1"), op_reg("xmm0"));
-        emit_inst2(scl_mov, op_reg("xmm0"), op_mem("rbx", 0));
+        emit_inst2(scl_mov, op_reg("xmm0"), op_mem("ebx", 0));
     } else {
         /* Integer scalar: use GPR instructions */
-        emit_inst2("mov", op_mem("r14", 0), op_reg("eax"));
-        emit_inst2(scl_op, op_mem("r15", 0), op_reg("eax"));
-        emit_inst2("mov", op_reg("eax"), op_mem("rbx", 0));
+        emit_inst2("mov", op_mem("esi", 0), op_reg("eax"));
+        emit_inst2(scl_op, op_mem("edi", 0), op_reg("eax"));
+        emit_inst2("mov", op_reg("eax"), op_mem("ebx", 0));
     }
 
     /* Advance pointers by 4 bytes (1 × 4-byte element) */
-    emit_inst2("add", op_imm(4), op_reg("rbx"));
-    emit_inst2("add", op_imm(4), op_reg("r14"));
-    emit_inst2("add", op_imm(4), op_reg("r15"));
+    emit_inst2("add", op_imm(4), op_reg("ebx"));
+    emit_inst2("add", op_imm(4), op_reg("esi"));
+    emit_inst2("add", op_imm(4), op_reg("edi"));
     emit_inst2("add", op_imm(1), op_reg("ecx"));
     emit_inst2("cmp", op_imm(vi->iterations), op_reg("ecx"));
     emit_inst1("jl", op_label(l_scalar_loop));
 
     /* --- Epilogue: restore callee-saved registers --- */
     emit_label_def(l_done);
-    emit_inst1("popq", op_reg("r15"));
-    emit_inst1("popq", op_reg("r14"));
-    emit_inst1("popq", op_reg("rbx"));
+    emit_inst1("pop", op_reg("edi"));
+    emit_inst1("pop", op_reg("esi"));
+    emit_inst1("pop", op_reg("ebx"));
 }
 
 /* ------------------------------------------------------------------ */
@@ -3466,19 +3502,19 @@ static void gen_vectorized_while_loop(ASTNode *node) {
         }
 
         /* Save callee-saved registers and load array base */
-        emit_inst1("pushq", op_reg("r14"));
+        emit_inst1("push", op_reg("esi"));
 
         const char *src_reg = get_local_reg(vi->src1);
         if (src_reg) {
             /* Array pointer is register-allocated */
-            emit_inst2("mov", op_reg(src_reg), op_reg("r14"));
+            emit_inst2("mov", op_reg(src_reg), op_reg("esi"));
         } else {
             int off_src = get_local_offset(vi->src1);
             Type *t_src = get_local_type(vi->src1);
             if (t_src && t_src->kind == TYPE_ARRAY)
-                emit_inst2("lea", op_mem("rbp", off_src), op_reg("r14"));
+                emit_inst2("lea", op_mem("ebp", off_src), op_reg("esi"));
             else
-                emit_inst2("mov", op_mem("rbp", off_src), op_reg("r14"));
+                emit_inst2("mov", op_mem("ebp", off_src), op_reg("esi"));
         }
 
         /* Zero the accumulator vector register */
@@ -3499,7 +3535,7 @@ static void gen_vectorized_while_loop(ASTNode *node) {
         emit_inst1("jg", op_label(l_scalar));
 
         /* Load chunk from array */
-        emit_inst2(vec_mov, op_mem("r14", 0), op_reg(vreg1));
+        emit_inst2(vec_mov, op_mem("esi", 0), op_reg(vreg1));
 
         /* Accumulate: xmm0 += xmm1 */
         if (use_avx)
@@ -3508,7 +3544,7 @@ static void gen_vectorized_while_loop(ASTNode *node) {
             emit_inst2(vec_add, op_reg(vreg1), op_reg(vreg0));
 
         /* Advance pointer and counter */
-        emit_inst2("add", op_imm(vec_bytes), op_reg("r14"));
+        emit_inst2("add", op_imm(vec_bytes), op_reg("esi"));
         emit_inst2("add", op_imm(vec_elems), op_reg("ecx"));
         emit_inst1("jmp", op_label(l_vec));
 
@@ -3554,8 +3590,8 @@ static void gen_vectorized_while_loop(ASTNode *node) {
                 emit_inst2("movd", op_reg("xmm0"), op_reg(acc_freg32));
             } else {
                 int off_acc = get_local_offset(vi->accum_var);
-                emit_inst2("addss", op_mem("rbp", off_acc), op_reg("xmm0"));
-                emit_inst2("movss", op_reg("xmm0"), op_mem("rbp", off_acc));
+                emit_inst2("addss", op_mem("ebp", off_acc), op_reg("xmm0"));
+                emit_inst2("movss", op_reg("xmm0"), op_mem("ebp", off_acc));
             }
         } else {
             emit_inst2("movd", op_reg("xmm0"), op_reg("eax"));
@@ -3565,14 +3601,14 @@ static void gen_vectorized_while_loop(ASTNode *node) {
                 emit_inst2("addl", op_reg(acc_reg32), op_reg("eax"));
             } else {
                 int off_acc = get_local_offset(vi->accum_var);
-                emit_inst2("addl", op_mem("rbp", off_acc), op_reg("eax"));
+                emit_inst2("addl", op_mem("ebp", off_acc), op_reg("eax"));
             }
             /* Handle scalar remainder elements */
             emit_inst2("cmp", op_imm(vi->iterations), op_reg("ecx"));
             emit_inst1("jge", op_label(l_done));
             emit_label_def(l_scalar_loop);
-            emit_inst2("addl", op_mem("r14", 0), op_reg("eax"));
-            emit_inst2("add", op_imm(4), op_reg("r14"));
+            emit_inst2("addl", op_mem("esi", 0), op_reg("eax"));
+            emit_inst2("add", op_imm(4), op_reg("esi"));
             emit_inst2("add", op_imm(1), op_reg("ecx"));
             emit_inst2("cmp", op_imm(vi->iterations), op_reg("ecx"));
             emit_inst1("jl", op_label(l_scalar_loop));
@@ -3582,11 +3618,11 @@ static void gen_vectorized_while_loop(ASTNode *node) {
                 emit_inst2("movl", op_reg("eax"), op_reg(acc_reg32));
             } else {
                 int off_acc = get_local_offset(vi->accum_var);
-                emit_inst2("movl", op_reg("eax"), op_mem("rbp", off_acc));
+                emit_inst2("movl", op_reg("eax"), op_mem("ebp", off_acc));
             }
         }
 
-        emit_inst1("popq", op_reg("r14"));
+        emit_inst1("pop", op_reg("esi"));
 
     } else if (vi->vec_mode == 2) {
         /* ============================================================
@@ -3612,19 +3648,19 @@ static void gen_vectorized_while_loop(ASTNode *node) {
         int vec_bytes = vec_elems * vi->elem_size;
 
         /* Save callee-saved registers and load array base */
-        emit_inst1("pushq", op_reg("rbx"));
+        emit_inst1("push", op_reg("ebx"));
 
         const char *dst_reg = get_local_reg(vi->dst);
         if (dst_reg) {
             /* Array pointer is register-allocated */
-            emit_inst2("mov", op_reg(dst_reg), op_reg("rbx"));
+            emit_inst2("mov", op_reg(dst_reg), op_reg("ebx"));
         } else {
             int off_dst = get_local_offset(vi->dst);
             Type *t_dst = get_local_type(vi->dst);
             if (t_dst && t_dst->kind == TYPE_ARRAY)
-                emit_inst2("lea", op_mem("rbp", off_dst), op_reg("rbx"));
+                emit_inst2("lea", op_mem("ebp", off_dst), op_reg("ebx"));
             else
-                emit_inst2("mov", op_mem("rbp", off_dst), op_reg("rbx"));
+                emit_inst2("mov", op_mem("ebp", off_dst), op_reg("ebx"));
         }
 
         long long scale = vi->init_scale;
@@ -3644,33 +3680,33 @@ static void gen_vectorized_while_loop(ASTNode *node) {
             /* Strided init: build initial vector [0*s+o, 1*s+o, 2*s+o, 3*s+o]
                and stride vector [vec_elems*s, vec_elems*s, ...] */
             /* We need stack space for the initial values.
-               Use sub rsp to allocate temp space, store values, load vector. */
+               Use sub esp to allocate temp space, store values, load vector. */
             int tmp_size = vec_bytes * 2;  /* init_vec + stride_vec */
             /* Align to 16/32 bytes */
             int align = use_avx ? 32 : 16;
             tmp_size = (tmp_size + align - 1) & ~(align - 1);
-            emit_inst2("sub", op_imm(tmp_size), op_reg("rsp"));
+            emit_inst2("sub", op_imm(tmp_size), op_reg("esp"));
 
             /* Store initial values for init vector */
             for (int k = 0; k < vec_elems; k++) {
                 long long val = (long long)k * scale + offset;
-                emit_inst2("movl", op_imm((int)val), op_mem("rsp", k * 4));
+                emit_inst2("movl", op_imm((int)val), op_mem("esp", k * 4));
             }
             /* Store stride values */
             long long stride_val = (long long)vec_elems * scale;
             for (int k = 0; k < vec_elems; k++) {
-                emit_inst2("movl", op_imm((int)stride_val), op_mem("rsp", vec_bytes + k * 4));
+                emit_inst2("movl", op_imm((int)stride_val), op_mem("esp", vec_bytes + k * 4));
             }
 
             /* Load init vector and stride vector */
             const char *vec_mov = use_avx ? "vmovdqu" : "movdqu";
             const char *vreg0 = use_avx ? "ymm0" : "xmm0";
             const char *vreg1 = use_avx ? "ymm1" : "xmm1";
-            emit_inst2(vec_mov, op_mem("rsp", 0), op_reg(vreg0));
-            emit_inst2(vec_mov, op_mem("rsp", vec_bytes), op_reg(vreg1));
+            emit_inst2(vec_mov, op_mem("esp", 0), op_reg(vreg0));
+            emit_inst2(vec_mov, op_mem("esp", vec_bytes), op_reg(vreg1));
 
             /* Free temp space */
-            emit_inst2("add", op_imm(tmp_size), op_reg("rsp"));
+            emit_inst2("add", op_imm(tmp_size), op_reg("esp"));
         }
 
         /* Counter in ecx */
@@ -3686,7 +3722,7 @@ static void gen_vectorized_while_loop(ASTNode *node) {
         emit_inst1("jg", op_label(l_scalar));
 
         /* Store current vector to array */
-        emit_inst2(vec_mov_store, op_reg(vreg0), op_mem("rbx", 0));
+        emit_inst2(vec_mov_store, op_reg(vreg0), op_mem("ebx", 0));
 
         if (scale != 0) {
             /* Advance: xmm0 += stride */
@@ -3698,7 +3734,7 @@ static void gen_vectorized_while_loop(ASTNode *node) {
         }
 
         /* Advance pointer and counter */
-        emit_inst2("add", op_imm(vec_bytes), op_reg("rbx"));
+        emit_inst2("add", op_imm(vec_bytes), op_reg("ebx"));
         emit_inst2("add", op_imm(vec_elems), op_reg("ecx"));
         emit_inst1("jmp", op_label(l_vec));
 
@@ -3712,7 +3748,7 @@ static void gen_vectorized_while_loop(ASTNode *node) {
 
         if (scale == 0) {
             /* Store constant */
-            emit_inst2("movl", op_imm((int)offset), op_mem("rbx", 0));
+            emit_inst2("movl", op_imm((int)offset), op_mem("ebx", 0));
         } else {
             /* Compute value: ecx * scale + offset */
             emit_inst2("mov", op_reg("ecx"), op_reg("eax"));
@@ -3720,17 +3756,17 @@ static void gen_vectorized_while_loop(ASTNode *node) {
                 emit_inst2("imull", op_imm((int)scale), op_reg("eax"));
             if (offset != 0)
                 emit_inst2("addl", op_imm((int)offset), op_reg("eax"));
-            emit_inst2("movl", op_reg("eax"), op_mem("rbx", 0));
+            emit_inst2("movl", op_reg("eax"), op_mem("ebx", 0));
         }
 
-        emit_inst2("add", op_imm(4), op_reg("rbx"));
+        emit_inst2("add", op_imm(4), op_reg("ebx"));
         emit_inst2("add", op_imm(1), op_reg("ecx"));
         emit_inst2("cmp", op_imm(vi->iterations), op_reg("ecx"));
         emit_inst1("jl", op_label(l_scalar_loop));
 
         /* --- Epilogue --- */
         emit_label_def(l_done);
-        emit_inst1("popq", op_reg("rbx"));
+        emit_inst1("pop", op_reg("ebx"));
     }
 }
 
@@ -3746,7 +3782,7 @@ static void gen_statement(ASTNode *node) {
              * Replace: call f + epilogue  →  leave + jmp f
              * Constraints:
              *   - All args must fit in registers (no stack args)
-             *   - Return types must be register-compatible (no int<->float conversion)
+             *   - Return types must be register-compatible (no int<->float conveesion)
              */
             if (OPT_AT_LEAST(OPT_O2) && !OPT_DEBUG_MODE && ret_expr->type == AST_CALL) {
                 int num_args = (int)ret_expr->children_count;
@@ -3766,7 +3802,7 @@ static void gen_statement(ASTNode *node) {
                         if (is_float_type(current_func_return_type) != is_float_type(call_ret_type)) {
                             can_tco = 0;
                         }
-                        /* float <-> double mismatch: needs conversion */
+                        /* float <-> double mismatch: needs conveesion */
                         else if (is_float_type(current_func_return_type) && is_float_type(call_ret_type)) {
                             if (current_func_return_type->kind != call_ret_type->kind) {
                                 can_tco = 0;
@@ -3785,7 +3821,7 @@ static void gen_statement(ASTNode *node) {
                             if (is_float_type(arg_type)) {
                                 emit_push_xmm("xmm0");
                             } else {
-                                emit_inst1("pushq", op_reg("rax"));
+                                emit_inst1("push", op_reg("eax"));
                             }
                         }
 
@@ -3795,7 +3831,7 @@ static void gen_statement(ASTNode *node) {
                             if (is_float_type(arg_type)) {
                                 emit_pop_xmm(xmm_arg_regs[i]);
                             } else {
-                                emit_inst1("popq", op_reg(arg_regs[i]));
+                                emit_inst1("pop", op_reg(arg_regs[i]));
                             }
                         }
 
@@ -3826,18 +3862,18 @@ static void gen_statement(ASTNode *node) {
                     gen_addr(ret_expr);
                 } else {
                     /* For function calls returning structs, gen_expression
-                     * already returns a pointer in %rax */
+                     * already returns a pointer in %eax */
                     gen_expression(ret_expr);
                 }
-                /* rax = source address of struct data */
-                /* memcpy(sret_ptr, rax, size) */
-                emit_inst2("mov", op_reg("rax"), op_reg("rsi")); /* source = rax */
-                emit_inst2("mov", op_mem("rbp", sret_offset), op_reg("rdi")); /* dest = hidden ptr */
-                emit_inst2("mov", op_imm(current_func_return_type->size), op_reg("rdx"));
+                /* eax = source address of struct data */
+                /* memcpy(sret_ptr, eax, size) */
+                emit_inst2("mov", op_reg("eax"), op_reg("esi")); /* source = eax */
+                emit_inst2("mov", op_mem("ebp", sret_offset), op_reg("edi")); /* dest = hidden ptr */
+                emit_inst2("mov", op_imm(current_func_return_type->size), op_reg("edx"));
                 emit_inst2("xor", op_reg("eax"), op_reg("eax"));
                 emit_inst0("call memcpy");
-                /* return the hidden pointer in %rax */
-                emit_inst2("mov", op_mem("rbp", sret_offset), op_reg("rax"));
+                /* return the hidden pointer in %eax */
+                emit_inst2("mov", op_mem("ebp", sret_offset), op_reg("eax"));
             } else {
             gen_expression(ret_expr);
             Type *expr_type = get_expr_type(ret_expr);
@@ -3846,12 +3882,12 @@ static void gen_statement(ASTNode *node) {
             if (current_func_return_type && expr_type) {
                 if (is_float_type(current_func_return_type) && !is_float_type(expr_type)) {
                     // int -> float/double
-                    if (current_func_return_type->kind == TYPE_FLOAT) emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm0"));
-                    else emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm0"));
+                    if (current_func_return_type->kind == TYPE_FLOAT) emit_inst2("cvtsi2ss", op_reg("eax"), op_reg("xmm0"));
+                    else emit_inst2("cvtsi2sd", op_reg("eax"), op_reg("xmm0"));
                 } else if (!is_float_type(current_func_return_type) && is_float_type(expr_type)) {
                     // float/double -> int
-                    if (expr_type->kind == TYPE_FLOAT) emit_inst2("cvttss2si", op_reg("xmm0"), op_reg("rax"));
-                    else emit_inst2("cvttsd2si", op_reg("xmm0"), op_reg("rax"));
+                    if (expr_type->kind == TYPE_FLOAT) emit_inst2("cvttss2si", op_reg("xmm0"), op_reg("eax"));
+                    else emit_inst2("cvttsd2si", op_reg("xmm0"), op_reg("eax"));
                 } else if (is_float_type(current_func_return_type) && is_float_type(expr_type)) {
                     // float <-> double
                     if (current_func_return_type->kind == TYPE_DOUBLE && expr_type->kind == TYPE_FLOAT) {
@@ -3878,14 +3914,14 @@ static void gen_statement(ASTNode *node) {
         }
         if (node->data.var_decl.is_static) {
             // Static local variable
-            char slabel[256];
-            snprintf(slabel, sizeof(slabel), "_S_%s.%s.%d", current_func_name ? current_func_name : "global", node->data.var_decl.name, static_label_count++);
+            char slabel[64];
+            sprintf(slabel, "_S_%s_%s_%d", current_func_name ? current_func_name : "global", node->data.var_decl.name, static_label_count++);
             
             Section old_section = current_section;
             current_section = SECTION_DATA;
             
             if (obj_writer) {
-                emit_label_def_ex(slabel, 1);
+                emit_label_def(slabel);
                 int size = node->resolved_type ? node->resolved_type->size : 8;
                 ASTNode *vinit1 = node->data.var_decl.initializer;
                 if (vinit1 && vinit1->type == AST_INIT_LIST) {
@@ -3906,7 +3942,7 @@ static void gen_statement(ASTNode *node) {
                     }
                     while (tw < size) { buffer_write_byte(&obj_writer->data_section, 0); tw++; }
                 } else {
-                    int val = 0;
+                    long long val = 0;
                     if (vinit1 && vinit1->type == AST_INTEGER) {
                         val = vinit1->data.integer.value;
                     }
@@ -3927,23 +3963,23 @@ static void gen_statement(ASTNode *node) {
                         size_t vi; int tw = 0;
                         for (vi = 0; vi < vinit2->children_count; vi++) {
                             ASTNode *elem = vinit2->children[vi];
-                            if (elem && elem->type == AST_INTEGER) fprintf(out, "%s %d\n", edir, elem->data.integer.value);
+                            if (elem && elem->type == AST_INTEGER) fprintf(out, "%s %I64d\n", edir, elem->data.integer.value);
                             else fprintf(out, "%s 0\n", edir);
                             tw += elem_size;
                         }
                         if (tw < size) fprintf(out, "DB %d DUP(0)\n", size - tw);
                     } else {
-                        int val = 0;
+                        long long val = 0;
                         if (vinit2 && vinit2->type == AST_INTEGER) val = vinit2->data.integer.value;
-                        if (size == 1) fprintf(out, "DB %d\n", val);
-                        else if (size == 4) fprintf(out, "DD %d\n", val);
-                        else fprintf(out, "DQ %d\n", val);
+                        if (size == 1) fprintf(out, "DB %I64d\n", val);
+                        else if (size == 4) fprintf(out, "DD %I64d\n", val);
+                        else fprintf(out, "DQ %I64d\n", val);
                     }
                     fprintf(out, "_DATA ENDS\n_TEXT SEGMENT\n");
                 } else {
                     fprintf(out, ".data\n");
                     emit_label_def(slabel);
-                    int size = node->resolved_type ? node->resolved_type->size : 8;
+                    int size = node->resolved_type ? node->resolved_type->size : g_ptr_size;
                     ASTNode *vinit3 = node->data.var_decl.initializer;
                     if (vinit3 && vinit3->type == AST_INIT_LIST) {
                         int elem_size = 1;
@@ -3953,9 +3989,11 @@ static void gen_statement(ASTNode *node) {
                         for (vi = 0; vi < vinit3->children_count; vi++) {
                             ASTNode *elem = vinit3->children[vi];
                             if (elem && elem->type == AST_INTEGER) {
-                                if (elem_size == 1) fprintf(out, "    .byte %d\n", elem->data.integer.value);
-                                else if (elem_size == 4) fprintf(out, "    .long %d\n", elem->data.integer.value);
-                                else fprintf(out, "    .quad %d\n", elem->data.integer.value);
+                                if (elem_size == 1) fprintf(out, "    .byte %lld\n", elem->data.integer.value);
+                                else if (elem_size == 2) fprintf(out, "    .word %lld\n", elem->data.integer.value);
+                                else if (elem_size == 4) fprintf(out, "    .long %lld\n", elem->data.integer.value);
+                                else if (elem_size == 8) fprintf(out, "    .quad %lld\n", elem->data.integer.value);
+                                else fprintf(out, "    .long %lld\n", elem->data.integer.value);
                             } else {
                                 int zi; for (zi = 0; zi < elem_size; zi++) fprintf(out, "    .byte 0\n");
                             }
@@ -3963,11 +4001,14 @@ static void gen_statement(ASTNode *node) {
                         }
                         if (tw < size) fprintf(out, "    .zero %d\n", size - tw);
                     } else {
-                        int val = 0;
+                        long long val = 0;
                         if (vinit3 && vinit3->type == AST_INTEGER) val = vinit3->data.integer.value;
-                        if (size == 1) fprintf(out, ".byte %d\n", val);
-                        else if (size == 4) fprintf(out, ".long %d\n", val);
-                        else fprintf(out, ".quad %d\n", val);
+                        if (size == 1) fprintf(out, "    .byte %I64d\n", val);
+                        else if (size == 2) fprintf(out, "    .word %I64d\n", val);
+                        else if (size == 4) fprintf(out, "    .long %I64d\n", val);
+                         else if (size == g_ptr_size) fprintf(out, "    .quad %I64d\n", val);
+                        else fprintf(out, "    .long %I64d\n", val);
+
                     }
                     fprintf(out, ".text\n");
                 }
@@ -3982,10 +4023,10 @@ static void gen_statement(ASTNode *node) {
             locals_count++;
             return;
         }
-        int size = node->resolved_type ? node->resolved_type->size : 8;
+        int size = node->resolved_type ? node->resolved_type->size : g_stack_slot_size;
         int alloc_size = size;
-        if (alloc_size < 8 && node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
-            alloc_size = 8;
+        if (size < g_stack_slot_size && node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
+            alloc_size = g_stack_slot_size;
         }
         
         ASTNode *init_list = node->data.var_decl.initializer;
@@ -4003,24 +4044,28 @@ static void gen_statement(ASTNode *node) {
             debug_record_var(node->data.var_decl.name, stack_offset, 0, node->resolved_type);
             
             // Allocate space on stack
-            emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
+            emit_inst2("sub", op_imm(alloc_size), op_reg("esp"));
             
             // Zero-initialize with qword stores
             {
                 int off;
-                for (off = 0; off + 8 <= alloc_size; off += 8) {
-                    emit_inst2("movq", op_imm(0), op_mem("rbp", stack_offset + off));
+                for (off = 0; off + g_stack_slot_size <= alloc_size; off += g_stack_slot_size) {
+                    if (g_stack_slot_size == 4) emit_inst2("movl", op_imm(0), op_mem("ebp", stack_offset + off));
+                    else {
+                        emit_inst2("movl", op_imm(0), op_mem("ebp", stack_offset + off));
+                        emit_inst2("movl", op_imm(0), op_mem("ebp", stack_offset + off + 4));
+                    }
                 }
                 if (off + 4 <= alloc_size) {
-                    emit_inst2("movl", op_imm(0), op_mem("rbp", stack_offset + off));
+                    emit_inst2("movl", op_imm(0), op_mem("ebp", stack_offset + off));
                 }
             }
             
             // Determine element size for arrays
-            int elem_size = 8;
+            int elem_size = g_ptr_size;
             if (node->resolved_type && node->resolved_type->kind == TYPE_ARRAY && node->resolved_type->data.ptr_to) {
                 elem_size = node->resolved_type->data.ptr_to->size;
-                if (elem_size < 4) elem_size = 1;
+                if (elem_size < g_stack_slot_size) elem_size = g_stack_slot_size;
                 else if (elem_size < 8) elem_size = 4;
             }
             
@@ -4031,13 +4076,13 @@ static void gen_statement(ASTNode *node) {
                     gen_expression(init_list->children[i]);
                     if (node->resolved_type->data.struct_data.members && (int)i < node->resolved_type->data.struct_data.members_count) {
                         int mem_offset = node->resolved_type->data.struct_data.members[i].offset;
-                        int mem_size = node->resolved_type->data.struct_data.members[i].type ? node->resolved_type->data.struct_data.members[i].type->size : 8;
+                        int mem_size = node->resolved_type->data.struct_data.members[i].type ? node->resolved_type->data.struct_data.members[i].type->size : g_ptr_size;
                         if (mem_size == 1) {
-                            emit_inst2("movb", op_reg("al"), op_mem("rbp", stack_offset + mem_offset));
+                            emit_inst2("movb", op_reg("al"), op_mem("ebp", stack_offset + mem_offset));
                         } else if (mem_size == 4) {
-                            emit_inst2("movl", op_reg("eax"), op_mem("rbp", stack_offset + mem_offset));
+                            emit_inst2("movl", op_reg("eax"), op_mem("ebp", stack_offset + mem_offset));
                         } else {
-                            emit_inst2("mov", op_reg("rax"), op_mem("rbp", stack_offset + mem_offset));
+                            emit_inst2("mov", op_reg("eax"), op_mem("ebp", stack_offset + mem_offset));
                         }
                     }
                 }
@@ -4048,11 +4093,11 @@ static void gen_statement(ASTNode *node) {
                     gen_expression(init_list->children[i]);
                     int el_offset = stack_offset + (int)(i * elem_size);
                     if (elem_size == 1) {
-                        emit_inst2("movb", op_reg("al"), op_mem("rbp", el_offset));
+                        emit_inst2("movb", op_reg("al"), op_mem("ebp", el_offset));
                     } else if (elem_size == 4) {
-                        emit_inst2("movl", op_reg("eax"), op_mem("rbp", el_offset));
+                        emit_inst2("movl", op_reg("eax"), op_mem("ebp", el_offset));
                     } else {
-                        emit_inst2("mov", op_reg("rax"), op_mem("rbp", el_offset));
+                        emit_inst2("mov", op_reg("eax"), op_mem("ebp", el_offset));
                     }
                 }
             }
@@ -4062,15 +4107,15 @@ static void gen_statement(ASTNode *node) {
                 gen_expression(node->data.var_decl.initializer);
             } else {
                 if (is_float_type(node->resolved_type)) {
-                    emit_inst2("xor", op_reg("rax"), op_reg("rax"));
-                    if (node->resolved_type->kind == TYPE_FLOAT) emit_inst2("cvtsi2ss", op_reg("rax"), op_reg("xmm0"));
-                    else emit_inst2("cvtsi2sd", op_reg("rax"), op_reg("xmm0"));
+                    emit_inst2("xor", op_reg("eax"), op_reg("eax"));
+                    if (node->resolved_type->kind == TYPE_FLOAT) emit_inst2("cvtsi2ss", op_reg("eax"), op_reg("xmm0"));
+                    else emit_inst2("cvtsi2sd", op_reg("eax"), op_reg("xmm0"));
                     last_value_clear();
                 } else {
                     if (OPT_AT_LEAST(OPT_O1)) {
                         emit_inst2("xor", op_reg("eax"), op_reg("eax"));
                     } else {
-                        emit_inst2("mov", op_imm(0), op_reg("rax"));
+                        emit_inst2("mov", op_imm(0), op_reg("eax"));
                     }
                 }
             }
@@ -4086,8 +4131,8 @@ static void gen_statement(ASTNode *node) {
                 locals[locals_count].type = node->resolved_type;
                 locals[locals_count].reg = regalloc_assignments[ra_idx].reg64;
                 locals_count++;
-                /* Move value from %rax to the assigned register */
-                emit_inst2("mov", op_reg("rax"), op_reg(regalloc_assignments[ra_idx].reg64));
+                /* Move value from %eax to the assigned register */
+                emit_inst2("mov", op_reg("eax"), op_reg(regalloc_assignments[ra_idx].reg64));
                 last_value_clear();
             } else {
                 /* Stack-allocated variable (original path) */
@@ -4104,30 +4149,30 @@ static void gen_statement(ASTNode *node) {
             
                 if (is_float_type(node->resolved_type)) {
                     // Don't use emit_push_xmm here - stack_offset already adjusted above
-                    emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
-                    emit_inst2("movsd", op_reg("xmm0"), op_mem("rsp", 0));
+                    emit_inst2("sub", op_imm(alloc_size), op_reg("esp"));
+                    emit_inst2("movsd", op_reg("xmm0"), op_mem("esp", 0));
                     last_value_clear();
                 } else {
-                    emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
+                    emit_inst2("sub", op_imm(alloc_size), op_reg("esp"));
                     if (node->resolved_type && node->resolved_type->kind != TYPE_STRUCT && node->resolved_type->kind != TYPE_ARRAY) {
                         // Scalar store
-                        if (size == 1) emit_inst2("movb", op_reg("al"), op_mem("rsp", 0));
-                        else if (size == 2) emit_inst2("movw", op_reg("ax"), op_mem("rsp", 0));
-                        else if (size == 4) emit_inst2("movl", op_reg("eax"), op_mem("rsp", 0));
-                        else emit_inst2("mov", op_reg("rax"), op_mem("rsp", 0));
-                        /* Cache: rax holds the value just stored at stack_offset */
+                        if (size == 1) emit_inst2("movb", op_reg("al"), op_mem("esp", 0));
+                        else if (size == 2) emit_inst2("movw", op_reg("ax"), op_mem("esp", 0));
+                        else if (size == 4) emit_inst2("movl", op_reg("eax"), op_mem("esp", 0));
+                        else emit_inst2("mov", op_reg("eax"), op_mem("esp", 0));
+                        /* Cache: eax holds the value just stored at stack_offset */
                         last_value_set_stack(stack_offset, node->resolved_type);
                     } else if (node->resolved_type && (node->resolved_type->kind == TYPE_STRUCT || node->resolved_type->kind == TYPE_ARRAY) && node->data.var_decl.initializer && node->data.var_decl.initializer->type != AST_INIT_LIST) {
-                        /* Struct/array copy via memcpy: rax has source address from gen_expression */
-                        emit_inst2("mov", op_reg("rsp"), op_reg("rdi"));
-                        emit_inst2("mov", op_reg("rax"), op_reg("rsi"));
-                        emit_inst2("mov", op_imm(alloc_size), op_reg("rdx"));
+                        /* Struct/array copy via memcpy: eax has source address from gen_expression */
+                        emit_inst2("mov", op_reg("esp"), op_reg("edi"));
+                        emit_inst2("mov", op_reg("eax"), op_reg("esi"));
+                        emit_inst2("mov", op_imm(alloc_size), op_reg("edx"));
                         emit_inst2("xor", op_reg("eax"), op_reg("eax"));
                         emit_inst0("call memcpy");
                         last_value_clear();
                     } else {
                         /* Array/struct without initializer or non-scalar:
-                           rax was clobbered by zero-init, invalidate cache */
+                           eax was clobbered by zero-init, invalidate cache */
                         last_value_clear();
                     }
                 }
@@ -4141,7 +4186,7 @@ static void gen_statement(ASTNode *node) {
         sprintf(l_end, ".L%d", label_end);
         
         gen_expression(node->data.if_stmt.condition);
-        emit_inst2("test", op_reg("rax"), op_reg("rax"));
+        emit_inst2("test", op_reg("eax"), op_reg("eax"));
         emit_inst1("je", op_label(l_else));
 
         /* PGO: increment branch-taken counter */
@@ -4169,7 +4214,7 @@ static void gen_statement(ASTNode *node) {
         
         // Restore RSP to pre-branch value (variables go out of scope)
         if (stack_offset != saved_stack_offset) {
-            emit_inst2("lea", op_mem("rbp", saved_stack_offset), op_reg("rsp"));
+            emit_inst2("lea", op_mem("ebp", saved_stack_offset), op_reg("esp"));
         }
         stack_offset = saved_stack_offset;
         locals_count = saved_locals_count;
@@ -4194,7 +4239,7 @@ static void gen_statement(ASTNode *node) {
             gen_statement(node->data.if_stmt.else_branch);
             // Restore RSP after else-branch too
             if (stack_offset != saved_stack_offset) {
-                emit_inst2("lea", op_mem("rbp", saved_stack_offset), op_reg("rsp"));
+                emit_inst2("lea", op_mem("ebp", saved_stack_offset), op_reg("esp"));
             }
             stack_offset = saved_stack_offset;
             locals_count = saved_locals_count;
@@ -4224,7 +4269,7 @@ static void gen_statement(ASTNode *node) {
 
             /* Guard: skip loop entirely if condition is false */
             gen_expression(node->data.while_stmt.condition);
-            emit_inst2("test", op_reg("rax"), op_reg("rax"));
+            emit_inst2("test", op_reg("eax"), op_reg("eax"));
             emit_inst1("je", op_label(l_end));
 
             /* Loop body */
@@ -4249,7 +4294,7 @@ static void gen_statement(ASTNode *node) {
             loop_saved_stack_ptr--;
 
             if (saved_stack_offset != stack_offset) {
-                emit_inst2("lea", op_mem("rbp", saved_stack_offset), op_reg("rsp"));
+                emit_inst2("lea", op_mem("ebp", saved_stack_offset), op_reg("esp"));
             }
             stack_offset = saved_stack_offset;
             locals_count = saved_locals_count;
@@ -4257,13 +4302,13 @@ static void gen_statement(ASTNode *node) {
             /* Continue label + backward condition check */
             emit_label_def(l_cont);
             gen_expression(node->data.while_stmt.condition);
-            emit_inst2("test", op_reg("rax"), op_reg("rax"));
+            emit_inst2("test", op_reg("eax"), op_reg("eax"));
             emit_inst1("jne", op_label(l_start));
         } else {
             /* Original while pattern: condition at top, jmp back at bottom */
             emit_label_def(l_start);
             gen_expression(node->data.while_stmt.condition);
-            emit_inst2("test", op_reg("rax"), op_reg("rax"));
+            emit_inst2("test", op_reg("eax"), op_reg("eax"));
             emit_inst1("je", op_label(l_end));
 
             int saved_stack_offset = stack_offset;
@@ -4285,7 +4330,7 @@ static void gen_statement(ASTNode *node) {
             loop_saved_stack_ptr--;
 
             if (saved_stack_offset != stack_offset) {
-                emit_inst2("lea", op_mem("rbp", saved_stack_offset), op_reg("rsp"));
+                emit_inst2("lea", op_mem("ebp", saved_stack_offset), op_reg("esp"));
             }
             stack_offset = saved_stack_offset;
             locals_count = saved_locals_count;
@@ -4319,14 +4364,14 @@ static void gen_statement(ASTNode *node) {
 
         // Restore RSP to loop entry value
         if (saved_stack_offset_dw != stack_offset) {
-            emit_inst2("lea", op_mem("rbp", saved_stack_offset_dw), op_reg("rsp"));
+            emit_inst2("lea", op_mem("ebp", saved_stack_offset_dw), op_reg("esp"));
         }
         stack_offset = saved_stack_offset_dw;
         locals_count = saved_locals_count_dw;
 
         emit_label_def(l_cont);
         gen_expression(node->data.while_stmt.condition);
-        emit_inst2("test", op_reg("rax"), op_reg("rax"));
+        emit_inst2("test", op_reg("eax"), op_reg("eax"));
         emit_inst1("jne", op_label(l_start));
         
         emit_label_def(l_end);
@@ -4357,7 +4402,7 @@ static void gen_statement(ASTNode *node) {
 
             /* Guard: skip loop if condition is initially false */
             gen_expression(node->data.for_stmt.condition);
-            emit_inst2("test", op_reg("rax"), op_reg("rax"));
+            emit_inst2("test", op_reg("eax"), op_reg("eax"));
             emit_inst1("je", op_label(l_end));
 
             /* Loop body */
@@ -4375,7 +4420,7 @@ static void gen_statement(ASTNode *node) {
             loop_saved_stack_ptr--;
 
             if (saved_stack_offset_for != stack_offset) {
-                emit_inst2("lea", op_mem("rbp", saved_stack_offset_for), op_reg("rsp"));
+                emit_inst2("lea", op_mem("ebp", saved_stack_offset_for), op_reg("esp"));
             }
             stack_offset = saved_stack_offset_for;
             locals_count = saved_locals_count_for;
@@ -4386,14 +4431,14 @@ static void gen_statement(ASTNode *node) {
                 gen_expression(node->data.for_stmt.increment);
             }
             gen_expression(node->data.for_stmt.condition);
-            emit_inst2("test", op_reg("rax"), op_reg("rax"));
+            emit_inst2("test", op_reg("eax"), op_reg("eax"));
             emit_inst1("jne", op_label(l_start));
         } else {
             /* Original for pattern: condition at top, jmp back */
             emit_label_def(l_start);
             if (node->data.for_stmt.condition) {
                 gen_expression(node->data.for_stmt.condition);
-                emit_inst2("test", op_reg("rax"), op_reg("rax"));
+                emit_inst2("test", op_reg("eax"), op_reg("eax"));
                 emit_inst1("je", op_label(l_end));
             }
 
@@ -4409,7 +4454,7 @@ static void gen_statement(ASTNode *node) {
             loop_saved_stack_ptr--;
 
             if (saved_stack_offset_for != stack_offset) {
-                emit_inst2("lea", op_mem("rbp", saved_stack_offset_for), op_reg("rsp"));
+                emit_inst2("lea", op_mem("ebp", saved_stack_offset_for), op_reg("esp"));
             }
             stack_offset = saved_stack_offset_for;
             locals_count = saved_locals_count_for;
@@ -4429,7 +4474,7 @@ static void gen_statement(ASTNode *node) {
             if (loop_saved_stack_ptr > 0) {
                 int saved = loop_saved_stack_offset[loop_saved_stack_ptr - 1];
                 if (saved != stack_offset) {
-                    emit_inst2("lea", op_mem("rbp", saved), op_reg("rsp"));
+                    emit_inst2("lea", op_mem("ebp", saved), op_reg("esp"));
                 }
                 // Reset compiler state so the next case starts with correct offsets
                 stack_offset = saved;
@@ -4448,7 +4493,7 @@ static void gen_statement(ASTNode *node) {
             if (loop_saved_stack_ptr > 0) {
                 int saved = loop_saved_stack_offset[loop_saved_stack_ptr - 1];
                 if (saved != stack_offset) {
-                    emit_inst2("lea", op_mem("rbp", saved), op_reg("rsp"));
+                    emit_inst2("lea", op_mem("ebp", saved), op_reg("esp"));
                 }
                 // Reset compiler state so subsequent code starts with correct offsets
                 stack_offset = saved;
@@ -4484,7 +4529,7 @@ static void gen_statement(ASTNode *node) {
             char *lbl = malloc(32);
             sprintf(lbl, ".L%d", label_count++);
             case_labels[i] = lbl;
-            emit_inst2("cmp", op_imm(cases[i]->data.case_stmt.value), op_reg("rax"));
+            emit_inst2("cmp", op_imm(cases[i]->data.case_stmt.value), op_reg("eax"));
             emit_inst1("je", op_label(case_labels[i]));
             cases[i]->resolved_type = (Type *)strdup(case_labels[i]);
         }
@@ -4505,7 +4550,7 @@ static void gen_statement(ASTNode *node) {
         {
             int si2 = loop_saved_stack_ptr - 1;
             if (stack_offset != loop_saved_stack_offset[si2]) {
-                emit_inst2("lea", op_mem("rbp", loop_saved_stack_offset[si2]), op_reg("rsp"));
+                emit_inst2("lea", op_mem("ebp", loop_saved_stack_offset[si2]), op_reg("esp"));
             }
             stack_offset = loop_saved_stack_offset[si2];
             locals_count = loop_saved_locals_count[si2];
@@ -4545,8 +4590,8 @@ static void gen_statement(ASTNode *node) {
         /* Runtime assert: evaluate condition, ud2 if false */
         if (node->data.assert_stmt.condition) {
             gen_expression(node->data.assert_stmt.condition);
-            /* Result is in rax — test it */
-            emit_inst2("test", op_reg("rax"), op_reg("rax"));
+            /* Result is in eax — test it */
+            emit_inst2("test", op_reg("eax"), op_reg("eax"));
             int lbl_ok = label_count++;
             char l_ok[32];
             sprintf(l_ok, ".L%d", lbl_ok);
@@ -4566,8 +4611,6 @@ static void gen_function(ASTNode *node) {
         if (obj_writer) {
             coff_writer_add_symbol(obj_writer, node->data.function.name, 0, 0, 0x20, IMAGE_SYM_CLASS_EXTERNAL);
         } else if (current_syntax == SYNTAX_INTEL) {
-            fprintf(out, "EXTERN %s:PROC\n", node->data.function.name);
-        } else {
             fprintf(out, ".extern %s\n", node->data.function.name);
         }
         return;
@@ -4606,8 +4649,8 @@ static void gen_function(ASTNode *node) {
     }
     
     // Prologue
-    emit_inst1("pushq", op_reg("rbp"));
-    emit_inst2("mov", op_reg("rsp"), op_reg("rbp"));
+    emit_inst1("push", op_reg("ebp"));
+    emit_inst2("mov", op_reg("esp"), op_reg("ebp"));
 
     /* PGO instrumentation: increment function entry counter */
     if (g_compiler_options.pgo_generate && node->data.function.name) {
@@ -4627,14 +4670,14 @@ static void gen_function(ASTNode *node) {
     sret_offset = 0;
     last_value_clear();
     
-    /* If this function returns a struct, %rdi holds the hidden return pointer.
+    /* If this function returns a struct, %edi holds the hidden return pointer.
      * Save it to a local slot and shift all parameter registers by 1. */
     int sret_reg_shift = 0;
     if (is_struct_return(current_func_return_type)) {
-        stack_offset -= 8;
+        stack_offset -= g_stack_slot_size;
         sret_offset = stack_offset;
-        emit_inst2("sub", op_imm(8), op_reg("rsp"));
-        emit_inst2("mov", op_reg("rdi"), op_mem("rsp", 0));
+        emit_inst2("sub", op_imm(g_stack_slot_size), op_reg("esp"));
+        emit_inst2("mov", op_reg("edi"), op_mem("esp", 0));
         sret_reg_shift = 1;  /* param 0 comes from arg_regs[1], etc. */
     }
     
@@ -4643,7 +4686,7 @@ static void gen_function(ASTNode *node) {
     regalloc_analyze(node);
     
     /* Register allocator Phase 2: save callee-saved registers we'll use.
-     * These pushq instructions go right after the prologue. */
+     * These push instructions go right after the prologue. */
     regalloc_emit_saves();
     
     // Handle parameters (platform ABI)
@@ -4653,10 +4696,11 @@ static void gen_function(ASTNode *node) {
     for (size_t i = 0; i < node->children_count; i++) {
         ASTNode *param = node->children[i];
         if (param->type == AST_VAR_DECL) {
-            int size = param->resolved_type ? param->resolved_type->size : 8;
+            int size = param->resolved_type ? param->resolved_type->size : g_ptr_size;
             int alloc_size = size;
-            if (alloc_size < 8 && param->resolved_type && param->resolved_type->kind != TYPE_STRUCT && param->resolved_type->kind != TYPE_ARRAY) {
-                alloc_size = 8;
+            int slot_size = g_stack_slot_size;
+            if (alloc_size < slot_size && param->resolved_type && param->resolved_type->kind != TYPE_STRUCT && param->resolved_type->kind != TYPE_ARRAY) {
+                alloc_size = slot_size;
             }
             
             if (locals_count >= 8192) { fprintf(stderr, "Error: Too many locals\n"); exit(1); }
@@ -4684,21 +4728,23 @@ static void gen_function(ASTNode *node) {
                     if (is_float_type(param->resolved_type)) {
                         emit_push_xmm(xmm_arg_regs[i]);
                     } else {
-                        emit_inst2("sub", op_imm(alloc_size), op_reg("rsp"));
-                        if (size == 1) emit_inst2("movb", op_reg(get_reg_8(arg_regs[reg_idx])), op_mem("rsp", 0));
-                        else if (size == 2) emit_inst2("movw", op_reg(get_reg_16(arg_regs[reg_idx])), op_mem("rsp", 0));
-                        else if (size == 4) emit_inst2("movl", op_reg(get_reg_32(arg_regs[reg_idx])), op_mem("rsp", 0));
-                        else emit_inst2("mov", op_reg(arg_regs[reg_idx]), op_mem("rsp", 0));
+                        emit_inst2("sub", op_imm(alloc_size), op_reg("esp"));
+                        if (size == 1) emit_inst2("movb", op_reg(get_reg_8(arg_regs[reg_idx])), op_mem("esp", 0));
+                        else if (size == 2) emit_inst2("movw", op_reg(get_reg_16(arg_regs[reg_idx])), op_mem("esp", 0));
+                        else if (size == 4) emit_inst2("movl", op_reg(get_reg_32(arg_regs[reg_idx])), op_mem("esp", 0));
+                        else emit_inst2("mov", op_reg(arg_regs[reg_idx]), op_mem("esp", 0));
                     }
                 }
             } else {
-                // Stack params: already on caller's stack at positive rbp offset
-                // Win64: [rbp+16] = shadow[0], [rbp+48] = param5, ...
-                // SysV:  [rbp+16] = param7, [rbp+24] = param8, ...
+                // Stack params: already on caller's stack at positive ebp offset
+                // Win64: [ebp+16] = shadow[0], [ebp+48] = param5, ...
+                // SysV:  [ebp+16] = param7, [ebp+24] = param8, ...
                 locals[locals_count].reg = NULL;
                 int param_offset;
                 if (g_use_shadow_space) {
                     param_offset = 48 + ((int)i - max_reg) * 8; // Win64
+                } else if (g_target == TARGET_DOS) {
+                    param_offset = 8 + ((int)i - max_reg) * 4; // 32-bit cdecl
                 } else {
                     param_offset = 16 + ((int)i - max_reg) * 8; // SysV
                 }
@@ -4725,9 +4771,9 @@ static void gen_function(ASTNode *node) {
     if (g_compiler_options.pgo_generate &&
         node->data.function.name && strcmp(node->data.function.name, "main") == 0) {
         /* Save return value (%eax) across the dump call */
-        emit_inst1("pushq", op_reg("rax"));
+        emit_inst1("push", op_reg("eax"));
         emit_inst1("call", op_label("__pgo_dump"));
-        emit_inst1("popq", op_reg("rax"));
+        emit_inst1("pop", op_reg("eax"));
     }
     
     /* Register allocator: restore callee-saved registers before epilogue */

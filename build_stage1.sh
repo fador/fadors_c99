@@ -38,6 +38,8 @@ SOURCES=(
     src/parser.c
     src/codegen.c
     src/arch_x86_64.c
+    src/arch_x86.c
+    src/dos_linker.c
     src/encoder.c
     src/coff_writer.c
     src/elf_writer.c
@@ -64,7 +66,7 @@ for src in "${SOURCES[@]}"; do
     obj_file="$STAGE1_DIR/${name}.o"
 
     echo -n "  Compiling $src ... "
-    if ! "$STAGE0" "$src" -S 2>/dev/null; then
+    if ! "$STAGE0" "$src" -S; then
         echo "FAIL (compiler error)"
         FAIL=1
         continue
@@ -81,7 +83,7 @@ for src in "${SOURCES[@]}"; do
     fi
 
     echo -n "assembling ... "
-    if ! as -o "$obj_file" "$asm_file" 2>/dev/null; then
+    if ! as -o "$obj_file" "$asm_file"; then
         echo "FAIL (assembler error)"
         FAIL=1
         continue
@@ -110,6 +112,20 @@ fi
 echo ""
 echo "=== Stage 1 build complete ==="
 echo "Binary: $STAGE1_BIN"
+echo ""
+
+# Assemble DOS library
+echo -n "Assembling DOS library (src/dos_lib.s) ... "
+if gcc -c -m32 -masm=intel -o build_linux/dos_lib.o src/dos_lib.s; then
+    objcopy -O pe-i386 build_linux/dos_lib.o build_linux/dos_lib.o
+    # Compile dos_libc.c using stage1 (stage0 segfaults on this file)
+    echo "Building dos_libc.o..."
+    "$STAGE1_BIN" src/dos_libc.c -c -o build_linux/dos_libc.o --target=dos
+    echo "OK"
+else
+    echo "FAIL"
+    exit 1
+fi
 echo ""
 
 # Quick smoke test

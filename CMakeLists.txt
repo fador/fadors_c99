@@ -30,6 +30,8 @@ set(SOURCES
     src/pe_linker.c
     src/optimizer.c
     src/ir.c
+    src/arch_x86.c
+    src/dos_linker.c
     src/pgo.c
 )
 

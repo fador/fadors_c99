@@ -1,4 +1,5 @@
 #define _CRT_SECURE_NO_WARNINGS
+#define _CRT_NONSTDC_NO_DEPRECATE
 #include <stdio.h>
 #include "lexer.h"
 #include "parser.h"
@@ -9,9 +10,11 @@
 #include "elf_writer.h"
 #include "linker.h"
 #include "pe_linker.h"
+#include "dos_linker.h"
 #include "types.h"
 #include "optimizer.h"
 #include "ir.h"
+#include "arch_x86.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -129,6 +132,10 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
     if (target == TARGET_WINDOWS) {
         preprocess_define("_WIN32", "1");
         preprocess_define("_WIN64", "1");
+    } else if (target == TARGET_DOS) {
+        preprocess_define("__MSDOS__", "1");
+        preprocess_define("__386__", "1");
+        preprocess_define("__I386__", "1");
     } else {
         preprocess_define("__linux__", "1");
         preprocess_define("__unix__", "1");
@@ -155,12 +162,13 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
     lexer_init(&lexer, preprocessed);
     current_parser = malloc(sizeof(Parser));
     parser_init(current_parser, &lexer);
-    types_set_target(target == TARGET_WINDOWS);
+    types_set_target(target == TARGET_WINDOWS, target == TARGET_DOS);
     ASTNode *program = parser_parse(current_parser);
 
     codegen_set_target(target);
     current_writer = malloc(sizeof(COFFWriter));
     coff_writer_init(current_writer);
+    if (target == TARGET_DOS) coff_writer_set_machine(current_writer, IMAGE_FILE_MACHINE_I386);
 
     /* Set debug source info when -g is active */
     if (g_compiler_options.debug_info) {
@@ -170,7 +178,15 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
     }
 
     codegen_set_writer(current_writer);
-    codegen_init(NULL);
+    
+    if (target == TARGET_DOS) {
+        arch_x86_set_target(target);
+        arch_x86_set_writer(current_writer);
+        arch_x86_init(NULL); // DOS uses 32-bit x86 backend
+    } else {
+        codegen_init(NULL); // x64 backend (default)
+    }
+
     optimize(program, g_compiler_options.opt_level);
 
     /* Build IR / CFG if optimization level >= O2 */
@@ -190,9 +206,13 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
         }
     }
 
-    codegen_generate(program);
+    if (target == TARGET_DOS) {
+        arch_x86_generate(program);
+    } else {
+        codegen_generate(program);
+    }
 
-    if (target == TARGET_WINDOWS)
+    if (target == TARGET_WINDOWS || target == TARGET_DOS)
         coff_writer_write(current_writer, obj_filename);
     else
         elf_writer_write(current_writer, obj_filename);
@@ -201,6 +221,29 @@ static int compile_c_to_obj(const char *source_filename, const char *obj_filenam
     free(current_writer);
     printf("  %s -> %s\n", source_filename, obj_filename);
     return 0;
+}
+
+// Helpers for path resolution
+static void get_executable_path(char *buf, size_t size) {
+#ifdef _WIN32
+    // GetModuleFileName(NULL, buf, (DWORD)size); // Need decl
+    buf[0] = '\0'; // unimplemented for now
+#else
+    long len = (long)readlink("/proc/self/exe", buf, size - 1);
+    if (len != -1) buf[len] = '\0';
+    else buf[0] = '\0';
+#endif
+}
+
+static void get_directory(char *buf, const char *path) {
+    strcpy(buf, path);
+    char *last_slash = strrchr(buf, '/');
+#ifdef _WIN32
+    char *last_back = strrchr(buf, '\\');
+    if (last_back > last_slash) last_slash = last_back;
+#endif
+    if (last_slash) *last_slash = '\0';
+    else buf[0] = '\0';
 }
 
 // ---------- CC mode: compile C source ----------
@@ -221,8 +264,30 @@ static int do_cc(int input_count, const char **input_files,
     if (stop == STOP_OBJ || stop == STOP_FULL) {
         char *obj_paths[64];
         int obj_count = 0;
+        if (target == TARGET_DOS) {
+            char exe_path[1024];
+            get_executable_path(exe_path, sizeof(exe_path));
+            char exe_dir[1024];
+            get_directory(exe_dir, exe_path);
+            char inc_path[1024];
+            // If running from build_linux/, include is ../include/msdos
+            sprintf(inc_path, "%s/../include/msdos", exe_dir);
+            preprocess_add_include_path(inc_path);
+            sprintf(inc_path, "%s/../include", exe_dir); // Add generic include
+            preprocess_add_include_path(inc_path);
+            
+            // Also try local Include
+            preprocess_add_include_path("include/msdos");
+            preprocess_add_include_path("include"); // Add generic include
+        }
 
         for (i = 0; i < input_count; i++) {
+            const char *ext = file_extension(input_files[i]);
+            if (strcmp(ext, ".o") == 0 || strcmp(ext, ".obj") == 0) {
+                 obj_paths[obj_count++] = strdup(input_files[i]);
+                 continue;
+            }
+            
             char out_base[256];
             strip_extension(out_base, input_files[i], sizeof(out_base));
 
@@ -275,6 +340,50 @@ static int do_cc(int input_count, const char **input_files,
             rc = linker_link(lnk, exe_filename);
             linker_free(lnk);
             if (rc != 0) printf("Error: ELF linking failed.\n");
+        } else if (target == TARGET_DOS) {
+            DosLinker *dlnk = dos_linker_new();
+            
+            // Auto-link dos_lib.o
+            char exe_path[1024];
+            get_executable_path(exe_path, sizeof(exe_path));
+            char exe_dir[1024];
+            get_directory(exe_dir, exe_path);
+            char lib_path[1024];
+            sprintf(lib_path, "%s/dos_lib.o", exe_dir);
+            
+            // Check if it exists
+            FILE *flib = fopen(lib_path, "rb");
+            if (flib) {
+                fclose(flib);
+                dos_linker_add_object_file(dlnk, lib_path);
+            } else {
+                // Try relative to CWD if not found in exe dir
+                if (fopen("dos_lib.o", "rb")) {
+                     dos_linker_add_object_file(dlnk, "dos_lib.o");
+                }
+            }
+
+            // Auto-link dos_libc.o
+            sprintf(lib_path, "%s/dos_libc.o", exe_dir);
+            flib = fopen(lib_path, "rb");
+            if (flib) {
+                fclose(flib);
+                dos_linker_add_object_file(dlnk, lib_path);
+            } else {
+                if (fopen("dos_libc.o", "rb")) {
+                     dos_linker_add_object_file(dlnk, "dos_libc.o");
+                }
+            }
+            
+            for (i = 0; i < obj_count; i++)
+                dos_linker_add_object_file(dlnk, obj_paths[i]);
+            for (i = 0; i < libpath_count; i++)
+                dos_linker_add_lib_path(dlnk, libpaths[i]);
+            for (i = 0; i < lib_count; i++)
+                dos_linker_add_library(dlnk, libraries[i]);
+            rc = dos_linker_link(dlnk, exe_filename);
+            dos_linker_free(dlnk);
+            if (rc != 0) printf("Error: DOS linking failed.\n");
         } else {
             /* Windows: use custom PE linker (handles libraries too) */
             PELinker *plnk = pe_linker_new();
@@ -314,6 +423,14 @@ static int do_cc(int input_count, const char **input_files,
     if (target == TARGET_WINDOWS) {
         preprocess_define("_WIN32", "1");
         preprocess_define("_WIN64", "1");
+    } else if (target == TARGET_DOS) {
+        preprocess_define("__MSDOS__", "1");
+        preprocess_define("__386__", "1");
+        preprocess_define("__I386__", "1");
+    } else if (target == TARGET_DOS) {
+        preprocess_define("__MSDOS__", "1");
+        preprocess_define("__386__", "1");
+        preprocess_define("__I386__", "1");
     } else {
         preprocess_define("__linux__", "1");
         preprocess_define("__unix__", "1");
@@ -342,7 +459,7 @@ static int do_cc(int input_count, const char **input_files,
     current_parser = malloc(sizeof(Parser));
     parser_init(current_parser, &lexer);
 
-    types_set_target(target == TARGET_WINDOWS);
+    types_set_target(target == TARGET_WINDOWS, target == TARGET_DOS);
     printf("Parsing...\n"); fflush(stdout);
     ASTNode *program = parser_parse(current_parser);
     printf("Parsing complete.\n");
@@ -380,7 +497,11 @@ static int do_cc(int input_count, const char **input_files,
         return 1;
     }
 
-    codegen_init(asm_out);
+    if (target == TARGET_DOS) {
+        arch_x86_set_target(target);
+        arch_x86_init(asm_out);
+    } else
+        codegen_init(asm_out);
     optimize(program, g_compiler_options.opt_level);
 
     /* Build IR / CFG if optimization level >= O2 */
@@ -400,7 +521,10 @@ static int do_cc(int input_count, const char **input_files,
         }
     }
 
-    codegen_generate(program);
+    if (target == TARGET_DOS)
+        arch_x86_generate(program);
+    else
+        codegen_generate(program);
     fclose(asm_out);
     printf("Generated: %s\n", asm_filename);
 
@@ -469,6 +593,35 @@ static int do_link(int obj_count, const char **obj_files, const char *output_nam
             strcpy(exe_filename, "a.out");
     }
 
+    if (target == TARGET_DOS) {
+        DosLinker *dlnk = dos_linker_new();
+        int i;
+        for (i = 0; i < obj_count; i++)
+            dos_linker_add_object_file(dlnk, obj_files[i]);
+        for (i = 0; i < libpath_count; i++)
+            dos_linker_add_lib_path(dlnk, libpaths[i]);
+        for (i = 0; i < lib_count; i++)
+            dos_linker_add_library(dlnk, libraries[i]);
+        int rc = dos_linker_link(dlnk, exe_filename);
+        dos_linker_free(dlnk);
+        return rc;
+    }
+
+    if (target == TARGET_DOS) {
+        /* Use our custom DOS linker */
+        DosLinker *dlnk = dos_linker_new();
+        int i;
+        for (i = 0; i < obj_count; i++)
+            dos_linker_add_object_file(dlnk, obj_files[i]);
+        for (i = 0; i < libpath_count; i++)
+            dos_linker_add_lib_path(dlnk, libpaths[i]);
+        for (i = 0; i < lib_count; i++)
+            dos_linker_add_library(dlnk, libraries[i]);
+        int rc = dos_linker_link(dlnk, exe_filename);
+        dos_linker_free(dlnk);
+        return rc;
+    }
+
     if (target == TARGET_LINUX) {
         /* Use our custom ELF linker */
         Linker *lnk = linker_new();
@@ -502,6 +655,11 @@ static int do_link(int obj_count, const char **obj_files, const char *output_nam
     }
 }
 
+// Global target platform
+TargetPlatform g_target = TARGET_LINUX;
+
+
+
 // ---------- main ----------
 int main(int argc, char **argv) {
     if (argc < 2) {
@@ -511,12 +669,6 @@ int main(int argc, char **argv) {
 
     ToolMode mode = MODE_AUTO;
     StopAfter stop = STOP_FULL;
-    TargetPlatform target =
-#ifdef _WIN32
-        TARGET_WINDOWS;
-#else
-        TARGET_LINUX;
-#endif
     int use_masm = 0;
     const char *output_name = NULL;
 
@@ -558,15 +710,17 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--masm") == 0) {
             use_masm = 1;
-            target = TARGET_WINDOWS;
+            g_target = TARGET_WINDOWS;
             continue;
         }
         if (strncmp(argv[i], "--target=", 9) == 0) {
             const char *t = argv[i] + 9;
             if (strcmp(t, "linux") == 0)
-                target = TARGET_LINUX;
+                g_target = TARGET_LINUX;
             else if (strcmp(t, "windows") == 0 || strcmp(t, "win64") == 0 || strcmp(t, "win") == 0)
-                target = TARGET_WINDOWS;
+                g_target = TARGET_WINDOWS;
+            else if (strcmp(t, "dos") == 0 || strcmp(t, "msdos") == 0)
+                g_target = TARGET_DOS;
             else {
                 printf("Unknown target: %s\n", t);
                 return 1;
@@ -683,20 +837,20 @@ int main(int argc, char **argv) {
 
     // Intel/MASM implies Windows target & Intel syntax
     if (use_masm) {
-        target = TARGET_WINDOWS;
+        g_target = TARGET_WINDOWS;
     }
 
     switch (mode) {
     case MODE_CC:
-        return do_cc(input_count, input_files, output_name, stop, target, use_masm,
+        return do_cc(input_count, input_files, output_name, stop, g_target, use_masm,
                      lib_count, libraries, libpath_count, libpaths,
                      define_count, define_names, define_values);
 
     case MODE_AS:
-        return do_as(input_files[0], output_name, target);
+        return do_as(input_files[0], output_name, g_target);
 
     case MODE_LINK:
-        return do_link(input_count, input_files, output_name, target,
+        return do_link(input_count, input_files, output_name, g_target,
                        lib_count, libraries, libpath_count, libpaths);
 
     default:

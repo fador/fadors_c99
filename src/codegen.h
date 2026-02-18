@@ -13,7 +13,8 @@ typedef enum {
 
 typedef enum {
     TARGET_LINUX,
-    TARGET_WINDOWS
+    TARGET_WINDOWS,
+    TARGET_DOS
 } TargetPlatform;
 
 // Optimization level
@@ -56,6 +57,7 @@ typedef struct {
 
 // Global compiler options (set once from CLI, read by all pipeline stages)
 extern CompilerOptions g_compiler_options;
+extern TargetPlatform g_target;
 
 void codegen_init(FILE *output);
 void codegen_set_syntax(CodegenSyntax syntax);
