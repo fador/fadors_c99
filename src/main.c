@@ -639,6 +639,11 @@ static int do_link(int obj_count, const char **obj_files, const char *output_nam
     }
 }
 
+// Global target platform
+TargetPlatform g_target = TARGET_LINUX;
+
+
+
 // ---------- main ----------
 int main(int argc, char **argv) {
     if (argc < 2) {
@@ -648,12 +653,6 @@ int main(int argc, char **argv) {
 
     ToolMode mode = MODE_AUTO;
     StopAfter stop = STOP_FULL;
-    TargetPlatform target =
-#ifdef _WIN32
-        TARGET_WINDOWS;
-#else
-        TARGET_LINUX;
-#endif
     int use_masm = 0;
     const char *output_name = NULL;
 
@@ -695,17 +694,17 @@ int main(int argc, char **argv) {
         }
         if (strcmp(argv[i], "--masm") == 0) {
             use_masm = 1;
-            target = TARGET_WINDOWS;
+            g_target = TARGET_WINDOWS;
             continue;
         }
         if (strncmp(argv[i], "--target=", 9) == 0) {
             const char *t = argv[i] + 9;
             if (strcmp(t, "linux") == 0)
-                target = TARGET_LINUX;
+                g_target = TARGET_LINUX;
             else if (strcmp(t, "windows") == 0 || strcmp(t, "win64") == 0 || strcmp(t, "win") == 0)
-                target = TARGET_WINDOWS;
+                g_target = TARGET_WINDOWS;
             else if (strcmp(t, "dos") == 0 || strcmp(t, "msdos") == 0)
-                target = TARGET_DOS;
+                g_target = TARGET_DOS;
             else {
                 printf("Unknown target: %s\n", t);
                 return 1;
@@ -822,20 +821,20 @@ int main(int argc, char **argv) {
 
     // Intel/MASM implies Windows target & Intel syntax
     if (use_masm) {
-        target = TARGET_WINDOWS;
+        g_target = TARGET_WINDOWS;
     }
 
     switch (mode) {
     case MODE_CC:
-        return do_cc(input_count, input_files, output_name, stop, target, use_masm,
+        return do_cc(input_count, input_files, output_name, stop, g_target, use_masm,
                      lib_count, libraries, libpath_count, libpaths,
                      define_count, define_names, define_values);
 
     case MODE_AS:
-        return do_as(input_files[0], output_name, target);
+        return do_as(input_files[0], output_name, g_target);
 
     case MODE_LINK:
-        return do_link(input_count, input_files, output_name, target,
+        return do_link(input_count, input_files, output_name, g_target,
                        lib_count, libraries, libpath_count, libpaths);
 
     default:

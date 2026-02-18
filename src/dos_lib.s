@@ -1,5 +1,5 @@
 .intel_syntax noprefix
-.code32
+.code16
 
 .global printf
 .global puts
@@ -31,7 +31,7 @@ putchar:
     int 0x21
     mov eax, [ebp+8]   /* Return the char written */
     pop ebp
-    ret
+    .byte 0x66, 0xc3
 
 /* -----------------------------------------------------------------------------
    puts(const char *s)
@@ -70,7 +70,7 @@ puts_done:
     pop ebx
     pop esi
     pop ebp
-    ret
+    .byte 0x66, 0xc3
 
 /* -----------------------------------------------------------------------------
    printf(const char *format, ...)
@@ -175,7 +175,7 @@ printf_done:
     pop ebx
     pop esi
     pop ebp
-    ret
+    .byte 0x66, 0xc3
 
 /* -----------------------------------------------------------------------------
    Helper: print_string_no_nl(char *s)

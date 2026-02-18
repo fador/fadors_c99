@@ -22,9 +22,8 @@ static void emit_reloc(Buffer *buf, const char *label, uint32_t offset) {
     if (sym_idx < 0) {
         sym_idx = coff_writer_add_symbol(encoder_writer, label, 0, 0, 0, IMAGE_SYM_CLASS_EXTERNAL);
     }
-    // IMAGE_REL_AMD64_REL32 is 0x0004
-    // IMAGE_REL_I386_REL32 is 0x0014
-    uint16_t type = (encoder_bits == 32) ? 0x0014 : 0x0004;
+    // Use abstract relocation types; specific types are handled by coff_writer based on machine type.
+    uint16_t type = COFF_RELOC_RELATIVE;
     coff_writer_add_reloc(encoder_writer, offset, (uint32_t)sym_idx, type, 1 /* .text */);
 }
 
@@ -34,12 +33,8 @@ static void emit_reloc_abs(Buffer *buf, const char *label, uint32_t offset) {
     if (sym_idx < 0) {
         sym_idx = coff_writer_add_symbol(encoder_writer, label, 0, 0, 0, IMAGE_SYM_CLASS_EXTERNAL);
     }
-    // IMAGE_REL_I386_DIR32 is 0x0006
-    // IMAGE_REL_AMD64_ADDR32 is 0x0002
-    // IMAGE_REL_I386_REL16 is 0x0002? No, standard COFF is 32-bit.
-    // We are generating 32-bit code in 16-bit mode, so we still use 32-bit relocs?
-    // The linker needs to handle it. For now, use 32-bit reloc types.
-    uint16_t type = (encoder_bits == 32 || encoder_bits == 16) ? 0x0006 : 0x0002;
+    // Use abstract relocation types
+    uint16_t type = COFF_RELOC_ABSOLUTE;
     coff_writer_add_reloc(encoder_writer, offset, (uint32_t)sym_idx, type, 1 /* .text */);
 }
 

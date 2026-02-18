@@ -285,18 +285,26 @@ int dos_linker_link(DosLinker *l, const char *output_path) {
         memcpy(&val32, buf + patch_offset, 4);
         
         /* IMAGE_REL_I386_DIR32 (0x0006) */
+        /* IMAGE_REL_I386_DIR32 (0x0006) */
         if (r->type == 0x0006) {
-            /* Absolute: S + A */
-            val32 += (uint32_t)sym_val;
+            /* Absolute: S + A - 64 (MZ Header Size) */
+            /* DOS loads the executable after the 64-byte header */
+            val32 += (uint32_t)sym_val - 64;
             memcpy(buf + patch_offset, &val32, 4);
         }
         /* IMAGE_REL_I386_REL32 (0x0014) */
         else if (r->type == 0x0014) {
             /* Relative: S + A - P */
             /* P = virtual address of reloc itself */
+            /* Relative offsets are unaffected by linear shift */
             uint64_t P = base_off + patch_offset;
-            val32 += (uint32_t)(sym_val - (P + 4)); /* +4 for relative correction? standard x86 is relative to END of instruction */
+            int32_t val32_signed = (int32_t)val32; // Existing addend
+            int32_t rel_val = (int32_t)(sym_val - (P + 4)) + val32_signed;
+            
+            val32 = (uint32_t)rel_val;
             memcpy(buf + patch_offset, &val32, 4);
+        } else {
+             // printf("DEBUG: Unknown Reloc %d at %lx\n", r->type, (long)(base_off + patch_offset));
         }
     }
     

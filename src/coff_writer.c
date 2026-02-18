@@ -131,6 +131,7 @@ void coff_writer_add_reloc(COFFWriter *w, uint32_t virtual_address, uint32_t sym
         }
     }
 
+
     if (section == 1) {
         if (w->text_relocs_count >= w->text_relocs_capacity) {
             w->text_relocs_capacity *= 2;

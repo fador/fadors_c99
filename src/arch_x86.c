@@ -311,6 +311,7 @@ static int string_literals_count = 0;
 
 void arch_x86_set_writer(COFFWriter *writer) {
     obj_writer = writer;
+    coff_writer_set_machine(writer, IMAGE_FILE_MACHINE_I386);
     encoder_set_writer(writer);
 }
 
