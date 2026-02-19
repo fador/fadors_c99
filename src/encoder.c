@@ -361,6 +361,31 @@ void encode_inst1(Buffer *buf, const char *mnemonic, Operand *op1) {
 void encode_inst2(Buffer *buf, const char *short_mnemonic, Operand *ops_src, Operand *ops_dest) {
     char mnemonic[64];
     strncpy(mnemonic, short_mnemonic, 63); mnemonic[63] = '\0';
+
+    /* Strip AT&T size suffixes (l, w, b, q) from arithmetic/mov mnemonics.
+     * The operand size is already determined from register operands. */
+    {
+        int mlen = (int)strlen(mnemonic);
+        if (mlen > 1) {
+            char last = mnemonic[mlen - 1];
+            if (last == 'l' || last == 'w' || last == 'b' || last == 'q') {
+                /* Don't strip from known short mnemonics like "call", "jl", "shl", etc. */
+                const char *base = mnemonic;
+                if (strcmp(base, "subl") == 0 || strcmp(base, "addl") == 0 ||
+                    strcmp(base, "cmpl") == 0 || strcmp(base, "andl") == 0 ||
+                    strcmp(base, "orl") == 0  || strcmp(base, "xorl") == 0 ||
+                    strcmp(base, "testl") == 0 || strcmp(base, "imull") == 0 ||
+                    strcmp(base, "shll") == 0 || strcmp(base, "shrl") == 0 ||
+                    strcmp(base, "sarl") == 0 ||
+                    strcmp(base, "subq") == 0 || strcmp(base, "addq") == 0 ||
+                    strcmp(base, "cmpq") == 0 || strcmp(base, "andq") == 0 ||
+                    strcmp(base, "orq") == 0  || strcmp(base, "xorq") == 0 ||
+                    strcmp(base, "testq") == 0) {
+                    mnemonic[mlen - 1] = '\0';
+                }
+            }
+        }
+    }
     
     int size = 0;
     if (ops_dest->type == OP_REG) size = get_reg_size(ops_dest->data.reg);
@@ -535,6 +560,57 @@ void encode_inst2(Buffer *buf, const char *short_mnemonic, Operand *ops_src, Ope
             emit_rex(buf, size == 64, s >= 8, 0, d >= 8);
             buffer_write_byte(buf, (size == 1) ? 0x84 : 0x85);
             emit_modrm(buf, 3, s, d);
+        }
+    } else if (strcmp(mnemonic, "shl") == 0 || strcmp(mnemonic, "shr") == 0 || strcmp(mnemonic, "sar") == 0) {
+        /* shl/shr/sar imm8, reg: C1 /ext ib */
+        int ext = 4; /* shl */
+        if (strcmp(mnemonic, "shr") == 0) ext = 5;
+        else if (strcmp(mnemonic, "sar") == 0) ext = 7;
+        if (ops_src->type == OP_IMM && ops_dest->type == OP_REG) {
+            int d = get_reg_id(ops_dest->data.reg);
+            emit_prefixes(buf, size, addr_size);
+            emit_rex(buf, size == 64, 0, 0, d >= 8);
+            if (ops_src->data.imm == 1) {
+                buffer_write_byte(buf, 0xD1);
+                emit_modrm(buf, 3, ext, d);
+            } else {
+                buffer_write_byte(buf, 0xC1);
+                emit_modrm(buf, 3, ext, d);
+                buffer_write_byte(buf, (uint8_t)ops_src->data.imm);
+            }
+        } else if (ops_src->type == OP_REG && ops_dest->type == OP_REG &&
+                   (strcmp(ops_src->data.reg, "cl") == 0 || strcmp(ops_src->data.reg, "ecx") == 0)) {
+            /* shl %cl, %reg: D3 /ext */
+            int d = get_reg_id(ops_dest->data.reg);
+            emit_prefixes(buf, size, addr_size);
+            emit_rex(buf, size == 64, 0, 0, d >= 8);
+            buffer_write_byte(buf, 0xD3);
+            emit_modrm(buf, 3, ext, d);
+        }
+    } else if (strcmp(mnemonic, "imul") == 0) {
+        if (ops_src->type == OP_IMM && ops_dest->type == OP_REG) {
+            /* imul $imm, %reg → 3-operand form: 6B /r ib or 69 /r id */
+            int d = get_reg_id(ops_dest->data.reg);
+            emit_prefixes(buf, size, addr_size);
+            emit_rex(buf, size == 64, d >= 8, 0, d >= 8);
+            if (ops_src->data.imm >= -128 && ops_src->data.imm <= 127) {
+                buffer_write_byte(buf, 0x6B);
+                emit_modrm(buf, 3, d, d); /* same reg for src and dst */
+                buffer_write_byte(buf, (uint8_t)ops_src->data.imm);
+            } else {
+                buffer_write_byte(buf, 0x69);
+                emit_modrm(buf, 3, d, d);
+                buffer_write_dword(buf, (uint32_t)ops_src->data.imm);
+            }
+        } else if (ops_src->type == OP_REG && ops_dest->type == OP_REG) {
+            /* imul %src, %dst: 0F AF /r */
+            int s = get_reg_id(ops_src->data.reg);
+            int d = get_reg_id(ops_dest->data.reg);
+            emit_prefixes(buf, size, addr_size);
+            emit_rex(buf, size == 64, d >= 8, 0, s >= 8);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, 0xAF);
+            emit_modrm(buf, 3, d, s);
         }
     } else if (strcmp(mnemonic, "lea") == 0) {
         if (ops_src->type == OP_MEM && ops_dest->type == OP_REG) {
