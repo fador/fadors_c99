@@ -90,6 +90,23 @@ static void parse_op(AsContext *ctx, Operand *op) {
             char *imm_str = get_token_on_line(ctx);
             if (imm_str) { op->data.imm = strtoll(imm_str, NULL, 0); free(imm_str); }
         }
+        skip_whitespace_on_line(ctx);
+        while (ctx->input[ctx->pos] == '+' || ctx->input[ctx->pos] == '-') {
+            char op_char = ctx->input[ctx->pos++];
+            skip_whitespace_on_line(ctx);
+            long long right_val = 0;
+            if (ctx->input[ctx->pos] == '\'') {
+                ctx->pos++;
+                right_val = ctx->input[ctx->pos++];
+                if (ctx->input[ctx->pos] == '\'') ctx->pos++;
+            } else {
+                char *imm_str = get_token_on_line(ctx);
+                if (imm_str) { right_val = strtoll(imm_str, NULL, 0); free(imm_str); }
+            }
+            if (op_char == '+') op->data.imm += right_val;
+            else op->data.imm -= right_val;
+            skip_whitespace_on_line(ctx);
+        }
     } else {
         char *name = get_token_on_line(ctx);
         if (!name) return;

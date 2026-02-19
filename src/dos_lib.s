@@ -293,7 +293,10 @@ _dos_open:
     mov eax, [ebp+12]   /* mode: 0=read, 1=write, 2=rw */
     mov ah, 0x3D        /* DOS Open File */
     int 0x21
-    jnc dos_open_ok
+    jc dos_open_err
+    movzx eax, ax
+    jmp dos_open_ok
+dos_open_err:
     mov eax, -1
 dos_open_ok:
     pop ebx
@@ -311,7 +314,10 @@ _dos_creat:
     mov ecx, [ebp+12]   /* attributes */
     mov ah, 0x3C        /* DOS Create File */
     int 0x21
-    jnc dos_creat_ok
+    jc dos_creat_err
+    movzx eax, ax
+    jmp dos_creat_ok
+dos_creat_err:
     mov eax, -1
 dos_creat_ok:
     pop ebx
@@ -330,7 +336,10 @@ _dos_read:
     mov ecx, [ebp+16]   /* count */
     mov ah, 0x3F        /* DOS Read File */
     int 0x21
-    jnc dos_read_ok
+    jc dos_read_err
+    movzx eax, ax
+    jmp dos_read_ok
+dos_read_err:
     mov eax, -1
 dos_read_ok:
     pop ebx
@@ -349,7 +358,10 @@ _dos_write:
     mov ecx, [ebp+16]   /* count */
     mov ah, 0x40        /* DOS Write File */
     int 0x21
-    jnc dos_write_ok
+    jc dos_write_err
+    movzx eax, ax
+    jmp dos_write_ok
+dos_write_err:
     mov eax, -1
 dos_write_ok:
     pop ebx
@@ -389,7 +401,12 @@ _dos_lseek:
     mov eax, [ebp+16]   /* origin */
     mov ah, 0x42        /* DOS Seek File */
     int 0x21
-    jnc dos_lseek_ok
+    jc dos_lseek_err
+    shl edx, 16
+    mov dx, ax
+    mov eax, edx
+    jmp dos_lseek_ok
+dos_lseek_err:
     mov eax, -1
 dos_lseek_ok:
     pop ebx
