@@ -48,6 +48,7 @@ void *malloc(size_t size) {
     
     BlockHeader *curr = free_list;
     // printf("DEBUG: malloc %d, free_list=%x heap=%x\n", size, (int)free_list, (int)heap_memory);
+    printf("DEBUG: malloc %d, free_list=%x heap=%x\n", size, (int)free_list, (int)heap_memory);
     BlockHeader *prev = NULL;
     
     while (curr) {
@@ -108,6 +109,17 @@ void *realloc(void *ptr, size_t size) {
 // -----------------------------------------------------------------------------
 // File I/O
 // -----------------------------------------------------------------------------
+
+void dos_libc_init() {
+    // Determine heap size at runtime or just clear the static array
+    // We can't memset the whole heap if HEAP_SIZE is large and we are on stack? 
+    // No, heap_memory is static global.
+    memset(heap_memory, 0, HEAP_SIZE);
+    free_list = NULL;
+    
+    memset(file_pool, 0, sizeof(file_pool));
+    _init_stdio();
+}
 
 // Pre-allocated FILE objects
 static FILE file_pool[20];

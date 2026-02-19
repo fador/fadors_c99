@@ -11,6 +11,7 @@ typedef enum {
     OP_IMM,
     OP_MEM,
     OP_LABEL,
+    OP_MEM_LABEL,
     OP_MEM_SIB
 } OperandType;
 

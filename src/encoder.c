@@ -389,6 +389,34 @@ void encode_inst2(Buffer *buf, const char *short_mnemonic, Operand *ops_src, Ope
                     else buffer_write_dword(buf, (uint32_t)ops_src->data.imm);
                 }
             }
+        } else if (ops_src->type == OP_MEM_LABEL && ops_dest->type == OP_REG) {
+             /* mov reg, [label] — load VALUE from memory at label address */
+             int reg = get_reg_id(ops_dest->data.reg);
+             emit_prefixes(buf, size, 4); /* address is always 32-bit for labels */
+             emit_rex(buf, size == 64, reg >= 8, 0, 0);
+             if (reg == 0 && (size == 4 || size == 32)) {
+                 /* eax shortcut: opcode A1 */
+                 buffer_write_byte(buf, (size == 1) ? 0xA0 : 0xA1);
+             } else {
+                 buffer_write_byte(buf, (size == 1) ? 0x8A : 0x8B);
+                 emit_modrm(buf, 0, reg, 5); /* mod=00, rm=101 → disp32 */
+             }
+             emit_reloc_abs(buf, ops_src->data.label, (uint32_t)buf->size);
+             buffer_write_dword(buf, 0);
+        } else if (ops_src->type == OP_REG && ops_dest->type == OP_MEM_LABEL) {
+             /* mov [label], reg — store VALUE to memory at label address */
+             int reg = get_reg_id(ops_src->data.reg);
+             emit_prefixes(buf, size, 4); /* address is always 32-bit for labels */
+             emit_rex(buf, size == 64, reg >= 8, 0, 0);
+             if (reg == 0 && (size == 4 || size == 32)) {
+                 /* eax shortcut: opcode A3 */
+                 buffer_write_byte(buf, (size == 1) ? 0xA2 : 0xA3);
+             } else {
+                 buffer_write_byte(buf, (size == 1) ? 0x88 : 0x89);
+                 emit_modrm(buf, 0, reg, 5); /* mod=00, rm=101 → disp32 */
+             }
+             emit_reloc_abs(buf, ops_dest->data.label, (uint32_t)buf->size);
+             buffer_write_dword(buf, 0);
         } else if (ops_src->type == OP_REG && ops_dest->type == OP_REG) {
             int s = get_reg_id(ops_src->data.reg);
             int d = get_reg_id(ops_dest->data.reg);
@@ -431,6 +459,37 @@ void encode_inst2(Buffer *buf, const char *short_mnemonic, Operand *ops_src, Ope
             if (size == 1) buffer_write_byte(buf, (uint8_t)ops_src->data.imm);
             else if (size == 2) buffer_write_word(buf, (uint16_t)ops_src->data.imm);
             else buffer_write_dword(buf, (uint32_t)ops_src->data.imm);
+         }
+    } else if (strcmp(mnemonic, "movzbl") == 0 || strcmp(mnemonic, "movzwl") == 0) {
+        /* movzbl: 0F B6 /r  (zero-extend byte to dword)
+         * movzwl: 0F B7 /r  (zero-extend word to dword) */
+        int is_byte = (strcmp(mnemonic, "movzbl") == 0);
+        if (ops_src->type == OP_REG && ops_dest->type == OP_REG) {
+            int s = get_reg_id(ops_src->data.reg);
+            int d = get_reg_id(ops_dest->data.reg);
+            emit_prefixes(buf, 4, addr_size); /* result is always 32-bit */
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, is_byte ? 0xB6 : 0xB7);
+            emit_modrm(buf, 3, d, s);
+        } else if (ops_src->type == OP_MEM && ops_dest->type == OP_REG) {
+            int s = get_reg_id(ops_src->data.mem.base);
+            int d = get_reg_id(ops_dest->data.reg);
+            emit_prefixes(buf, 4, addr_size);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, is_byte ? 0xB6 : 0xB7);
+            if (ops_src->data.mem.offset == 0 && (s & 7) != 5) emit_modrm(buf, 0, d, s);
+            else if (ops_src->data.mem.offset >= -128 && ops_src->data.mem.offset <= 127) {
+                emit_modrm(buf, 1, d, s);
+                buffer_write_byte(buf, (int8_t)ops_src->data.mem.offset);
+            } else { emit_modrm(buf, 2, d, s); buffer_write_dword(buf, ops_src->data.mem.offset); }
+        } else if (ops_src->type == OP_MEM_LABEL && ops_dest->type == OP_REG) {
+            int d = get_reg_id(ops_dest->data.reg);
+            emit_prefixes(buf, 4, 4);
+            buffer_write_byte(buf, 0x0F);
+            buffer_write_byte(buf, is_byte ? 0xB6 : 0xB7);
+            emit_modrm(buf, 0, d, 5); /* disp32 */
+            emit_reloc_abs(buf, ops_src->data.label, (uint32_t)buf->size);
+            buffer_write_dword(buf, 0);
         }
     } else if (strcmp(mnemonic, "xor") == 0 || strcmp(mnemonic, "and") == 0 || strcmp(mnemonic, "or") == 0 || strcmp(mnemonic, "add") == 0 || strcmp(mnemonic, "sub") == 0 || strcmp(mnemonic, "cmp") == 0) {
         uint8_t base_op = 0;
@@ -489,7 +548,7 @@ void encode_inst2(Buffer *buf, const char *short_mnemonic, Operand *ops_src, Ope
                 emit_modrm(buf, 1, d, s);
                 buffer_write_byte(buf, (int8_t)ops_src->data.mem.offset);
             } else { emit_modrm(buf, 2, d, s); buffer_write_dword(buf, ops_src->data.mem.offset); }
-        } else if (ops_src->type == OP_LABEL && ops_dest->type == OP_REG) {
+        } else if ((ops_src->type == OP_LABEL || ops_src->type == OP_MEM_LABEL) && ops_dest->type == OP_REG) {
             int reg = get_reg_id(ops_dest->data.reg);
             emit_prefixes(buf, size, addr_size);
             emit_rex(buf, size == 64, 0, 0, reg >= 8);

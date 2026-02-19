@@ -13,18 +13,36 @@ static const unsigned char dos_stub[] = {
     /* 0x3C */ 0x80, 0x00, 0x00, 0x00, /* e_lfanew = 0x80 */
     
     /* 0x40 (64) Code Starts */
+    /* Segments */
     0x0E, 0x1F, 0x8C, 0xC8, 0x8E, 0xD0, 
-    /* 6-8: XOR ESP, ESP (66 31 E4) */
+    
+    /* Zero BSS Loop: offset 64+6 = 70 */
+    /* mov edi, BSS_START (offset +2 = 72) */
+    0x66, 0xBF, 0x00, 0x00, 0x00, 0x00, 
+    /* mov ecx, BSS_SIZE  (offset +8 = 78) */
+    0x66, 0xB9, 0x00, 0x00, 0x00, 0x00,
+    /* xor eax, eax */
+    0x66, 0x31, 0xC0,
+    /* rep stosb addr32 */ 
+    0x67, 0xF3, 0xAA,
+    
+    /* Stack Setup: offset 70+18 = 88 */
+    /* XOR ESP, ESP (66 31 E4) */
     0x66, 0x31, 0xE4,
-    /* 9-11: MOV SP, 0xFFFE (BC FE FF) */
-    0xBC, 0xFE, 0xFF,
-    /* 12-14: XOR EBP, EBP (66 31 ED) */
+    /* MOV SP, 0xFFF0 (BC F0 FF) */
+    0xBC, 0xF0, 0xFF,
+    /* XOR EBP, EBP (66 31 ED) */
     0x66, 0x31, 0xED,
-    /* 15-16: PUSH 0 (6A 00) */
-    0x6A, 0x00, 
-    /* 17-19: CALL entry (E8 xx xx) */
-    0xE8, 0x00, 0x00, 
-    /* 20-23: EXIT (B4 4C CD 21) */
+    
+    /* Call Main */
+    /* PUSH 0 (6A 00) for argc/argv placeholder */
+    0x66, 0x6A, 0x00,
+    
+    /* CALL entry (66 E8 xx xx xx xx) - 32-bit call */
+    /* Offset 88+11 = 99. OpCode 66 E8. Operand at 101. */
+    0x66, 0xE8, 0x00, 0x00, 0x00, 0x00,
+    
+    /* EXIT (B4 4C CD 21) */
     0xB4, 0x4C, 0xCD, 0x21
 };
 #endif

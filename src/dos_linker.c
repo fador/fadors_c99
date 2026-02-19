@@ -160,7 +160,9 @@ static int dos_read_coff_object(DosLinker *l, const unsigned char *data, size_t 
         } else if (strcmp(sec_name, ".bss") == 0) {
             sec_base[i] = l->bss_size;
             sec_id[i] = SEC_BSS;
-            l->bss_size += shdrs[i].SizeOfRawData; /* Use RawDataSize for BSS in COFF usually? Or VirtualSize? */
+            uint32_t bss_sz = shdrs[i].VirtualSize;
+            if (bss_sz == 0) bss_sz = shdrs[i].SizeOfRawData;
+            l->bss_size += bss_sz;
         } else {
             sec_id[i] = SEC_UNDEF;
         }
@@ -337,16 +339,26 @@ int dos_linker_link(DosLinker *l, const char *output_path) {
     }
 
     if (text_base > sizeof(dos_stub) - 4) {
-        int patch_idx = sizeof(dos_stub) - 6;
-        int next_ip_offset = sizeof(dos_stub) - 4;
-        /* IP after CALL is next_ip_offset relative to start of stub (if loaded at 0) */
+        /* Patch BSS Init */
+        uint32_t bss_start_val = (uint32_t)bss_base;
+        uint32_t bss_size_val = (uint32_t)l->bss_size;
+        
+        memcpy(stub_copy + 72, &bss_start_val, 4);
+        memcpy(stub_copy + 78, &bss_size_val, 4);
+        
+        /* Patch Entry Call */
+        int patch_idx = 102;
+        int next_ip_offset = 106;
+        /* IP after CALL is next_ip_offset relative to start of stub */
         
         int32_t jmp_offset = (int32_t)(entry_addr - next_ip_offset);
         stub_copy[patch_idx] = jmp_offset & 0xFF;
         stub_copy[patch_idx + 1] = (jmp_offset >> 8) & 0xFF;
+        stub_copy[patch_idx + 2] = (jmp_offset >> 16) & 0xFF;
+        stub_copy[patch_idx + 3] = (jmp_offset >> 24) & 0xFF;
         
-        printf("DEBUG: Patching stub at offset %d with val %d (text_base=%lu, entry=%lu, next_ip=%d)\n", 
-               patch_idx, jmp_offset, text_base, entry_addr, next_ip_offset);
+        printf("DEBUG: Patching stub: Entry=%lu (off %d), BSS=%x (sz %d)\n", 
+               entry_addr, jmp_offset, bss_start_val, bss_size_val);
     }
     
     fwrite(stub_copy, 1, sizeof(dos_stub), f);

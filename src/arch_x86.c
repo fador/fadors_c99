@@ -232,6 +232,17 @@ static Operand *op_label(const char *label) {
     if (current_syntax == SYNTAX_INTEL && label[0] == '.') {
         op->data.label = label + 1;
     } else {
+    op->data.label = label;
+    }
+    return op;
+}
+
+static Operand *op_mem_label(const char *label) {
+    Operand *op = &_op_pool[_op_idx++ & 15];
+    op->type = OP_MEM_LABEL;
+    if (current_syntax == SYNTAX_INTEL && label[0] == '.') {
+        op->data.label = label + 1;
+    } else {
         op->data.label = label;
     }
     return op;
@@ -1457,6 +1468,9 @@ static void print_operand(Operand *op) {
     if (op->type == OP_REG) {
         if (current_syntax == SYNTAX_ATT) fprintf(out, "%%%s", op->data.reg);
         else fprintf(out, "%s", op->data.reg);
+    } else if (op->type == OP_MEM_LABEL) {
+        if (current_syntax == SYNTAX_ATT) fprintf(out, "%s", op->data.label);
+        else fprintf(out, "[%s]", op->data.label);
     } else if (op->type == OP_IMM) {
         if (current_syntax == SYNTAX_ATT) fprintf(out, "$%lld", op->data.imm);
         else fprintf(out, "%lld", op->data.imm);
@@ -2578,9 +2592,9 @@ static void gen_expression(ASTNode *node) {
         }
         
         if (node->resolved_type->kind == TYPE_FLOAT) {
-            emit_inst2("movss", op_label(label), op_reg("xmm0"));
+            emit_inst2("movss", op_mem_label(label), op_reg("xmm0"));
         } else {
-            emit_inst2("movsd", op_label(label), op_reg("xmm0"));
+            emit_inst2("movsd", op_mem_label(label), op_reg("xmm0"));
         }
         last_value_clear();
     } else if (node->type == AST_IDENTIFIER) {
@@ -2616,17 +2630,17 @@ static void gen_expression(ASTNode *node) {
             if (t && (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION)) {
                 emit_inst2("lea", op_label(label), op_reg("eax"));
             } else if (is_float_type(t)) {
-                if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_label(label), op_reg("xmm0"));
-                else emit_inst2("movsd", op_label(label), op_reg("xmm0"));
+                if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_mem_label(label), op_reg("xmm0"));
+                else emit_inst2("movsd", op_mem_label(label), op_reg("xmm0"));
             } else {
                 if (last_value_match_label(label, t)) {
                     node->resolved_type = t;
                     return;
                 }
-                if (t && t->size == 1) emit_inst2("movzbl", op_label(label), op_reg("eax"));
-                else if (t && t->size == 2) emit_inst2("movzwl", op_label(label), op_reg("eax"));
-                else if (t && t->size == 4) emit_inst2("movl", op_label(label), op_reg("eax"));
-                else emit_inst2("mov", op_label(label), op_reg("eax"));
+                if (t && t->size == 1) emit_inst2("movzbl", op_mem_label(label), op_reg("eax"));
+                else if (t && t->size == 2) emit_inst2("movzwl", op_mem_label(label), op_reg("eax"));
+                else if (t && t->size == 4) emit_inst2("movl", op_mem_label(label), op_reg("eax"));
+                else emit_inst2("mov", op_mem_label(label), op_reg("eax"));
             }
             node->resolved_type = t;
             if (last_value_can_track(t)) last_value_set_label(label, t);
@@ -2661,17 +2675,17 @@ static void gen_expression(ASTNode *node) {
             if (t && (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION)) {
                 emit_inst2("lea", op_label(node->data.identifier.name), op_reg("eax"));
             } else if (is_float_type(t)) {
-                if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_label(node->data.identifier.name), op_reg("xmm0"));
-                else emit_inst2("movsd", op_label(node->data.identifier.name), op_reg("xmm0"));
+                if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_mem_label(node->data.identifier.name), op_reg("xmm0"));
+                else emit_inst2("movsd", op_mem_label(node->data.identifier.name), op_reg("xmm0"));
             } else {
                 if (last_value_match_label(node->data.identifier.name, t)) {
                     node->resolved_type = t;
                     return;
                 }
-                if (t && t->size == 1) emit_inst2("movzbl", op_label(node->data.identifier.name), op_reg("eax"));
-                else if (t && t->size == 2) emit_inst2("movzwl", op_label(node->data.identifier.name), op_reg("eax"));
-                else if (t && t->size == 4) emit_inst2("movl", op_label(node->data.identifier.name), op_reg("eax"));
-                else emit_inst2("mov", op_label(node->data.identifier.name), op_reg("eax"));
+                if (t && t->size == 1) emit_inst2("movzbl", op_mem_label(node->data.identifier.name), op_reg("eax"));
+                else if (t && t->size == 2) emit_inst2("movzwl", op_mem_label(node->data.identifier.name), op_reg("eax"));
+                else if (t && t->size == 4) emit_inst2("movl", op_mem_label(node->data.identifier.name), op_reg("eax"));
+                else emit_inst2("mov", op_mem_label(node->data.identifier.name), op_reg("eax"));
             }
             node->resolved_type = t;
             if (last_value_can_track(t)) last_value_set_label(node->data.identifier.name, t);
@@ -2908,13 +2922,13 @@ static void gen_expression(ASTNode *node) {
             const char *label = get_local_label(ident_name);
             if (label) {
                 if (is_float_type(t)) {
-                    if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm0"), op_label(label));
-                    else emit_inst2("movsd", op_reg("xmm0"), op_label(label));
+                    if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm0"), op_mem_label(label));
+                    else emit_inst2("movsd", op_reg("xmm0"), op_mem_label(label));
                 } else {
-                    if (t && t->size == 1) emit_inst2("movb", op_reg("al"), op_label(label));
-                    else if (t && t->size == 2) emit_inst2("movw", op_reg("ax"), op_label(label));
-                    else if (t && t->size == 4) emit_inst2("movl", op_reg("eax"), op_label(label));
-                    else emit_inst2("mov", op_reg("eax"), op_label(label));
+                    if (t && t->size == 1) emit_inst2("movb", op_reg("al"), op_mem_label(label));
+                    else if (t && t->size == 2) emit_inst2("movw", op_reg("ax"), op_mem_label(label));
+                    else if (t && t->size == 4) emit_inst2("movl", op_reg("eax"), op_mem_label(label));
+                    else emit_inst2("mov", op_reg("eax"), op_mem_label(label));
                 }
                 if (!is_float_type(t)) last_value_set_label(label, t);
                 else last_value_clear();
@@ -2936,13 +2950,13 @@ static void gen_expression(ASTNode *node) {
             } else if (ident_name) {
                 // Global
                 if (is_float_type(t)) {
-                    if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm0"), op_label(ident_name));
-                    else emit_inst2("movsd", op_reg("xmm0"), op_label(ident_name));
+                    if (t && t->kind == TYPE_FLOAT) emit_inst2("movss", op_reg("xmm0"), op_mem_label(ident_name));
+                    else emit_inst2("movsd", op_reg("xmm0"), op_mem_label(ident_name));
                 } else {
-                    if (t && t->size == 1) emit_inst2("movb", op_reg("al"), op_label(ident_name));
-                    else if (t && t->size == 2) emit_inst2("movw", op_reg("ax"), op_label(ident_name));
-                    else if (t && t->size == 4) emit_inst2("movl", op_reg("eax"), op_label(ident_name));
-                    else emit_inst2("mov", op_reg("eax"), op_label(ident_name));
+                    if (t && t->size == 1) emit_inst2("movb", op_reg("al"), op_mem_label(ident_name));
+                    else if (t && t->size == 2) emit_inst2("movw", op_reg("ax"), op_mem_label(ident_name));
+                    else if (t && t->size == 4) emit_inst2("movl", op_reg("eax"), op_mem_label(ident_name));
+                    else emit_inst2("mov", op_reg("eax"), op_mem_label(ident_name));
                 }
                 if (!is_float_type(t)) last_value_set_label(ident_name, t);
                 else last_value_clear();
