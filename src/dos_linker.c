@@ -291,7 +291,9 @@ int dos_linker_link(DosLinker *l, const char *output_path) {
         if (r->type == 0x0006) {
             /* Absolute: S + A - 64 (MZ Header Size) */
             /* DOS loads the executable after the 64-byte header */
+            uint32_t old = val32;
             val32 += (uint32_t)sym_val - 64;
+            printf("DEBUG: DIR32 at %lx val %u -> %u sym %s\n", (long)(base_off + patch_offset), old, val32, l->symbols[r->sym_index].name);
             memcpy(buf + patch_offset, &val32, 4);
         }
         /* IMAGE_REL_I386_REL32 (0x0014) */

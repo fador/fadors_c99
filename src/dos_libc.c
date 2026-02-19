@@ -19,7 +19,7 @@ extern int _dos_rename(const char *old, const char *new);
 // -----------------------------------------------------------------------------
 // Memory Management (Static Heap)
 // -----------------------------------------------------------------------------
-#define HEAP_SIZE (16 * 1024) // 48KB heap
+#define HEAP_SIZE (8 * 1024) // 8KB heap
 static char heap_memory[HEAP_SIZE];
 static size_t heap_ptr = 0;
 
@@ -47,6 +47,7 @@ void *malloc(size_t size) {
     }
     
     BlockHeader *curr = free_list;
+    // printf("DEBUG: malloc %d, free_list=%x heap=%x\n", size, (int)free_list, (int)heap_memory);
     BlockHeader *prev = NULL;
     
     while (curr) {
@@ -134,6 +135,7 @@ FILE *fopen(const char *path, const char *mode) {
         handle = _dos_creat(path, 0); // Create Normal
     }
     
+    // printf("DEBUG: fopen handle=%d\n", handle);
     if (handle < 0) return NULL;
     
     // Find free FILE

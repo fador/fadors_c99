@@ -16,6 +16,7 @@ typedef struct {
     COFFWriter *writer;
     Buffer *current_section;
     int bitness;
+    int is_intel;
 } AsContext;
 
 static void skip_whitespace_on_line(AsContext *ctx) {
@@ -137,6 +138,7 @@ void assemble_line(AsContext *ctx) {
             ctx->bitness = 16;
             encoder_set_bitness(16);
         } else if (strcmp(token, ".intel_syntax") == 0) {
+            ctx->is_intel = 1;
             char *noprefix = get_token_on_line(ctx); if (noprefix) free(noprefix);
         } else if (strcmp(token, ".section") == 0) {
             char *name = get_token_on_line(ctx);
@@ -189,8 +191,13 @@ void assemble_line(AsContext *ctx) {
 
     if (op_count == 0) encode_inst0(ctx->current_section, mnemonic);
     else if (op_count == 1) encode_inst1(ctx->current_section, mnemonic, &o0);
-    else if (op_count == 2) encode_inst2(ctx->current_section, mnemonic, &o1, &o0);
-    else if (op_count == 3) encode_inst3(ctx->current_section, mnemonic, &o2, &o1, &o0);
+    else if (op_count == 2) {
+        if (ctx->is_intel) encode_inst2(ctx->current_section, mnemonic, &o1, &o0);
+        else encode_inst2(ctx->current_section, mnemonic, &o0, &o1);
+    } else if (op_count == 3) {
+        if (ctx->is_intel) encode_inst3(ctx->current_section, mnemonic, &o2, &o1, &o0);
+        else encode_inst3(ctx->current_section, mnemonic, &o0, &o1, &o2);
+    }
 
     free(mnemonic);
     if (op_count >= 1) free_op(&o0);
@@ -210,8 +217,9 @@ int assemble_file(const char *input_file, const char *output_file, TargetPlatfor
     input[size] = '\0';
     fclose(f);
 
-    AsContext ctx = {input, 0, target, malloc(sizeof(COFFWriter)), NULL, 32};
+    AsContext ctx = {input, 0, target, malloc(sizeof(COFFWriter)), NULL, 32, 0};
     coff_writer_init(ctx.writer);
+    if (target == TARGET_DOS) coff_writer_set_machine(ctx.writer, IMAGE_FILE_MACHINE_I386);
     ctx.current_section = &ctx.writer->text_section;
     encoder_set_writer(ctx.writer);
     encoder_set_bitness(32);
@@ -224,7 +232,6 @@ int assemble_file(const char *input_file, const char *output_file, TargetPlatfor
         }
     }
 
-    if (target == TARGET_DOS) coff_writer_set_machine(ctx.writer, IMAGE_FILE_MACHINE_I386);
     coff_writer_write(ctx.writer, output_file);
     free(input);
     return 0;

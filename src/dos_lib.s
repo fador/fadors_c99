@@ -172,15 +172,14 @@ printf_dec:
     push esi             /* Save format pointer */
     push ebx             /* Save arg pointer */
     
-    test eax, eax
-    jns pd_positive
-    /* Negative */
+    cmp eax, 0
+    jge pd_positive
+    neg eax
     push eax
     mov dl, '-'
     mov ah, 0x02
     int 0x21
     pop eax
-    neg eax
     
 pd_positive:
     test eax, eax
@@ -204,8 +203,11 @@ pd_print:
     pop edx
     add dl, '0'
     mov ah, 0x02
+    push ecx         /* Save count */
     int 0x21
-    loop pd_print
+    pop ecx          /* Restore count */
+    dec ecx
+    jnz pd_print
     
 pd_done:
     pop ebx              /* Restore arg pointer */
@@ -248,8 +250,11 @@ ph_alpha:
     add dl, 'a' - 10
 ph_do_print:
     mov ah, 0x02
+    push ecx         /* Save count */
     int 0x21
-    loop ph_print_loop
+    pop ecx          /* Restore count */
+    dec ecx
+    jnz ph_print_loop
     
 ph_done:
     pop ebx              /* Restore arg pointer */

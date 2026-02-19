@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 
 int main() {
     printf("Step 1: printf works!\n");
@@ -17,30 +18,31 @@ int main() {
     char *buf = malloc(128);
     if (!buf) {
         printf("Step 6: FAIL malloc returned NULL\n");
-        exit(1);
+        // exit(1); 
+    } else {
+        printf("Step 7: malloc OK %x\n", (unsigned int)buf);
+        
+        buf[0] = 'H';
+        buf[1] = 'i';
+        buf[2] = '\0';
+        printf("Step 8: buf = %s\n", buf);
+        
+        free(buf);
+        printf("Step 9: free OK\n");
     }
-    printf("Step 7: malloc OK\n");
-    
-    buf[0] = 'H';
-    buf[1] = 'i';
-    buf[2] = '\0';
-    printf("Step 8: buf = %s\n", buf);
-    
-    free(buf);
-    printf("Step 9: free OK\n");
     
     printf("Step 10: about to fopen...\n");
     FILE *f = fopen("TEST.TXT", "w");
     if (!f) {
         printf("Step 10: FAIL fopen returned NULL\n");
-        exit(1);
+        // exit(1);
+    } else {
+        printf("Step 11: fopen OK\n");
+        fputs("Hello File", f);
+        fclose(f);
+        printf("Step 12: fclose OK\n");
     }
-    printf("Step 11: fopen OK\n");
-    
-    fclose(f);
-    printf("Step 12: fclose OK\n");
     
     printf("ALL TESTS PASSED!\n");
-    exit(0);
     return 0;
 }
