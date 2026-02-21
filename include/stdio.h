@@ -3,7 +3,12 @@
 
 #include <stddef.h>
 
-typedef void FILE;
+typedef struct _FILE {
+    int handle;
+    int mode;
+    int error;
+    int eof;
+} FILE;
 
 #ifdef _WIN32
 extern FILE *__acrt_iob_func(int);

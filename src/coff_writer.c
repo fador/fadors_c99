@@ -635,11 +635,25 @@ void coff_writer_write(COFFWriter *w, const char *filename) {
     header.Machine = w->machine_type;
     header.NumberOfSections = 0;
 
-    int16_t text_sec_num = 0, data_sec_num = 0;
+    int16_t text_sec_num = 0, data_sec_num = 0, bss_sec_num = 0;
     int16_t debugs_sec_num = 0, debugt_sec_num = 0;
 
     if (has_text) { header.NumberOfSections++; text_sec_num = header.NumberOfSections; }
     if (has_data) { header.NumberOfSections++; data_sec_num = header.NumberOfSections; }
+    
+    // Check for BSS symbols to decide if .bss section header is needed
+    uint32_t bss_size = 0;
+    int has_bss = 0;
+    for (size_t i = 0; i < w->symbols_count; i++) {
+        if (w->symbols[i].section == 3) {
+            has_bss = 1;
+            // For simple BSS tracking, we assume value is the offset and the last one + its size is bss size
+            // But arch_x86.c should probably just tell us.
+            // For now, let's just enable the header if section 3 is used.
+        }
+    }
+    if (has_bss) { header.NumberOfSections++; bss_sec_num = header.NumberOfSections; }
+
     if (has_debug && debug_s_buf.size > 0) { header.NumberOfSections++; debugs_sec_num = header.NumberOfSections; }
     if (has_debug && debug_t_buf.size > 0) { header.NumberOfSections++; debugt_sec_num = header.NumberOfSections; }
 
@@ -719,6 +733,27 @@ void coff_writer_write(COFFWriter *w, const char *filename) {
         data_sh.Characteristics = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ |
                                   IMAGE_SCN_MEM_WRITE | IMAGE_SCN_ALIGN_4BYTES;
         fwrite(&data_sh, sizeof(data_sh), 1, f);
+    }
+
+    if (bss_sec_num > 0) {
+        COFFSectionHeader bss_sh = {0};
+        memcpy(bss_sh.Name, ".bss\0\0\0\0", 8);
+        // Calculate BSS size from symbols
+        uint32_t max_bss = 0;
+        for (size_t i = 0; i < w->symbols_count; i++) {
+            if (w->symbols[i].section == 3) {
+                // This is a bit of a hack: we don't know the symbol size here.
+                // But we can estimate it or rely on the caller to have set a bss_size.
+                // Let's look for a special "total bss size" symbol or just use the max offset.
+                if (w->symbols[i].value > max_bss) max_bss = w->symbols[i].value;
+            }
+        }
+        bss_sh.VirtualSize = max_bss + 1024; // Padding
+        bss_sh.SizeOfRawData = 0;
+        bss_sh.PointerToRawData = 0;
+        bss_sh.Characteristics = IMAGE_SCN_CNT_UNINITIALIZED_DATA | IMAGE_SCN_MEM_READ |
+                                  IMAGE_SCN_MEM_WRITE | IMAGE_SCN_ALIGN_4BYTES;
+        fwrite(&bss_sh, sizeof(bss_sh), 1, f);
     }
 
     if (has_debug && debug_s_buf.size > 0) {

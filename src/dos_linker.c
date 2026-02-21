@@ -295,7 +295,7 @@ int dos_linker_link(DosLinker *l, const char *output_path) {
             /* DOS loads the executable after the 64-byte header */
             uint32_t old = val32;
             val32 += (uint32_t)sym_val - 64;
-            printf("DEBUG: DIR32 at %lx val %u -> %u sym %s\n", (long)(base_off + patch_offset), old, val32, l->symbols[r->sym_index].name);
+            printf("DEBUG: FIXED_DIR32 at %lx val %u -> %u sym %s\n", (long)(base_off + patch_offset), old, val32, l->symbols[r->sym_index].name);
             memcpy(buf + patch_offset, &val32, 4);
         }
         /* IMAGE_REL_I386_REL32 (0x0014) */
@@ -319,7 +319,6 @@ int dos_linker_link(DosLinker *l, const char *output_path) {
     if (!f) return -1;
     
     /* Write MZ Stub */
-    /* Write MZ Stub */
     unsigned char *stub_copy = malloc(sizeof(dos_stub));
     memcpy(stub_copy, dos_stub, sizeof(dos_stub));
     
@@ -330,25 +329,29 @@ int dos_linker_link(DosLinker *l, const char *output_path) {
     /* Next IP is at sizeof(dos_stub) - 4 */
     
     uint64_t entry_addr = text_base;
-    int entry_idx = dos_find_global(l, l->entry_name);
+    int entry_idx = dos_find_global(l, "_start");
+    if (entry_idx < 0) {
+        entry_idx = dos_find_global(l, "main");
+    }
+
     if (entry_idx >= 0) {
         entry_addr = l->symbols[entry_idx].value;
-        printf("DEBUG: Found entry '%s' at %lu\n", l->entry_name, entry_addr);
+        printf("DEBUG: Found entry '%s' at %lu\n", l->symbols[entry_idx].name, entry_addr);
     } else {
-        printf("Warning: Entry point '%s' not found. Defaulting to start of text.\n", l->entry_name);
+        printf("Warning: Entry point '_start' or 'main' not found. Defaulting to start of text.\n");
     }
 
     if (text_base > sizeof(dos_stub) - 4) {
         /* Patch BSS Init */
-        uint32_t bss_start_val = (uint32_t)bss_base;
+        uint32_t bss_start_val = (uint32_t)bss_base - 64;
         uint32_t bss_size_val = (uint32_t)l->bss_size;
         
-        memcpy(stub_copy + 72, &bss_start_val, 4);
-        memcpy(stub_copy + 78, &bss_size_val, 4);
+        memcpy(stub_copy + 74, &bss_start_val, 4);
+        memcpy(stub_copy + 80, &bss_size_val, 4);
         
         /* Patch Entry Call */
-        int patch_idx = 102;
-        int next_ip_offset = 106;
+        int patch_idx = 104;
+        int next_ip_offset = 108;
         /* IP after CALL is next_ip_offset relative to start of stub */
         
         int32_t jmp_offset = (int32_t)(entry_addr - next_ip_offset);

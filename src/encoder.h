@@ -12,7 +12,8 @@ typedef enum {
     OP_MEM,
     OP_LABEL,
     OP_MEM_LABEL,
-    OP_MEM_SIB
+    OP_MEM_SIB,
+    OP_IMM_LABEL
 } OperandType;
 
 typedef struct {

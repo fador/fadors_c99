@@ -116,8 +116,6 @@ void dos_libc_init() {
     // No, heap_memory is static global.
     memset(heap_memory, 0, HEAP_SIZE);
     free_list = NULL;
-    
-    memset(file_pool, 0, sizeof(file_pool));
     _init_stdio();
 }
 
@@ -247,9 +245,10 @@ void perror(const char *s) { printf("%s: error\n", s); }
 // Strings & Formatting
 // -----------------------------------------------------------------------------
 // Minimal vsnprintf implementation
-static void num_to_str(char **out, size_t *rem, unsigned long val, int base) {
+static int num_to_str(char *out, size_t rem, unsigned long val, int base) {
     char buf[32];
     int i = 0;
+    int written = 0;
     if (val == 0) buf[i++] = '0';
     else {
         while (val) {
@@ -259,8 +258,16 @@ static void num_to_str(char **out, size_t *rem, unsigned long val, int base) {
         }
     }
     while (i > 0) {
-        if (*rem > 1) { *((*out)++) = buf[--i]; (*rem)--; } else { --i; }
+        if (rem > 1) { 
+            *out = buf[--i]; 
+            out++; 
+            rem--; 
+            written++;
+        } else { 
+            --i; 
+        }
     }
+    return written;
 }
 
 int vsnprintf(char *str, size_t size, const char *format, void *args) {
@@ -287,14 +294,18 @@ int vsnprintf(char *str, size_t size, const char *format, void *args) {
         f++;
         if (*f == 'd') {
             int v = NEXT_INT();
+            int w = 0;
             if (v < 0) { 
-                if (rem > 1) { *out++ = '-'; rem--; }
-                num_to_str(&out, &rem, -v, 10);
+                if (rem > 1) { *out++ = '-'; rem--; w++; }
+                int n = num_to_str(out, rem, -v, 10);
+                out += n; rem -= n;
             } else {
-                num_to_str(&out, &rem, v, 10);
+                int n = num_to_str(out, rem, v, 10);
+                out += n; rem -= n;
             }
         } else if (*f == 'x') {
-            num_to_str(&out, &rem, NEXT_INT(), 16);
+            int n = num_to_str(out, rem, NEXT_INT(), 16);
+            out += n; rem -= n;
         } else if (*f == 's') {
             char *s = NEXT_PTR();
             while (*s && rem > 1) { *out++ = *s++; rem--; }
@@ -310,28 +321,30 @@ int vsnprintf(char *str, size_t size, const char *format, void *args) {
 }
 
 int sprintf(char *str, const char *format, ...) {
-    va_list args;
-    va_start(args, format);
+    void *args = (void*)(&format + 1);
     int r = vsnprintf(str, 0xFFFF, format, args);
-    va_end(args);
     return r;
 }
 
 int fprintf(FILE *stream, const char *format, ...) {
     if (!stream) return 0;
-    char buf[1024];
-    va_list args;
-    va_start(args, format);
-    int r = vsnprintf(buf, sizeof(buf), format, args);
-    va_end(args);
+    static char buf[1024];
+    void *args = (void*)(&format + 1);
+    int r = vsnprintf(buf, 1024, format, args);
+    printf("DEBUG: vsnprintf = %d\r\n", r);
     return fwrite(buf, 1, r, stream);
 }
 
+int printf(const char *format, ...) {
+    static char buf[1024];
+    void *args = (void*)(&format + 1);
+    int r = vsnprintf(buf, 1024, format, args);
+    return fwrite(buf, 1, r, stdout);
+}
+
 int snprintf(char *str, size_t size, const char *format, ...) {
-    va_list args;
-    va_start(args, format);
+    void *args = (void*)(&format + 1);
     int r = vsnprintf(str, size, format, args);
-    va_end(args);
     return r;
 }
 

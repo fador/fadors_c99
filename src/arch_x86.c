@@ -35,7 +35,8 @@ static int pgo_alloc_probe(const char *name) {
 
 typedef enum {
     SECTION_TEXT,
-    SECTION_DATA
+    SECTION_DATA,
+    SECTION_BSS
 } Section;
 
 static FILE *out;
@@ -44,6 +45,7 @@ static ASTNode *current_program = NULL;
 static int label_count = 0;
 static CodegenSyntax current_syntax = SYNTAX_ATT;
 static Section current_section = SECTION_TEXT;
+static int g_bss_offset = 0;
 static Type *current_func_return_type = NULL;
 static char *current_func_name = NULL;
 static int static_label_count = 0;
@@ -237,6 +239,17 @@ static Operand *op_label(const char *label) {
     return op;
 }
 
+static Operand *op_imm_label(const char *label) {
+    Operand *op = &_op_pool[_op_idx++ & 15];
+    op->type = OP_IMM_LABEL;
+    if (current_syntax == SYNTAX_INTEL && label[0] == '.') {
+        op->data.label = label + 1;
+    } else {
+        op->data.label = label;
+    }
+    return op;
+}
+
 static Operand *op_mem_label(const char *label) {
     Operand *op = &_op_pool[_op_idx++ & 15];
     op->type = OP_MEM_LABEL;
@@ -418,6 +431,7 @@ void arch_x86_init(FILE *output) {
     if (out && !obj_writer && current_syntax == SYNTAX_INTEL) {
         fprintf(out, "_TEXT SEGMENT\n");
     }
+    g_bss_offset = 0;
 }
 
 void arch_x86_set_syntax(CodegenSyntax syntax) {
@@ -472,6 +486,9 @@ void arch_x86_set_target(TargetPlatform target) {
 void arch_x86_generate(ASTNode *program) {
     current_program = program;
     pgo_probe_count = 0; /* reset PGO probes for this compilation unit */
+    if (g_target == TARGET_DOS && out) {
+        fprintf(out, ".code16\n");
+    }
     for (size_t i = 0; i < program->children_count; i++) {
         ASTNode *child = program->children[i];
         if (child->type == AST_FUNCTION) {
@@ -1203,116 +1220,90 @@ static void gen_global_decl(ASTNode *node) {
         Section old_section = current_section;
         current_section = SECTION_DATA;
         
-        // Define symbol
-        uint32_t offset = (uint32_t)obj_writer->data_section.size;
-        int16_t section_num = 2; // .data
         uint8_t storage_class = node->data.var_decl.is_static ? IMAGE_SYM_CLASS_STATIC : IMAGE_SYM_CLASS_EXTERNAL;
-        
-        coff_writer_add_symbol(obj_writer, node->data.var_decl.name, offset, section_num, 0, storage_class);
-        
-        // Write initial value
+        int16_t section_num = 2; // Default to DATA
+        uint32_t offset = (uint32_t)obj_writer->data_section.size;
         int size = node->resolved_type ? node->resolved_type->size : 4;
         ASTNode *init_node = node->data.var_decl.initializer;
-        if (init_node && init_node->type == AST_INTEGER) {
-            int64_t val = (int64_t)init_node->data.integer.value;
-            buffer_write_bytes(&obj_writer->data_section, &val, size);
-        } else if (init_node && init_node->type == AST_FLOAT) {
-            double val = init_node->data.float_val.value;
-            if (size == 4) {
-                float f = (float)val;
-                buffer_write_bytes(&obj_writer->data_section, &f, 4);
-            } else {
-                buffer_write_bytes(&obj_writer->data_section, &val, 8);
-            }
-        } else if (init_node && init_node->type == AST_INIT_LIST) {
-            /* Array / struct initializer list: emit each element to .data */
-            int elem_size = 1;
-            if (node->resolved_type && node->resolved_type->kind == TYPE_ARRAY && node->resolved_type->data.ptr_to) {
-                elem_size = node->resolved_type->data.ptr_to->size;
-            }
-            size_t gi;
-            int total_written = 0;
-            for (gi = 0; gi < init_node->children_count; gi++) {
-                ASTNode *elem = init_node->children[gi];
-                if (elem && elem->type == AST_INTEGER) {
-                    if (elem_size == 1) {
-                        uint8_t b = (uint8_t)elem->data.integer.value;
-                        buffer_write_byte(&obj_writer->data_section, b);
-                    } else if (elem_size == 2) {
-                        uint16_t w = (uint16_t)elem->data.integer.value;
-                        buffer_write_word(&obj_writer->data_section, w);
-                    } else if (elem_size == 4) {
-                        int32_t d = (int32_t)elem->data.integer.value;
-                        buffer_write_dword(&obj_writer->data_section, (uint32_t)d);
-                    } else {
-                        int64_t q = (int64_t)elem->data.integer.value;
-                        buffer_write_qword(&obj_writer->data_section, (uint64_t)q);
-                    }
-                } else if (elem && elem->type == AST_FLOAT) {
-                    if (elem_size == 4) {
-                        float f = (float)elem->data.float_val.value;
-                        buffer_write_bytes(&obj_writer->data_section, &f, 4);
-                    } else {
-                        double d = elem->data.float_val.value;
-                        buffer_write_bytes(&obj_writer->data_section, &d, 8);
-                    }
-                } else if (elem && elem->type == AST_STRING) {
-                    /* String literal in init list: store string data and add relocation */
-                    char slabel[32];
-                    sprintf(slabel, ".LC%d", label_count++);
-                    int slen = elem->data.string.length;
-                    /* Emit the string data in .data section */
-                    /* We need to emit a placeholder and relocation, but since this
-                     * is a pointer within the same data section, we store the string
-                     * after all init list data, and record a self-relocation.
-                     * For now, emit the string into the string_literals table for 
-                     * deferred emission, and write a zero placeholder. */
-                    if (string_literals_count < 8192) {
-                        string_literals[string_literals_count].label = strdup(slabel);
-                        string_literals[string_literals_count].value = malloc(slen + 1);
-                        memcpy(string_literals[string_literals_count].value, elem->data.string.value, slen + 1);
-                        string_literals[string_literals_count].length = slen;
-                        string_literals_count++;
-                    }
-                    /* Write symbol and relocation for the string pointer */
-                    uint32_t sym_idx = coff_writer_add_symbol(obj_writer, slabel, 0, 0, 0, IMAGE_SYM_CLASS_EXTERNAL);
-                    uint32_t reloc_off = (uint32_t)obj_writer->data_section.size;
-                    coff_writer_add_reloc(obj_writer, reloc_off, sym_idx, 1, 2); // Type 1 for 32-bit absolute, Type 2 for 64-bit absolute
-                    uint64_t zero = 0;
-                    buffer_write_bytes(&obj_writer->data_section, &zero, g_ptr_size);
-                } else {
-                    /* Unknown element — zero fill */
-                    int zi; for (zi = 0; zi < elem_size; zi++)
-                        buffer_write_byte(&obj_writer->data_section, 0);
-                }
-                total_written += elem_size;
-            }
-            /* Zero-fill remaining bytes if array larger than init list */
-            while (total_written < size) {
-                buffer_write_byte(&obj_writer->data_section, 0);
-                total_written++;
-            }
+
+        if (!init_node) {
+            // Uninitialized global: switch to BSS
+            current_section = SECTION_BSS;
+            section_num = 3;
+        }
+
+        if (section_num == 3) {
+            // Define symbol in BSS
+            coff_writer_add_symbol(obj_writer, node->data.var_decl.name, (uint32_t)g_bss_offset, 3, 0, storage_class);
+            g_bss_offset += size;
         } else {
-            ASTNode *init = node->data.var_decl.initializer;
-            int handled = 0;
-            if (init && init->type == AST_ADDR_OF) {
-                 ASTNode *target = init->data.unary.expression;
-                 if (target && target->type == AST_IDENTIFIER) {
-                     char *target_name = target->data.identifier.name;
-                     int16_t target_section_num = 0;
-                     uint8_t target_storage_class = IMAGE_SYM_CLASS_EXTERNAL;
-                     uint32_t sym_idx = coff_writer_add_symbol(obj_writer, target_name, 0, target_section_num, 0, target_storage_class);
-                     uint32_t reloc_offset = (uint32_t)obj_writer->data_section.size;
-                     coff_writer_add_reloc(obj_writer, reloc_offset, sym_idx, 1, 2); // Type 1 for 32-bit absolute, Type 2 for 64-bit absolute
-                     uint64_t zero = 0;
-                     buffer_write_bytes(&obj_writer->data_section, &zero, g_ptr_size);
-                     handled = 1;
-                 }
-            }
-            if (!handled) {
-                // Write 'size' zero bytes for uninitialized / default-zero global data
-                for (int zi = 0; zi < size; zi++) {
-                    buffer_write_byte(&obj_writer->data_section, 0);
+            // Define symbol in DATA
+            coff_writer_add_symbol(obj_writer, node->data.var_decl.name, offset, 2, 0, storage_class);
+            
+            if (init_node && init_node->type == AST_INTEGER) {
+                int64_t val = (int64_t)init_node->data.integer.value;
+                buffer_write_bytes(&obj_writer->data_section, &val, size);
+            } else if (init_node && init_node->type == AST_FLOAT) {
+                double val = init_node->data.float_val.value;
+                if (size == 4) {
+                    float f = (float)val;
+                    buffer_write_bytes(&obj_writer->data_section, &f, 4);
+                } else {
+                    buffer_write_bytes(&obj_writer->data_section, &val, 8);
+                }
+            } else if (init_node && init_node->type == AST_INIT_LIST) {
+                /* ... same as before ... */
+                int elem_size = 1;
+                if (node->resolved_type && node->resolved_type->kind == TYPE_ARRAY && node->resolved_type->data.ptr_to) {
+                    elem_size = node->resolved_type->data.ptr_to->size;
+                }
+                size_t gi;
+                int total_written = 0;
+                for (gi = 0; gi < init_node->children_count; gi++) {
+                    ASTNode *elem = init_node->children[gi];
+                    if (elem && elem->type == AST_INTEGER) {
+                        if (elem_size == 1) { uint8_t b = (uint8_t)elem->data.integer.value; buffer_write_byte(&obj_writer->data_section, b); }
+                        else if (elem_size == 2) { uint16_t w = (uint16_t)elem->data.integer.value; buffer_write_word(&obj_writer->data_section, w); }
+                        else if (elem_size == 4) { int32_t d = (int32_t)elem->data.integer.value; buffer_write_dword(&obj_writer->data_section, (uint32_t)d); }
+                        else { int64_t q = (int64_t)elem->data.integer.value; buffer_write_qword(&obj_writer->data_section, (uint64_t)q); }
+                    } else if (elem && elem->type == AST_FLOAT) {
+                        if (elem_size == 4) { float f = (float)elem->data.float_val.value; buffer_write_bytes(&obj_writer->data_section, &f, 4); }
+                        else { double d = elem->data.float_val.value; buffer_write_bytes(&obj_writer->data_section, &d, 8); }
+                    } else if (elem && elem->type == AST_STRING) {
+                        char slabel[32]; sprintf(slabel, ".LC%d", label_count++); int slen = elem->data.string.length;
+                        if (string_literals_count < 8192) {
+                            string_literals[string_literals_count].label = strdup(slabel);
+                            string_literals[string_literals_count].value = malloc(slen + 1);
+                            memcpy(string_literals[string_literals_count].value, elem->data.string.value, slen + 1);
+                            string_literals[string_literals_count].length = slen;
+                            string_literals_count++;
+                        }
+                        uint32_t sym_idx = coff_writer_add_symbol(obj_writer, slabel, 0, 0, 0, IMAGE_SYM_CLASS_EXTERNAL);
+                        uint32_t reloc_off = (uint32_t)obj_writer->data_section.size;
+                        coff_writer_add_reloc(obj_writer, reloc_off, sym_idx, 1, 2);
+                        uint64_t zero = 0; buffer_write_bytes(&obj_writer->data_section, &zero, g_ptr_size);
+                    } else {
+                        int zi; for (zi = 0; zi < elem_size; zi++) buffer_write_byte(&obj_writer->data_section, 0);
+                    }
+                    total_written += elem_size;
+                }
+                while (total_written < size) { buffer_write_byte(&obj_writer->data_section, 0); total_written++; }
+            } else {
+                ASTNode *init = node->data.var_decl.initializer;
+                int handled = 0;
+                if (init && init->type == AST_ADDR_OF) {
+                     ASTNode *target = init->data.unary.expression;
+                     if (target && target->type == AST_IDENTIFIER) {
+                         char *target_name = target->data.identifier.name;
+                         uint32_t sym_idx = coff_writer_add_symbol(obj_writer, target_name, 0, 0, 0, IMAGE_SYM_CLASS_EXTERNAL);
+                         uint32_t reloc_offset = (uint32_t)obj_writer->data_section.size;
+                         coff_writer_add_reloc(obj_writer, reloc_offset, sym_idx, 1, 2);
+                         uint64_t zero = 0; buffer_write_bytes(&obj_writer->data_section, &zero, g_ptr_size);
+                         handled = 1;
+                     }
+                }
+                if (!handled) {
+                    for (int zi = 0; zi < size; zi++) buffer_write_byte(&obj_writer->data_section, 0);
                 }
             }
         }
@@ -1488,6 +1479,10 @@ static void print_operand(Operand *op) {
         const char *lbl = op->data.label ? op->data.label : "null_label";
         if (current_syntax == SYNTAX_ATT) fprintf(out, "%s", lbl);
         else fprintf(out, "[%s]", lbl);
+    } else if (op->type == OP_IMM_LABEL) {
+        const char *lbl = op->data.label ? op->data.label : "null_label";
+        if (current_syntax == SYNTAX_ATT) fprintf(out, "$%s", lbl);
+        else fprintf(out, "%s", lbl);
     } else if (op->type == OP_MEM_SIB) {
         /* SIB addressing: disp(base, index, scale) in AT&T; [base + index*scale + disp] in Intel */
         if (current_syntax == SYNTAX_ATT) {
@@ -2062,7 +2057,10 @@ static void gen_addr(ASTNode *node) {
     if (node->type == AST_IDENTIFIER) {
         const char *label = get_local_label(node->data.identifier.name);
         if (label) {
-            emit_inst2("lea", op_label(label), op_reg("eax"));
+            if (g_target == TARGET_DOS)
+                emit_inst2("mov", op_imm_label(label), op_reg("eax"));
+            else
+                emit_inst2("lea", op_label(label), op_reg("eax"));
             node->resolved_type = type_ptr(get_local_type(node->data.identifier.name));
             return;
         }
@@ -2072,7 +2070,10 @@ static void gen_addr(ASTNode *node) {
             node->resolved_type = type_ptr(get_local_type(node->data.identifier.name));
         } else {
             // Global
-            emit_inst2("lea", op_label(node->data.identifier.name), op_reg("eax"));
+            if (g_target == TARGET_DOS)
+                emit_inst2("mov", op_imm_label(node->data.identifier.name), op_reg("eax"));
+            else
+                emit_inst2("lea", op_label(node->data.identifier.name), op_reg("eax"));
             node->resolved_type = type_ptr(get_global_type(node->data.identifier.name));
         }
     } else if (node->type == AST_DEREF) {
@@ -2628,7 +2629,10 @@ static void gen_expression(ASTNode *node) {
         if (label) {
             Type *t = get_local_type(node->data.identifier.name);
             if (t && (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION)) {
-                emit_inst2("lea", op_label(label), op_reg("eax"));
+                if (g_target == TARGET_DOS)
+                    emit_inst2("mov", op_imm_label(label), op_reg("eax"));
+                else
+                    emit_inst2("lea", op_label(label), op_reg("eax"));
             } else if (is_float_type(t)) {
                 if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_mem_label(label), op_reg("xmm0"));
                 else emit_inst2("movsd", op_mem_label(label), op_reg("xmm0"));
@@ -2673,7 +2677,10 @@ static void gen_expression(ASTNode *node) {
             // Global
             Type *t = get_global_type(node->data.identifier.name);
             if (t && (t->kind == TYPE_ARRAY || t->kind == TYPE_STRUCT || t->kind == TYPE_UNION)) {
-                emit_inst2("lea", op_label(node->data.identifier.name), op_reg("eax"));
+                if (g_target == TARGET_DOS)
+                    emit_inst2("mov", op_imm_label(node->data.identifier.name), op_reg("eax"));
+                else
+                    emit_inst2("lea", op_label(node->data.identifier.name), op_reg("eax"));
             } else if (is_float_type(t)) {
                 if (t->kind == TYPE_FLOAT) emit_inst2("movss", op_mem_label(node->data.identifier.name), op_reg("xmm0"));
                 else emit_inst2("movsd", op_mem_label(node->data.identifier.name), op_reg("xmm0"));
@@ -3155,7 +3162,7 @@ static void gen_expression(ASTNode *node) {
             emit_inst2("sub", op_imm(shadow), op_reg("esp"));
         }
         // System V ABI: set al to number of vector (XMM) args for variadic functions
-        if (!g_use_shadow_space) {
+        if (!g_use_shadow_space && g_target != TARGET_DOS) {
             int xmm_count = 0;
             for (int i = 0; i < num_args && i < max_reg; i++) {
                 Type *at = get_expr_type(node->children[i]);
@@ -3235,7 +3242,10 @@ static void gen_expression(ASTNode *node) {
         }
         
         // Load address of the string
-        emit_inst2("lea", op_label(label), op_reg("eax"));
+        if (g_target == TARGET_DOS)
+            emit_inst2("mov", op_imm_label(label), op_reg("eax"));
+        else
+            emit_inst2("lea", op_label(label), op_reg("eax"));
         last_value_clear();
     }
 }

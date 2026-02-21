@@ -80,6 +80,19 @@ static void parse_op(AsContext *ctx, Operand *op) {
         }
         while (ctx->input[ctx->pos] && ctx->input[ctx->pos] != ']' && ctx->input[ctx->pos] != '\n') ctx->pos++;
         if (ctx->input[ctx->pos] == ']') ctx->pos++;
+    } else if (ctx->input[ctx->pos] == '$') {
+        ctx->pos++;
+        if (isdigit(ctx->input[ctx->pos]) || ctx->input[ctx->pos] == '-') {
+            op->type = OP_IMM;
+            char *imm_str = get_token_on_line(ctx);
+            if (imm_str) { op->data.imm = strtoll(imm_str, NULL, 0); free(imm_str); }
+        } else {
+            char *name = get_token_on_line(ctx);
+            if (name) {
+                op->type = OP_IMM_LABEL;
+                op->data.label = name;
+            }
+        }
     } else if (isdigit(ctx->input[ctx->pos]) || ctx->input[ctx->pos] == '-' || ctx->input[ctx->pos] == '\'') {
         op->type = OP_IMM;
         if (ctx->input[ctx->pos] == '\'') {

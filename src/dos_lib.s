@@ -5,6 +5,21 @@
 .global puts
 .global putchar
 .global exit
+.global _start
+
+/* -----------------------------------------------------------------------------
+   _start()
+     The real entry point called by the DOS stub.
+   ----------------------------------------------------------------------------- */
+_start:
+    /* Call C library initialization (stdout, malloc, etc.) */
+    call dos_libc_init
+    /* Call main() */
+    call main
+    /* Exit with EAX as status code */
+    push eax
+    call exit
+    hlt
 
 /* -----------------------------------------------------------------------------
    exit(int status)
@@ -294,7 +309,7 @@ _dos_open:
     mov ah, 0x3D        /* DOS Open File */
     int 0x21
     jc dos_open_err
-    movzx eax, ax
+    .byte 0x66, 0x0f, 0xb7, 0xc0
     jmp dos_open_ok
 dos_open_err:
     mov eax, -1
@@ -315,7 +330,7 @@ _dos_creat:
     mov ah, 0x3C        /* DOS Create File */
     int 0x21
     jc dos_creat_err
-    movzx eax, ax
+    .byte 0x66, 0x0f, 0xb7, 0xc0
     jmp dos_creat_ok
 dos_creat_err:
     mov eax, -1
@@ -337,7 +352,7 @@ _dos_read:
     mov ah, 0x3F        /* DOS Read File */
     int 0x21
     jc dos_read_err
-    movzx eax, ax
+    .byte 0x66, 0x0f, 0xb7, 0xc0
     jmp dos_read_ok
 dos_read_err:
     mov eax, -1
@@ -359,7 +374,7 @@ _dos_write:
     mov ah, 0x40        /* DOS Write File */
     int 0x21
     jc dos_write_err
-    movzx eax, ax
+    .byte 0x66, 0x0f, 0xb7, 0xc0
     jmp dos_write_ok
 dos_write_err:
     mov eax, -1
